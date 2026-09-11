@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "name": "dl_functional",
+      "purpose": "SimX functional smoke tests",
+      "xlen": [32, 64],
+      "shape": {
+        "clusters": 1,
+        "cores": 1,
+        "warps": 4,
+        "threads": 4,
+        "l2cache": false,
+        "l3cache": false
+      },
+      "configs": [
+        "-DVX_CFG_EXT_A_ENABLE",
+        "-DVX_CFG_EXT_TCU_ENABLE",
+        "-DVX_CFG_TCU_FP16_ENABLE"
+      ]
+    },
+    {
+      "name": "dl_rtl",
+      "purpose": "rtlsim parity and performance tests",
+      "xlen": [32, 64],
+      "shape": {
+        "clusters": 1,
+        "cores": 4,
+        "warps": 8,
+        "threads": 16,
+        "l2cache": true,
+        "l3cache": false
+      },
+      "configs": [
+        "-DVX_CFG_EXT_A_ENABLE",
+        "-DVX_CFG_EXT_TCU_ENABLE",
+        "-DVX_CFG_EXT_DXA_ENABLE",
+        "-DVX_CFG_TCU_FP16_ENABLE",
+        "-DVX_CFG_TCU_INT8_ENABLE"
+      ]
+    },
+    {
+      "name": "dl_fpga",
+      "purpose": "XRT integration; resource sizing must be checked per board",
+      "xlen": [64],
+      "shape": {
+        "clusters": 1,
+        "cores": 4,
+        "warps": 8,
+        "threads": 16,
+        "l2cache": true,
+        "l3cache": false
+      },
+      "configs": [
+        "-DVX_CFG_EXT_A_ENABLE",
+        "-DVX_CFG_EXT_TCU_ENABLE",
+        "-DVX_CFG_EXT_DXA_ENABLE",
+        "-DVX_CFG_TCU_FP16_ENABLE",
+        "-DVX_CFG_TCU_TF32_ENABLE"
+      ]
+    }
+  ]
+}
