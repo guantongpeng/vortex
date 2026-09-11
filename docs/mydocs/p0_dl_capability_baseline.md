@@ -41,8 +41,32 @@ python3 -m json.tool dl_capabilities.json
 
 ## 当前验证结果与阻断
 
-2026-09-11：已执行 RV32/RV64 configure，并初始化仓库固定 submodule。`sw/runtime/stub` 和 `tests/runtime/dl_capabilities` 在两个 XLEN 的默认配置下均编译成功。完整 `make -s` 在构建 Ramulator 2.0 时需要从 GitHub 获取 `yaml-cpp`，当前环境网络不可达，因此尚未能构建 SimX backend 或运行该工具。失败位置为 `third_party/ramulator/CMakeLists.txt:40 FetchContent_MakeAvailable(yaml-cpp)`；这不是 capability 工具的编译失败。待 `yaml-cpp` 可用或预构建 Ramulator 安装后，必须按上面的命令补跑，并把 JSON 和 SimX/rtlsim/HIP 基线结果加入本记录。
+2026-09-11（晚）：网络恢复后重跑 Ramulator FetchContent（yaml-cpp、spdlog 等全部成功），`make -C sim simx` 与 `make -C sw/runtime simx` 完成，SimX 后端首次可运行。`make -C tests/runtime run-simx` 全套通过（exit 0），包括 test_basic、test_async（8 个子用例）、test_async_free、test_timeline_events、test_module_kernel（含真实 `kernel.vxbin` 的 load/launch/refcount）和 dl_capabilities。
+
+dl_capabilities 在 build_dl64（1 core/4 warps/4 threads 默认档）的实际输出：
+
+```json
+{
+  "device_count": 1,
+  "capabilities": {
+    "num_threads": 4,
+    "num_warps": 4,
+    "num_cores": 1,
+    "global_mem_size": 8589934592,
+    "local_mem_size": 16384,
+    "isa_flags": 221200257320,
+    "cp_num_queues": 1,
+    "cp_ring_size_log2": 16,
+    "cp_axi_tid_width": 6,
+    "cp_supports_draw": 1,
+    "cp_supports_qmd": 1,
+    "cp_mmu_fault_report": 1
+  }
+}
+```
+
+（完整字段还包括 cache_line_size、num_mem_banks、mem_bank_size、num_clusters、socket_size、issue_width、clock_rate_mhz=400、peak_mem_bw_mb_s=460000、vm_support=0。）
 
 ## P0.2 完成判定
 
-代码和 Makefile 已完成，RV32/RV64 host 编译通过；节点在 SimX/rtlsim 上的完成状态保持“待依赖解除后验证”，不提前标记为通过。下一节点不能依赖一个未实际运行的 capability 字段。
+SimX 运行验证已补做并通过：JSON 可解析、所有 capability 查询成功、设备句柄正常释放。rtlsim parity 与 FPGA 档的运行仍属后续节点（dl_rtl/dl_fpga profile），不在本节点范围内。

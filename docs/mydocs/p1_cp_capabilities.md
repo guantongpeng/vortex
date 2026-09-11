@@ -32,3 +32,7 @@ VORTEX_DRIVER=simx LD_LIBRARY_PATH=$PWD/sw/runtime \
 ```
 
 当前环境仍因 Ramulator 构建所需的 `yaml-cpp` 无法下载而不能启动 SimX；本节点的 host 编译和符号链接验证应先通过，SimX/rtlsim 数值验证在依赖恢复后补做。CP capability 不应在上层以配置宏复制一份。
+
+## 2026-09-11 补充验证
+
+网络恢复后 SimX 后端构建成功，`make -C tests/runtime run-simx` 中 `test_basic` 的 CP capability 断言（queues 与 ring_log2 非零）在真实设备路径上通过。`dl_capabilities` 实际输出 `cp_num_queues=1`、`cp_ring_size_log2=16`、`cp_axi_tid_width=6`、DRAW/QMD/MMU-fault-report 均为 1，与 CP register 0x008 的解码一致。上层（HIP stream、Triton driver）应以这些查询值为准；单队列是当前默认配置的事实，不代表 ABI 上限。

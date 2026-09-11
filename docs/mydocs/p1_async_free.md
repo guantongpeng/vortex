@@ -49,3 +49,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only \
 ```
 
 完整 SimX 运行还依赖 Ramulator 的 `yaml-cpp`，当前环境的外部下载不可达；因此提交时应分别记录“host 编译通过”和“后端运行待依赖解除”，不能把未运行标成 PASS。运行恢复后必须再测：同 queue FIFO、跨 queue wait-list、free 后地址不可重用到旧命令、超时/错误传播。
+
+## 2026-09-11 补充验证
+
+网络恢复后 SimX 后端构建成功，`make -C tests/runtime run-simx` 中 `test_async_free` 在真实 SimX 设备路径上 PASSED（worker 运行前释放调用者引用、retained reference 驱动最终 `mem_free` 的语义成立）。跨 stream wait-list 与并发多 queue 场景在 `test_async`（8 个子用例，含 concurrent_queues、user_event_gated_enqueue）中一并通过。

@@ -45,6 +45,10 @@ python3 -m py_compile sw/kernel/scripts/vxbin.py
 ./ci/blackbox.sh --driver=simx --app=test_module_kernel
 ```
 
+## 2026-09-11 补充验证
+
+网络恢复后 SimX 后端构建成功。`make -C tests/regression/basic kernel.vxbin` 生成真实镜像后，`make -C tests/runtime run-simx` 中的 `test_module_kernel` 全部子用例通过：`test_module_load_file`、`test_module_load_bytes`、refcount，以及此前被跳过的 `test_launch_via_kernel_handle`（通过 `VX_TEST_VXBIN` 指向真实 `kernel.vxbin` 完成实际 launch）。元数据尾部解析与无 footer 回退路径均在实际设备路径上验证。
+
 ## 后续工作
 
 1. 在 LLVM/Vortex kernel 编译器中产出 sidecar 字段并加入能力校验（设备 ISA、TCU/DXA、LMEM 上限）。
