@@ -690,6 +690,8 @@ public:
                                     const void* pattern, size_t pattern_size,
                                     uint32_t nw, const vx_event_h* w,
                                     vx_event_h* out);
+    vx_result_t enqueue_free        (Buffer* buf, uint32_t nw,
+                                    const vx_event_h* w, vx_event_h* out);
     vx_result_t enqueue_map        (Buffer* buf, uint64_t offset, uint64_t size,
                                     uint32_t flags, uint32_t nw,
                                     const vx_event_h* w, vx_event_h* out,

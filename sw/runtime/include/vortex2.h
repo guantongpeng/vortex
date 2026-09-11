@@ -462,6 +462,14 @@ vx_result_t vx_enqueue_fill_buffer(vx_queue_h q,
                                    const vx_event_h* wait_events,
                                    vx_event_h*       out_event);
 
+// Queue-ordered buffer release. The buffer remains alive until all prior
+// commands in `q` and the supplied wait list have completed. This is the
+// primitive used by stream-ordered allocators such as HIP hipFreeAsync.
+vx_result_t vx_enqueue_free        (vx_queue_h q, vx_buffer_h buf,
+                                    uint32_t          n_wait_events,
+                                    const vx_event_h* wait_events,
+                                    vx_event_h*       out_event);
+
 // Async buffer map / unmap. vx_enqueue_map allocates a host-accessible
 // staging region and returns its pointer synchronously in *out_host_ptr;
 // once the wait list resolves the worker populates it from the device

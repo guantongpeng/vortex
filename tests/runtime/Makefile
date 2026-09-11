@@ -22,7 +22,7 @@ CXXFLAGS += $(XCONFIGS)
 
 LDFLAGS += -Wl,-rpath,$(RT_DIR) -L$(RT_DIR) -lvortex -pthread
 
-TESTS := test_basic test_async test_timeline_events test_module_kernel test_rect_fill dl_capabilities
+TESTS := test_basic test_async test_async_free test_timeline_events test_module_kernel test_rect_fill dl_capabilities
 
 .PHONY: all run run-simx run-xrt clean
 
@@ -32,6 +32,9 @@ test_basic: $(VORTEX_HOME)/tests/runtime/test_basic.cpp
 	$(CXX) $(CXXFLAGS) $< $(LDFLAGS) -o $@
 
 test_async: $(VORTEX_HOME)/tests/runtime/test_async.cpp
+	$(CXX) $(CXXFLAGS) $< $(LDFLAGS) -o $@
+
+test_async_free: $(VORTEX_HOME)/tests/runtime/test_async_free.cpp
 	$(CXX) $(CXXFLAGS) $< $(LDFLAGS) -o $@
 
 test_timeline_events: $(VORTEX_HOME)/tests/runtime/test_timeline_events.cpp

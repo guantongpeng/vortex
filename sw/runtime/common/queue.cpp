@@ -1124,6 +1124,28 @@ vx_result_t Queue::enqueue_fill_buffer(Buffer* dst, uint64_t offset,
     return rc;
 }
 
+vx_result_t Queue::enqueue_free(Buffer* buf, uint32_t nw,
+                                const vx_event_h* w, vx_event_h* out) {
+    if (!buf) return VX_ERR_INVALID_VALUE;
+
+    // Keep the allocation alive until this command reaches the worker. The
+    // caller can release its handle immediately after enqueueing the free;
+    // the retained reference defers Device::mem_free until all queue-order
+    // and explicit event dependencies have resolved.
+    buf->retain();
+    Command cmd;
+    cmd.queued_ns = now_ns();
+    cmd.work = [buf](uint64_t* s, uint64_t* e) {
+        *s = now_ns();
+        buf->release();
+        *e = now_ns();
+        return VX_SUCCESS;
+    };
+    auto r = this->enqueue(std::move(cmd), nw, w, out);
+    if (r != VX_SUCCESS) buf->release();
+    return r;
+}
+
 vx_result_t Queue::enqueue_map(Buffer* buf, uint64_t offset, uint64_t size,
                                uint32_t flags, uint32_t nw,
                                const vx_event_h* w, vx_event_h* out,
@@ -1428,6 +1450,16 @@ extern "C" vx_result_t vx_enqueue_fill_buffer(vx_queue_h q, vx_buffer_h dst,
     if (!q || !dst) return VX_ERR_INVALID_HANDLE;
     return to_queue(q)->enqueue_fill_buffer(to_buffer(dst), offset, size,
                                             pattern, pattern_size, nw, w, out);
+    VX_C_ENTRY_CATCH
+}
+
+extern "C" vx_result_t vx_enqueue_free(vx_queue_h q, vx_buffer_h buf,
+                                        uint32_t nw, const vx_event_h* w,
+                                        vx_event_h* out) {
+    VX_C_ENTRY_TRY
+    if (!q) return VX_ERR_INVALID_HANDLE;
+    if (!buf) return VX_ERR_INVALID_HANDLE;
+    return to_queue(q)->enqueue_free(to_buffer(buf), nw, w, out);
     VX_C_ENTRY_CATCH
 }
 
