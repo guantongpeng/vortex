@@ -31,6 +31,11 @@ graphics:
 mpi:
 	$(MAKE) -C mpi
 
+# native HIP (hipcc-vortex) tests: need a TOOLDIR with llvm-vortex,
+# riscv sysroots, picolibc + compiler-rt (probed by ci/hip_native_probe.py).
+hip_native:
+	$(MAKE) -C hip_native
+
 clean:
 	$(MAKE) -C unittest clean
 	$(MAKE) -C kernel clean
@@ -40,5 +45,6 @@ clean:
 	$(MAKE) -C hip clean
 	$(MAKE) -C graphics clean
 	$(MAKE) -C mpi clean
+	$(MAKE) -C hip_native clean
 
-.PHONY: all unittest kernel regression opencl riscv hip graphics mpi
+.PHONY: all unittest kernel regression opencl riscv hip hip_native graphics mpi

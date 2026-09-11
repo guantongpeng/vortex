@@ -48,6 +48,14 @@ def probe(root):
         "link64": os.path.isfile(os.path.join(kernel, "scripts", "link64.ld")),
     }
     hip_include = os.getenv("HIP_VORTEX_INCLUDE", "")
+    if "HIP_VORTEX_INCLUDE" not in os.environ:
+        # The repository ships the native HIP headers; use them unless
+        # HIP_VORTEX_INSTALL selects another installation (which then has
+        # to be valid — an explicit but broken path stays an error).
+        builtin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
+                                               "third_party", "hip-vortex", "include"))
+        if os.path.isfile(os.path.join(builtin, "hip", "hip_runtime.h")):
+            hip_include = builtin
     checks["hip_headers"] = bool(hip_include and os.path.isfile(os.path.join(hip_include, "hip", "hip_runtime.h")))
     return {
         "schema": 2,
