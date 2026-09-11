@@ -14,16 +14,34 @@ class HipNativeProbeTest(unittest.TestCase):
         result = probe_mod.probe("/path/that/does/not/exist")
         self.assertFalse(result["ready"])
         self.assertFalse(result["checks"]["clang"])
+        self.assertEqual(result["schema"], 2)
 
     def test_fake_toolchain_is_detected(self):
+        self._check_ready_with_sysroots(lambda root, xlen: os.path.join(root, f"riscv{xlen}-unknown-elf"))
+
+    def test_gcc_toolchain_sysroot_layout_is_detected(self):
+        # config.mk layout: riscv<N>-gnu-toolchain/riscv<N>-unknown-elf.
+        self._check_ready_with_sysroots(
+            lambda root, xlen: os.path.join(root, f"riscv{xlen}-gnu-toolchain", f"riscv{xlen}-unknown-elf"))
+
+    def test_paths_report_resolved_sysroots(self):
+        with tempfile.TemporaryDirectory() as root:
+            nested = os.path.join(root, "riscv64-gnu-toolchain", "riscv64-unknown-elf")
+            os.makedirs(nested)
+            result = probe_mod.probe(root)
+            self.assertEqual(result["paths"]["riscv64_sysroot"], nested)
+            self.assertIsNone(result["paths"]["riscv32_sysroot"])
+
+    def _check_ready_with_sysroots(self, sysroot_path):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as hip:
-            for rel in ("bin/clang++", "bin/ld.lld", "bin/llvm-objcopy", "riscv32-unknown-elf", "riscv64-unknown-elf"):
-                path = os.path.join(root, "llvm-vortex", rel) if rel.startswith("bin/") else os.path.join(root, rel)
-                if rel.startswith("bin/"):
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    open(path, "w").close()
-                else:
-                    os.makedirs(path)
+            for rel in ("bin/clang++", "bin/ld.lld", "bin/llvm-objcopy"):
+                path = os.path.join(root, "llvm-vortex", rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w").close()
+            for xlen in (32, 64):
+                os.makedirs(sysroot_path(root, xlen))
+                os.makedirs(os.path.join(root, f"libc{xlen}"))
+                os.makedirs(os.path.join(root, f"libcrt{xlen}"))
             os.makedirs(os.path.join(hip, "hip"))
             open(os.path.join(hip, "hip", "hip_runtime.h"), "w").close()
             old = os.environ.get("HIP_VORTEX_INCLUDE")
