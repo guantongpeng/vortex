@@ -98,12 +98,17 @@ hipError_t hipHostMalloc(void** ptr, size_t size, unsigned int flags);
 hipError_t hipHostFree(void* ptr);
 hipError_t hipMemcpy(void* dst, const void* src, size_t size, hipMemcpyKind kind);
 hipError_t hipMemset(void* dst, int value, size_t size);
+hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size,
+                          hipMemcpyKind kind, hipStream_t stream);
+hipError_t hipMemsetAsync(void* dst, int value, size_t size,
+                          hipStream_t stream);
 
 // ---- stream / event --------------------------------------------------------
 
 hipError_t hipStreamCreate(hipStream_t* stream);
 hipError_t hipStreamDestroy(hipStream_t stream);
 hipError_t hipStreamSynchronize(hipStream_t stream);
+hipError_t hipStreamWaitEvent(hipStream_t stream, hipEvent_t event);
 
 hipError_t hipEventCreate(hipEvent_t* event);
 hipError_t hipEventDestroy(hipEvent_t event);

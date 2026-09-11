@@ -317,9 +317,11 @@ hipError_t hipHostFree(void* ptr) {
     return RET_VX(r);
 }
 
-hipError_t hipMemcpy(void* dst, const void* src, size_t size, hipMemcpyKind kind) {
+// Enqueue (but do not wait for) a copy. Shared by hipMemcpy/hipMemcpyAsync.
+static hipError_t enqueue_memcpy(vx_queue_h q, void* dst, const void* src,
+                                 size_t size, hipMemcpyKind kind,
+                                 vx_event_h* out_ev) {
     if (!dst || !src) return RET(hipErrorInvalidValue);
-    if (size == 0) return hipSuccess;
 
     uint64_t dst_addr = (uint64_t)(uintptr_t)dst;
     uint64_t src_addr = (uint64_t)(uintptr_t)src;
@@ -342,32 +344,50 @@ hipError_t hipMemcpy(void* dst, const void* src, size_t size, hipMemcpyKind kind
                                   : hipMemcpyDeviceToHost;
     }
 
-    vx_event_h ev = nullptr;
-    vx_result_t r;
     if (kind == hipMemcpyDeviceToDevice) {
         const BufferRecord* d = find_buffer(dst_addr);
         const BufferRecord* s = find_buffer(src_addr);
         if (!d || !s) return RET(hipErrorInvalidResourceHandle);
-        r = vx_enqueue_copy(default_queue(), d->buf, 0, s->buf, 0,
-                            (uint64_t)size, 0, nullptr, &ev);
-    } else if (kind == hipMemcpyHostToDevice) {
+        return RET_VX(vx_enqueue_copy(q, d->buf, 0, s->buf, 0,
+                                       (uint64_t)size, 0, nullptr, out_ev));
+    }
+    if (kind == hipMemcpyHostToDevice) {
         const BufferRecord* d = find_buffer(dst_addr);
         if (!d) return RET(hipErrorInvalidResourceHandle);
-        r = vx_enqueue_write(default_queue(), d->buf, 0, src,
-                             (uint64_t)size, 0, nullptr, &ev);
-    } else if (kind == hipMemcpyDeviceToHost) {
+        return RET_VX(vx_enqueue_write(q, d->buf, 0, src,
+                                        (uint64_t)size, 0, nullptr, out_ev));
+    }
+    if (kind == hipMemcpyDeviceToHost) {
         const BufferRecord* s = find_buffer(src_addr);
         if (!s) return RET(hipErrorInvalidResourceHandle);
-        r = vx_enqueue_read(default_queue(), dst, s->buf, 0,
-                            (uint64_t)size, 0, nullptr, &ev);
-    } else {
-        memcpy(dst, src, size);
-        return hipSuccess;
+        return RET_VX(vx_enqueue_read(q, dst, s->buf, 0,
+                                       (uint64_t)size, 0, nullptr, out_ev));
     }
-    return wait_last(r, ev);
+    memcpy(dst, src, size);
+    return hipSuccess;
 }
 
-hipError_t hipMemset(void* dst, int value, size_t size) {
+hipError_t hipMemcpy(void* dst, const void* src, size_t size, hipMemcpyKind kind) {
+    if (size == 0) return hipSuccess;
+    vx_event_h ev = nullptr;
+    hipError_t e = enqueue_memcpy(default_queue(), dst, src, size, kind, &ev);
+    if (e != hipSuccess) return e;
+    return wait_last(VX_SUCCESS, ev);
+}
+
+hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size,
+                          hipMemcpyKind kind, hipStream_t stream) {
+    if (size == 0) return hipSuccess;
+    vx_event_h ev = nullptr;
+    hipError_t e = enqueue_memcpy(stream_queue(stream), dst, src, size,
+                                  kind, &ev);
+    if (ev) vx_event_release(ev);  // stream-ordered: caller syncs the stream
+    return e;
+}
+
+// Enqueue (but do not wait for) a fill. Shared by hipMemset/hipMemsetAsync.
+static hipError_t enqueue_memset(vx_queue_h q, void* dst, int value,
+                                 size_t size, vx_event_h* out_ev) {
     if (!dst) return RET(hipErrorInvalidValue);
     uint64_t addr = (uint64_t)(uintptr_t)dst;
     const BufferRecord* rec;
@@ -379,11 +399,23 @@ hipError_t hipMemset(void* dst, int value, size_t size) {
     }
     if (!rec) return RET(hipErrorInvalidResourceHandle);
     unsigned char pattern = (unsigned char)value;
+    return RET_VX(vx_enqueue_fill_buffer(q, rec->buf, 0, (uint64_t)size,
+                                          &pattern, 1, 0, nullptr, out_ev));
+}
+
+hipError_t hipMemset(void* dst, int value, size_t size) {
     vx_event_h ev = nullptr;
-    vx_result_t r = vx_enqueue_fill_buffer(default_queue(), rec->buf, 0,
-                                            (uint64_t)size, &pattern, 1,
-                                            0, nullptr, &ev);
-    return wait_last(r, ev);
+    hipError_t e = enqueue_memset(default_queue(), dst, value, size, &ev);
+    if (e != hipSuccess) return e;
+    return wait_last(VX_SUCCESS, ev);
+}
+
+hipError_t hipMemsetAsync(void* dst, int value, size_t size,
+                          hipStream_t stream) {
+    vx_event_h ev = nullptr;
+    hipError_t e = enqueue_memset(stream_queue(stream), dst, value, size, &ev);
+    if (ev) vx_event_release(ev);
+    return e;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +449,17 @@ hipError_t hipStreamDestroy(hipStream_t stream) {
 hipError_t hipStreamSynchronize(hipStream_t stream) {
     if (!g_device.initialized) return RET(hipErrorNotInitialized);
     return RET_VX(vx_queue_flush(stream_queue(stream)));
+}
+
+hipError_t hipStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
+    if (!event) return RET(hipErrorInvalidResourceHandle);
+    auto* ev = (EventState*)event;
+    if (ev->last_value == 0) return hipSuccess;  // never recorded: no-op
+    vx_event_h done = nullptr;
+    vx_result_t r = vx_enqueue_wait_value(stream_queue(stream), ev->ev,
+                                           ev->last_value, 0, nullptr, &done);
+    if (r == VX_SUCCESS && done) vx_event_release(done);
+    return RET_VX(r);
 }
 
 hipError_t hipEventCreate(hipEvent_t* event) {

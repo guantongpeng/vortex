@@ -35,6 +35,13 @@
 //   static __shared__ declarations: use hipVortexLocalMem(bytes) with a
 //     compile-time tile size (the legacy spawn model sizes local memory
 //     per kernel, not per launch).
+//   __syncthreads() for multi-warp blocks (hostless mode): the legacy
+//     spawn model addresses barriers by local_group_id, which is 0 for
+//     every group when blocks span multiple warps, and the spawn join
+//     uses the same barrier — measured outcomes range from deadlock to
+//     lost local-memory updates. Use single-warp blocks here, and the
+//     KMU path (hipcc --kernel-lib=vortex2 + host launch) for real
+//     multi-warp CTAs.
 //   hipStream/hipEvent semantics: the parameters exist for source
 //     compatibility but the hostless model has a single implicit stream.
 
@@ -384,7 +391,11 @@ static inline __device__ unsigned long long atomicAdd(unsigned long long* ptr,
 }
 
 static inline __device__ float atomicAdd(float* ptr, float val) {
-    // No hardware FP amo: CAS loop on the bit pattern.
+    // No hardware FP amo: CAS loop on the bit pattern. NOTE: without ZACAS
+    // the compare-exchange lowers to lr/sc, and lanes contending on the
+    // same address invalidate each other's reservations — measured
+    // livelock. Only use this when at most one lane per address contends,
+    // or on ZACAS-enabled hardware (true single-address CAS).
     uint32_t expected = (uint32_t)hip_vortex::detail::to_bits(*ptr);
     uint32_t assumed;
     do {
