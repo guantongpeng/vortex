@@ -343,6 +343,7 @@ vx_result_t Device::cp_init() {
                    "optional capabilities (no VM, no DRAW, no QMD).\n");
             dev_caps = 0;
         }
+        cp_dev_caps_ = dev_caps;
         vm_enabled_ = (dev_caps & (1u << 24)) != 0;
         // SUPPORTS_DRAW (bit 25): the CP decodes CMD_DRAW (OP_DRAW). When clear
         // (e.g. an RTL CP without the OP_DRAW mirror yet), vx_enqueue_draw falls
@@ -1199,6 +1200,12 @@ vx_result_t Device::query_caps(uint32_t caps_id, uint64_t* out_value) {
         *out_value = pinned_mem_ ? pinned_mem_->free() : 0;
         break;
     }
+    case VX_CAPS_CP_NUM_QUEUES:       *out_value = cp_dev_caps_ & 0xffu; break;
+    case VX_CAPS_CP_RING_SIZE_LOG2:   *out_value = (cp_dev_caps_ >> 8) & 0xffu; break;
+    case VX_CAPS_CP_AXI_TID_WIDTH:    *out_value = (cp_dev_caps_ >> 16) & 0xffu; break;
+    case VX_CAPS_CP_SUPPORTS_DRAW:    *out_value = (cp_dev_caps_ >> 25) & 0x1u; break;
+    case VX_CAPS_CP_SUPPORTS_QMD:     *out_value = (cp_dev_caps_ >> 26) & 0x1u; break;
+    case VX_CAPS_CP_MMU_FAULT_REPORT: *out_value = (cp_dev_caps_ >> 27) & 0x1u; break;
     default:                      return VX_ERR_INVALID_VALUE;
     }
     return VX_SUCCESS;

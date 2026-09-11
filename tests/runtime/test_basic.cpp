@@ -67,6 +67,18 @@ int main() {
     }
     printf("device caps VX_CFG_NUM_CORES = %lu\n", legacy_num_cores);
 
+    // CP capabilities are part of the public runtime contract. The queue
+    // count and ring size must be non-zero so an async frontend can size its
+    // submission state without guessing from build-time defaults.
+    uint64_t cp_queues = 0, cp_ring_log2 = 0;
+    CHECK_VX(vx_device_query(dev, VX_CAPS_CP_NUM_QUEUES, &cp_queues));
+    CHECK_VX(vx_device_query(dev, VX_CAPS_CP_RING_SIZE_LOG2, &cp_ring_log2));
+    if (cp_queues == 0 || cp_ring_log2 == 0) {
+        fprintf(stderr, "FAILED: invalid CP capabilities: queues=%lu ring_log2=%lu\n",
+                cp_queues, cp_ring_log2);
+        return 1;
+    }
+
     // Allocate a buffer via vortex.h; free via vortex2.h.
     vx_buffer_h buf = nullptr;
     CHECK(vx_mem_alloc(dev, 4096, VX_MEM_READ_WRITE, &buf));

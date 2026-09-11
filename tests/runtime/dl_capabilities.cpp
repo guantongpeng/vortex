@@ -37,6 +37,12 @@ constexpr Cap kCaps[] = {
     {"vm_support", VX_CAPS_VM_SUPPORT},
     {"vm_pinned_size", VX_CAPS_VM_PINNED_SIZE},
     {"vm_pinned_free", VX_CAPS_VM_PINNED_FREE},
+    {"cp_num_queues", VX_CAPS_CP_NUM_QUEUES},
+    {"cp_ring_size_log2", VX_CAPS_CP_RING_SIZE_LOG2},
+    {"cp_axi_tid_width", VX_CAPS_CP_AXI_TID_WIDTH},
+    {"cp_supports_draw", VX_CAPS_CP_SUPPORTS_DRAW},
+    {"cp_supports_qmd", VX_CAPS_CP_SUPPORTS_QMD},
+    {"cp_mmu_fault_report", VX_CAPS_CP_MMU_FAULT_REPORT},
 };
 
 void print_json_string(const char* value) {

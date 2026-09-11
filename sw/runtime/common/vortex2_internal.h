@@ -486,6 +486,7 @@ private:
     // the OP_DRAW mirror). Discovered at open.
     bool                                cp_supports_draw_ = false;
     bool                                cp_supports_qmd_ = false;
+    uint32_t                            cp_dev_caps_ = 0;
     class CpMemIO;
     std::unique_ptr<CpMemIO>            vm_io_;
     std::unique_ptr<vortex::VMManager>  vm_mgr_;

@@ -74,6 +74,12 @@ typedef struct vx_kernel* vx_kernel_h;
 #define VX_CAPS_VM_SUPPORT          0xF   // 1 if the device has an MMU (VM), else 0
 #define VX_CAPS_VM_PINNED_SIZE      0x10  // pinned-region total size (bytes); 0 if disabled
 #define VX_CAPS_VM_PINNED_FREE      0x11  // pinned-region free  size (bytes); 0 if disabled
+#define VX_CAPS_CP_NUM_QUEUES       0x12  // command-processor queue count
+#define VX_CAPS_CP_RING_SIZE_LOG2   0x13  // maximum queue ring size log2
+#define VX_CAPS_CP_AXI_TID_WIDTH    0x14  // command-processor AXI tag width
+#define VX_CAPS_CP_SUPPORTS_DRAW    0x15  // CP decodes CMD_DRAW
+#define VX_CAPS_CP_SUPPORTS_QMD     0x16  // CP decodes CMD_LAUNCH_QMD
+#define VX_CAPS_CP_MMU_FAULT_REPORT 0x17  // CP exposes MMU fault DCRs
 
 // ============================================================================
 // Device ISA flags  (decode a VX_CAPS_ISA_FLAGS query result)
