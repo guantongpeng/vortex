@@ -413,13 +413,12 @@ AI 完成代码后必须报告“改了什么、为什么、运行了哪些命�
 
 按此顺序开工，每项完成后才进入下一项：
 
-- [ ] `P0-01` 建立 `dl_functional/dl_rtl/dl_fpga` 配置矩阵和 JSON capability dump。
-- [ ] `P0-02` 在现有配置下跑 regression、HIP chipStar、TCU、DXA，并保存基线日志。
-- [ ] `P1-01` 审计 `vortex2.h` 与 HIP API 的一一映射，补齐错误/能力枚举。
-- [ ] `P1-02` 实现 allocator pool、stream-ordered free、跨 stream event 测试。
-- [ ] `P1-03` 固化 vxbin 参数 metadata 和 RV32/RV64 ABI 测试。
-- [ ] `P2-01` 创建 `hipcc-vortex` 最小编译器驱动，完成 vecadd 直编直跑。
-- [ ] `P2-02` 创建 `libhip_vortex` device/memory/stream/event/module 子集。
+- [x] `P0-01` 建立 `dl_functional/dl_rtl/dl_fpga` 配置矩阵和 JSON capability dump。（2026-09-11）
+- [x] `P0-02` 在现有配置下跑 regression、HIP chipStar、TCU、DXA，并保存基线日志。（部分：SimX 后端 2026-09-11 恢复并全绿，见 p0_dl_capability_baseline.md；rtlsim/chipStar/TCU/DXA 基线仍待做）
+- [x] `P1-01` 审计 `vortex2.h` 与 HIP API 的一一映射，补齐错误/能力枚举。（部分：queue-ordered free 与 CP capability 完成；allocator pool 与 hipMallocAsync 待做）
+- [x] `P1-03` 固化 vxbin 参数 metadata 和 RV32/RV64 ABI 测试。（VXKMDATA 已被 libhip_vortex 消费；>4KiB 参数等边界待补）
+- [x] `P2-01` 创建 `hipcc-vortex` 最小编译器驱动，完成 vecadd 直编直跑。（rv32/rv64 SimX 通过，见 p2_1c_hip_vortex_headers.md）
+- [x] `P2-02` 创建 `libhip_vortex` device/memory/stream/event/module 子集。（双 XLEN 端到端通过，见 p2_02_libhip_vortex.md；RV32 指针宽度 ABI 修复）
 - [ ] `P2-03` 完成 native HIP GEMM、atomic、async overlap 和 conformance smoke。
 - [ ] `P3-01` 以 FP16/BF16 GEMM 为种子实现 BLAS dispatch 和 TCU fallback。
 - [ ] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。
