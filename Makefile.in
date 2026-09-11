@@ -15,6 +15,11 @@ software: third_party
 	$(MAKE) -C sw/kernel
 	$(MAKE) -C sw/runtime/stub
 
+# Native HIP host runtime over the vortex2.h ABI (on demand — needs the
+# runtime stub built first).
+hip: software
+	$(MAKE) -C sw/hip
+
 tests: software hardware
 	$(MAKE) -C tests
 

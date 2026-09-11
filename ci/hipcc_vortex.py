@@ -104,12 +104,16 @@ def build_command(args, extra, status):
         "-fno-exceptions",
         "-fdata-sections", "-ffunction-sections",
         "-D__VORTEX__",
+    ]
+    if args.kernel_lib == "vortex2":
+        command.append("-DHIP_VORTEX_KMU")
+    command.extend([
         "-I" + (paths["hip_include"] or DEFAULT_HIP_INCLUDE),
         "-I" + os.path.join(REPO_ROOT, "sw", "kernel", "include"),
         "-I" + os.path.join(REPO_ROOT, "sw"),
         "-I" + os.path.join(args.build_dir, "sw"),
         "-O3",
-    ]
+    ])
     command.extend(gen_config_flags(args.build_dir, xlen, args.configs))
     # Force C++ mode: VOLT clang's HIP mode injects AMDGPU-only driver
     # options invalid for RISC-V, and the native path maps the HIP surface
@@ -123,7 +127,8 @@ def build_command(args, extra, status):
 def link_command(args, objects, elf_path, status):
     xlen, p = arch_params(args.arch)
     paths = status["paths"]
-    kernel_lib = os.path.join(args.build_dir, "sw", "kernel", "libvortex.a")
+    kernel_lib = os.path.join(args.build_dir, "sw", "kernel",
+                              f"lib{args.kernel_lib}.a")
     libc = os.path.join(status["tool_root"], f"libc{xlen}")
     libcrt = os.path.join(status["tool_root"], f"libcrt{xlen}")
     command = [
@@ -171,6 +176,8 @@ def link_vxbin(args, objects, output, status):
     build_dir = args.build_dir
 
     startup_flags = ["-DNEED_GP", "-DNEED_TLS", "-DNEED_INITFINI"]
+    if args.kernel_lib == "vortex2":
+        startup_flags.append("-DKMU_ENABLE")
 
     def compile_startup(out_path, flags):
         xlen_, p = arch_params(args.arch)
@@ -247,6 +254,10 @@ def main(argv=None):
                         help="configured Vortex build directory (VX_types.h, libvortex.a)")
     parser.add_argument("--configs", default="",
                         help="extra -DVX_CFG_* overrides passed to gen_config.py")
+    parser.add_argument("--kernel-lib", default="vortex",
+                        choices=("vortex", "vortex2"),
+                        help="device runtime: vortex = hostless spawn model, "
+                             "vortex2 = KMU images launched by a host runtime")
     parser.add_argument("--print-command", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args, extra = parser.parse_known_args(argv)
@@ -265,8 +276,10 @@ def main(argv=None):
     if not check_inputs(status, args.arch[-2:], wants_link):
         return 1
     if wants_link:
-        if not (os.path.isfile(os.path.join(args.build_dir, "sw", "kernel", "libvortex.a"))):
-            print(f"hipcc-vortex: {args.build_dir} has no sw/kernel/libvortex.a; "
+        kernel_lib_path = os.path.join(args.build_dir, "sw", "kernel",
+                                       f"lib{args.kernel_lib}.a")
+        if not os.path.isfile(kernel_lib_path):
+            print(f"hipcc-vortex: {kernel_lib_path} missing; "
                   "run configure + make -C sw/kernel first", file=sys.stderr)
             return 1
         # Compile any remaining sources to a temporary object first.

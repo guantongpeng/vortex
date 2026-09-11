@@ -6,7 +6,7 @@ include $(ROOT_DIR)/config.mk
 # target because they additionally require a TOOLDIR with llvm-vortex,
 # riscv sysroots, picolibc and compiler-rt (see ci/hip_native_probe.py).
 
-TESTS := vecadd
+TESTS := vecadd module_api
 
 BACKENDS := simx rtlsim
 

@@ -14,6 +14,7 @@ def make_args(arch):
         "tooldir": "/opt/tools",
         "build_dir": "/opt/build",
         "configs": "",
+        "kernel_lib": "vortex",
         "print_command": False,
         "dry_run": False,
     })()
@@ -83,6 +84,14 @@ class HipccVortexTest(unittest.TestCase):
         status = fake_status()
         status["checks"]["riscv64_sysroot"] = False
         self.assertFalse(mod.check_inputs(status, "64", False))
+
+    def test_kmu_mode_selects_vortex2(self):
+        args = make_args("vortex64")
+        args.kernel_lib = "vortex2"
+        cmd = mod.build_command(args, ["kernel.hip"], fake_status())
+        self.assertIn("-DHIP_VORTEX_KMU", cmd)
+        link = mod.flatten(mod.link_command(args, ["o.o"], "a.elf", fake_status()))
+        self.assertTrue(any(a.endswith("libvortex2.a") for a in link))
 
 
 if __name__ == "__main__":

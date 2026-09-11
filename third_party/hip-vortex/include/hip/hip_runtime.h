@@ -46,7 +46,23 @@
 
 #include <vx_intrinsics.h>
 #include <vx_print.h>
+
+// Two execution models, selected at image build time:
+//
+//   default (hostless): main() runs on the device; hipLaunchKernelGGL
+//     spawns through vx_spawn_threads and threadIdx/blockIdx/blockDim/
+//     gridDim are the TLS variables maintained by libvortex.a.
+//
+//   HIP_VORTEX_KMU: the image is a module launched by a host runtime
+//     (libhip_vortex -> vx_enqueue_launch). CTA identity comes from the
+//     KMU CSRs (vx_spawn2.h), there is no device main, and the host-side
+//     shims (hipMalloc/hipLaunchKernelGGL/...) are unavailable. Kernels
+//     use the single-pointer argument-block ABI.
+#ifdef HIP_VORTEX_KMU
+#include <vx_spawn2.h>
+#else
 #include <vx_spawn.h>
+#endif
 
 #include <hip/hip_vector_types.h>
 
@@ -125,6 +141,8 @@ typedef struct ihipEvent_t* hipEvent_t;
 // Device-local memory pool (hostless hipMalloc)
 // ---------------------------------------------------------------------------
 
+#ifndef HIP_VORTEX_KMU
+
 #ifndef HIP_VORTEX_HEAP_SIZE
 #define HIP_VORTEX_HEAP_SIZE (1024 * 1024)
 #endif
@@ -180,9 +198,13 @@ static inline hipError_t hipDeviceSynchronize(void) {
     return hipSuccess;
 }
 
+#endif // !HIP_VORTEX_KMU
+
 // ---------------------------------------------------------------------------
-// Kernel launch
+// Kernel launch (hostless only — KMU images are launched by the host)
 // ---------------------------------------------------------------------------
+
+#ifndef HIP_VORTEX_KMU
 
 namespace hip_vortex {
 namespace detail {
@@ -257,6 +279,8 @@ static inline void hipLaunchKernelGGL(Fn kernel, dim3 grid, dim3 block,
                      (vx_kernel_func_cb)&hip_vortex::detail::launch_trampoline<Fn, Args...>,
                      &ctx);
 }
+
+#endif // !HIP_VORTEX_KMU
 
 // ---------------------------------------------------------------------------
 // Warp intrinsics (vx_vote_* / vx_shfl_* custom-0 space)
