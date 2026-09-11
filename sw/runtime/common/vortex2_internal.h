@@ -586,6 +586,16 @@ public:
     // Subsequent lookups of the same name return the same cached Kernel.
     vx_result_t get_kernel(const char* name, Kernel** out);
 
+    struct KernelMetadata {
+        uint32_t max_block[3] = {0, 0, 0};
+        uint32_t static_lmem_bytes = 0;
+        uint32_t registers = 0;
+        uint64_t required_isa = 0;
+        uint64_t required_features = 0;
+        uint32_t args_size = 0;
+        uint32_t flags = 0;
+    };
+
 private:
     friend class RefCounted<Module>;
     friend class Kernel;        // accesses kcache_mu_ + kernel_cache_ on destruct
@@ -602,32 +612,44 @@ private:
         uint64_t    pc;
     };
 
+    struct Metadata {
+        std::string name;
+        KernelMetadata info;
+    };
+
     Device*                              device_;
     Buffer*                              image_;       // refcounted
     uint64_t                             base_addr_;
     std::vector<Symbol>                  symbols_;
+    std::vector<Metadata>                metadata_;
     std::mutex                           kcache_mu_;
     std::map<std::string, Kernel*>       kernel_cache_;   // weak refs (no retain)
 };
 
 class Kernel : public RefCounted<Kernel> {
 public:
-    static vx_result_t create(Module* mod, uint64_t pc, Kernel** out);
+    static vx_result_t create(Module* mod, uint64_t pc,
+                              const Module::KernelMetadata* metadata,
+                              const char* name, Kernel** out);
 
     Module*  module()      { return module_; }
     uint64_t pc()    const { return pc_; }
 
-    // Per-kernel max-block hints. Returns the device default (full warp width);
-    // per-kernel introspection from compiler metadata is not yet implemented.
+    // Per-kernel max-block hints, falling back to the device default when the
+    // image has no compiler metadata.
     vx_result_t get_max_block_size(uint32_t* x, uint32_t* y, uint32_t* z);
+    vx_result_t get_info(vx_kernel_info_t* out);
 
 private:
     friend class RefCounted<Kernel>;
-    Kernel(Module* mod, uint64_t pc);
+    Kernel(Module* mod, uint64_t pc, const Module::KernelMetadata* metadata,
+           const char* name);
     ~Kernel();
 
     Module*  module_;
     uint64_t pc_;
+    std::string name_;
+    Module::KernelMetadata metadata_;
 };
 
 // ============================================================================

@@ -19,7 +19,9 @@
 //   [string blob (variable, all symbol names back-to-back, NUL-separated)]
 //   [entries: N × { name_off:4, name_len:2, _pad:2, pc:8 }  = 16 bytes each ]
 //   [n_symbols : 4 bytes LE]
-//   [magic     : 8 bytes 'VXSYMTAB']                       <- end of file
+//   [magic     : 8 bytes 'VXSYMTAB']
+//   --- optional kernel-metadata footer ---
+//   [string blob][records: N x 52 bytes][n_records:4][magic:'VXKMDATA']
 //
 // Loader checks the last 8 bytes for the magic. If present, parses
 // backward to recover the symbol table. If absent, falls back to a single
@@ -28,6 +30,7 @@
 
 #include "vortex2_internal.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -77,21 +80,43 @@ vx_result_t Module::load_bytes(Device* dev, const void* bytes_, size_t size,
     if (max_vma <= min_vma) return VX_ERR_INVALID_VALUE;
     const uint64_t rt_sz = max_vma - min_vma;
 
-    // Sniff for the symbol footer. It lives at the END of the file; the bin
+    // Sniff for the optional metadata footer, then the symbol footer. They
+    // live at the END of the file; the bin
     // proper is everything between the 16-byte header and (start-of-footer).
     static const char kFooterMagic[8] = {'V','X','S','Y','M','T','A','B'};
+    size_t metadata_total = 0;
+    const size_t metadata_record_size = 52;
+    if (size >= 16 + 12 &&
+        std::memcmp(bytes + size - 8, "VXKMDATA", 8) == 0) {
+        const uint32_t n = *reinterpret_cast<const uint32_t*>(bytes + size - 12);
+        if (n > (size - 28) / metadata_record_size) return VX_ERR_INVALID_VALUE;
+        const size_t entries_sz = size_t(n) * metadata_record_size;
+        if (size < 16 + 12 + entries_sz) return VX_ERR_INVALID_VALUE;
+        const uint8_t* entries = bytes + size - 12 - entries_sz;
+        size_t max_end = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint8_t* e = entries + size_t(i) * metadata_record_size;
+            const uint32_t off = *reinterpret_cast<const uint32_t*>(e + 0);
+            const uint16_t len = *reinterpret_cast<const uint16_t*>(e + 4);
+            max_end = std::max(max_end, size_t(off) + len);
+        }
+        metadata_total = 12 + entries_sz + max_end;
+        if (metadata_total > size - 16) return VX_ERR_INVALID_VALUE;
+    }
+
+    const size_t parse_size = size - metadata_total;
     size_t footer_total = 0;
     uint32_t n_syms = 0;
     bool has_footer = false;
-    if (size >= 16 + 12 &&
-        std::memcmp(bytes + size - 8, kFooterMagic, 8) == 0) {
-        n_syms = *reinterpret_cast<const uint32_t*>(bytes + size - 12);
+    if (parse_size >= 16 + 12 &&
+        std::memcmp(bytes + parse_size - 8, kFooterMagic, 8) == 0) {
+        n_syms = *reinterpret_cast<const uint32_t*>(bytes + parse_size - 12);
         const size_t entries_sz = size_t(n_syms) * 16;
-        if (size >= 16 + 12 + entries_sz) {
+        if (parse_size >= 16 + 12 + entries_sz) {
             footer_total = 12 + entries_sz;
             // String blob sits between the bin and the entries; we figure
             // its size out from the entries' (name_off, name_len) pairs.
-            const uint8_t* entries_start = bytes + size - 12 - entries_sz;
+            const uint8_t* entries_start = bytes + parse_size - 12 - entries_sz;
             size_t max_end_off = 0;
             for (uint32_t i = 0; i < n_syms; ++i) {
                 const uint8_t* e = entries_start + size_t(i) * 16;
@@ -101,7 +126,7 @@ vx_result_t Module::load_bytes(Device* dev, const void* bytes_, size_t size,
                 if (end_off > max_end_off) max_end_off = end_off;
             }
             footer_total += max_end_off;   // string blob included
-            if (footer_total <= size - 16) {
+            if (footer_total <= parse_size - 16) {
                 has_footer = true;
             } else {
                 footer_total = 0;
@@ -110,7 +135,7 @@ vx_result_t Module::load_bytes(Device* dev, const void* bytes_, size_t size,
         }
     }
 
-    const uint64_t bin_sz = size - 16 - footer_total;
+    const uint64_t bin_sz = parse_size - 16 - footer_total;
     if (bin_sz > rt_sz) return VX_ERR_INVALID_VALUE;
     const uint8_t* bin = bytes + 16;
 
@@ -143,7 +168,7 @@ vx_result_t Module::load_bytes(Device* dev, const void* bytes_, size_t size,
     // otherwise we fall back to a single "main" entry at min_vma.
     Module* m = new Module(dev, image, min_vma);
     if (has_footer) {
-        const uint8_t* entries_start = bytes + size - 12 - size_t(n_syms) * 16;
+        const uint8_t* entries_start = bytes + parse_size - 12 - size_t(n_syms) * 16;
         const uint8_t* strings_start = bytes + 16 + bin_sz;
         for (uint32_t i = 0; i < n_syms; ++i) {
             const uint8_t* e = entries_start + size_t(i) * 16;
@@ -169,6 +194,29 @@ vx_result_t Module::load_bytes(Device* dev, const void* bytes_, size_t size,
         m->symbols_.push_back({"main", min_vma});
     }
 
+    if (metadata_total != 0) {
+        const uint32_t n = *reinterpret_cast<const uint32_t*>(bytes + size - 12);
+        const size_t entries_sz = size_t(n) * metadata_record_size;
+        const uint8_t* entries = bytes + size - 12 - entries_sz;
+        const uint8_t* strings = bytes + size - metadata_total;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint8_t* e = entries + size_t(i) * metadata_record_size;
+            const uint32_t off = *reinterpret_cast<const uint32_t*>(e + 0);
+            const uint16_t len = *reinterpret_cast<const uint16_t*>(e + 4);
+            Module::KernelMetadata md;
+            md.max_block[0] = *reinterpret_cast<const uint32_t*>(e + 8);
+            md.max_block[1] = *reinterpret_cast<const uint32_t*>(e + 12);
+            md.max_block[2] = *reinterpret_cast<const uint32_t*>(e + 16);
+            md.static_lmem_bytes = *reinterpret_cast<const uint32_t*>(e + 20);
+            md.registers = *reinterpret_cast<const uint32_t*>(e + 24);
+            md.required_isa = *reinterpret_cast<const uint64_t*>(e + 28);
+            md.required_features = *reinterpret_cast<const uint64_t*>(e + 36);
+            md.args_size = *reinterpret_cast<const uint32_t*>(e + 44);
+            md.flags = *reinterpret_cast<const uint32_t*>(e + 48);
+            m->metadata_.push_back({std::string(reinterpret_cast<const char*>(strings + off), len), md});
+        }
+    }
+
     *out = m;
     return VX_SUCCESS;
 }
@@ -185,7 +233,11 @@ vx_result_t Module::get_kernel(const char* name, Kernel** out) {
     for (const auto& s : symbols_) {
         if (s.name == name) {
             Kernel* k = nullptr;
-            auto r = Kernel::create(this, s.pc, &k);
+            const Module::KernelMetadata* md = nullptr;
+            for (const auto& m : metadata_) {
+                if (m.name == s.name) { md = &m.info; break; }
+            }
+            auto r = Kernel::create(this, s.pc, md, s.name.c_str(), &k);
             if (r != VX_SUCCESS) return r;
             // Cache holds a non-owning reference — Kernel's destructor
             // removes itself from the cache.
@@ -203,9 +255,11 @@ vx_result_t Module::get_kernel(const char* name, Kernel** out) {
 // Kernel
 // ----------------------------------------------------------------------------
 
-Kernel::Kernel(Module* mod, uint64_t pc)
-    : module_(mod), pc_(pc) {
+Kernel::Kernel(Module* mod, uint64_t pc, const Module::KernelMetadata* metadata,
+               const char* name)
+    : module_(mod), pc_(pc), name_(name ? name : "") {
     module_->retain();
+    if (metadata) metadata_ = *metadata;
 }
 
 Kernel::~Kernel() {
@@ -226,15 +280,21 @@ Kernel::~Kernel() {
     }
 }
 
-vx_result_t Kernel::create(Module* mod, uint64_t pc, Kernel** out) {
+vx_result_t Kernel::create(Module* mod, uint64_t pc,
+                           const Module::KernelMetadata* metadata,
+                           const char* name, Kernel** out) {
     if (!mod || !out) return VX_ERR_INVALID_VALUE;
-    *out = new Kernel(mod, pc);
+    *out = new Kernel(mod, pc, metadata, name);
     return VX_SUCCESS;
 }
 
 vx_result_t Kernel::get_max_block_size(uint32_t* x, uint32_t* y, uint32_t* z) {
     if (!x || !y || !z) return VX_ERR_INVALID_VALUE;
     // Default block size: full warp width × num_warps × 1.
+    if (metadata_.max_block[0] && metadata_.max_block[1] && metadata_.max_block[2]) {
+        *x = metadata_.max_block[0]; *y = metadata_.max_block[1]; *z = metadata_.max_block[2];
+        return VX_SUCCESS;
+    }
     uint64_t nt = 0, nw = 0;
     auto* dev = module_->device();
     auto r = dev->query_caps(VX_CAPS_NUM_THREADS, &nt);
@@ -244,6 +304,26 @@ vx_result_t Kernel::get_max_block_size(uint32_t* x, uint32_t* y, uint32_t* z) {
     *x = (uint32_t)nt;
     *y = (uint32_t)nw;
     *z = 1;
+    return VX_SUCCESS;
+}
+
+vx_result_t Kernel::get_info(vx_kernel_info_t* out) {
+    if (!out || out->struct_size < sizeof(vx_kernel_info_t)) return VX_ERR_INVALID_VALUE;
+    out->version = VX_KERNEL_INFO_VERSION;
+    out->name = name_.c_str();
+    out->entry_pc = pc_;
+    if (metadata_.max_block[0] && metadata_.max_block[1] && metadata_.max_block[2]) {
+        std::memcpy(out->max_block, metadata_.max_block, sizeof(out->max_block));
+    } else {
+        auto r = get_max_block_size(&out->max_block[0], &out->max_block[1], &out->max_block[2]);
+        if (r != VX_SUCCESS) return r;
+    }
+    out->static_lmem_bytes = metadata_.static_lmem_bytes;
+    out->registers = metadata_.registers;
+    out->required_isa = metadata_.required_isa;
+    out->required_features = metadata_.required_features;
+    out->args_size = metadata_.args_size;
+    out->flags = metadata_.flags;
     return VX_SUCCESS;
 }
 
@@ -328,4 +408,9 @@ extern "C" vx_result_t vx_kernel_get_max_block_size(vx_kernel_h k,
                                                     uint32_t* z) {
     if (!k) return VX_ERR_INVALID_HANDLE;
     return to_kernel(k)->get_max_block_size(x, y, z);
+}
+
+extern "C" vx_result_t vx_kernel_get_info(vx_kernel_h k, vx_kernel_info_t* out) {
+    if (!k) return VX_ERR_INVALID_HANDLE;
+    return to_kernel(k)->get_info(out);
 }

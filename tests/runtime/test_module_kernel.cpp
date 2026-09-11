@@ -260,6 +260,60 @@ int test_launch_via_kernel_handle(vx_device_h dev, const std::string& vxbin) {
     return 0;
 }
 
+// Synthetic VXKMDATA footer. Verifies compiler launch/resource metadata is
+// returned and that the metadata max block overrides the device default.
+int test_kernel_metadata(vx_device_h dev, const std::string& vxbin) {
+    if (vxbin.empty()) {
+        printf("       (skipped — no .vxbin available)\n");
+        return 0;
+    }
+    std::ifstream ifs(vxbin, std::ios::binary);
+    ifs.seekg(0, ifs.end);
+    auto sz = (size_t)ifs.tellg();
+    ifs.seekg(0, ifs.beg);
+    std::vector<uint8_t> buf(sz);
+    ifs.read(reinterpret_cast<char*>(buf.data()), sz);
+
+    const char name[] = "main";
+    buf.insert(buf.end(), name, name + sizeof(name) - 1);
+    uint8_t rec[52] = {};
+    uint32_t off = 0; uint16_t len = 4;
+    uint32_t bx = 8, by = 2, bz = 1, lmem = 1536, regs = 17;
+    uint64_t req_isa = VX_ISA_STD_I | VX_ISA_STD_A;
+    uint64_t req_features = VX_ISA_EXT_TCU;
+    uint32_t args_size = 64, flags = 3;
+    std::memcpy(rec + 0, &off, 4); std::memcpy(rec + 4, &len, 2);
+    std::memcpy(rec + 8, &bx, 4); std::memcpy(rec + 12, &by, 4);
+    std::memcpy(rec + 16, &bz, 4); std::memcpy(rec + 20, &lmem, 4);
+    std::memcpy(rec + 24, &regs, 4); std::memcpy(rec + 28, &req_isa, 8);
+    std::memcpy(rec + 36, &req_features, 8); std::memcpy(rec + 44, &args_size, 4);
+    std::memcpy(rec + 48, &flags, 4);
+    buf.insert(buf.end(), rec, rec + sizeof(rec));
+    uint32_t n = 1;
+    buf.insert(buf.end(), reinterpret_cast<uint8_t*>(&n), reinterpret_cast<uint8_t*>(&n) + 4);
+    const char magic[] = "VXKMDATA";
+    buf.insert(buf.end(), magic, magic + 8);
+
+    vx_module_h mod = nullptr;
+    CHECK_VX(vx_module_load_bytes(dev, buf.data(), buf.size(), &mod));
+    vx_kernel_h k = nullptr;
+    CHECK_VX(vx_module_get_kernel(mod, "main", &k));
+    vx_kernel_info_t info = {};
+    info.struct_size = sizeof(info);
+    CHECK_VX(vx_kernel_get_info(k, &info));
+    EXPECT(info.version == VX_KERNEL_INFO_VERSION, "metadata version mismatch");
+    EXPECT(info.entry_pc != 0, "metadata entry PC must be populated");
+    EXPECT(info.max_block[0] == bx && info.max_block[1] == by && info.max_block[2] == bz,
+           "metadata max block must override device default");
+    EXPECT(info.static_lmem_bytes == lmem && info.registers == regs,
+           "metadata resource fields mismatch");
+    EXPECT(info.required_features == req_features && info.args_size == args_size,
+           "metadata requirements mismatch");
+    CHECK_VX(vx_kernel_release(k));
+    CHECK_VX(vx_module_release(mod));
+    return 0;
+}
+
 #define RUN(section)                                                     \
     do {                                                                  \
         printf("[RUN ] %s\n", #section);                                  \
@@ -288,6 +342,7 @@ int main(int argc, char** argv) {
     RUN(test_module_load_bytes);
     RUN(test_refcount);
     RUN(test_multi_symbol_footer);
+    RUN(test_kernel_metadata);
     RUN(test_launch_via_kernel_handle);
 
     CHECK_VX(vx_device_release(dev));

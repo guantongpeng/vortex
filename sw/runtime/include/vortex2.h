@@ -52,6 +52,24 @@ typedef struct vx_event*  vx_event_h;
 typedef struct vx_module* vx_module_h;
 typedef struct vx_kernel* vx_kernel_h;
 
+// Optional compiler metadata returned by vx_kernel_get_info(). Pointers in
+// this structure are owned by the module and remain valid until the kernel is
+// released. Callers set struct_size before the query for ABI evolution.
+#define VX_KERNEL_INFO_VERSION 1
+typedef struct vx_kernel_info {
+    uint32_t    struct_size;
+    uint32_t    version;
+    const char* name;
+    uint64_t    entry_pc;
+    uint32_t    max_block[3];
+    uint32_t    static_lmem_bytes;
+    uint32_t    registers;
+    uint64_t    required_isa;
+    uint64_t    required_features;
+    uint32_t    args_size;
+    uint32_t    flags;
+} vx_kernel_info_t;
+
 // ============================================================================
 // Device capability IDs  (vx_device_query)
 // ============================================================================
@@ -328,6 +346,10 @@ vx_result_t vx_kernel_address    (vx_kernel_h k, uint64_t* out_addr);
 vx_result_t vx_kernel_get_max_block_size (vx_kernel_h k,
                                           uint32_t* x, uint32_t* y,
                                           uint32_t* z);
+
+// Returns compiler supplied launch metadata, or device defaults for fields
+// absent from a legacy .vxbin without a VXKMDATA footer.
+vx_result_t vx_kernel_get_info (vx_kernel_h k, vx_kernel_info_t* out);
 
 // ============================================================================
 // Queue

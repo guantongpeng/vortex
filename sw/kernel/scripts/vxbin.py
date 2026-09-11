@@ -106,6 +106,28 @@ def build_symtab_footer(entries):
     footer += b'VXSYMTAB'
     return bytes(footer)
 
+def build_metadata_footer(records):
+    """Build the optional VXKMDATA footer.
+
+    Each record is a dict with ``name`` and optional launch/resource fields.
+    The fixed 52-byte record keeps the runtime parser independent of Python
+    object layout and allows future fields to be added under a new version.
+    """
+    blob = bytearray()
+    packed = []
+    for rec in records:
+        name = rec['name'].encode('utf-8')
+        off = len(blob)
+        blob += name
+        block = rec.get('max_block', [0, 0, 0])
+        packed.append(struct.pack(
+            '<IHHIIIIIQQII', off, len(name), 0,
+            int(block[0]), int(block[1]), int(block[2]),
+            int(rec.get('static_lmem_bytes', 0)), int(rec.get('registers', 0)),
+            int(rec.get('required_isa', 0)), int(rec.get('required_features', 0)),
+            int(rec.get('args_size', 0)), int(rec.get('flags', 0))))
+    return bytes(blob) + b''.join(packed) + struct.pack('<I', len(packed)) + b'VXKMDATA'
+
 def create_vxbin_binary(input_elf, output_bin, objcopy_path):
     min_vma, max_vma = get_vma_size(input_elf)
     edata = get_symbol(input_elf, '_edata')
@@ -134,6 +156,17 @@ def create_vxbin_binary(input_elf, output_bin, objcopy_path):
     entries = get_kernel_entries(input_elf)
     if entries:
         footer = build_symtab_footer(entries)
+
+    # An optional sidecar carries compiler resource information that cannot be
+    # recovered from ELF symbols. It is deliberately opt-in so existing builds
+    # remain byte-for-byte compatible. The JSON file is a list of records and
+    # is selected with VX_KERNEL_METADATA=/path/to/file.json.
+    metadata_path = os.getenv('VX_KERNEL_METADATA')
+    if metadata_path:
+        import json
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            records = json.load(f)
+        footer += build_metadata_footer(records)
 
     with open(output_bin, 'wb') as bin_file:
         bin_file.write(min_vma_bytes)
