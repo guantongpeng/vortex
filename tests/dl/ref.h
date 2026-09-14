@@ -1,0 +1,96 @@
+// Copyright © 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef VORTEX_DL_TEST_REF_H
+#define VORTEX_DL_TEST_REF_H
+
+// Shared CPU reference implementations for tests/dl (plan §7.2: every
+// operator is checked against a double-precision host reference with a
+// fixed seed before any performance claim).
+
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+namespace ref {
+
+inline double gelu(double x) {
+    // tanh approximation — matches prim_kernels.hip
+    return 0.5 * x *
+           (1.0 + std::tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)));
+}
+
+inline double silu(double x) { return x / (1.0 + std::exp(-x)); }
+
+inline void softmax(const std::vector<float>& in, uint32_t rows,
+                    uint32_t cols, std::vector<double>& out) {
+    out.assign((size_t)rows * cols, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        double m = -INFINITY;
+        for (uint32_t j = 0; j < cols; ++j) {
+            m = std::max(m, (double)in[(size_t)r * cols + j]);
+        }
+        double s = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) {
+            double e = std::exp((double)in[(size_t)r * cols + j] - m);
+            out[(size_t)r * cols + j] = e;
+            s += e;
+        }
+        for (uint32_t j = 0; j < cols; ++j) {
+            out[(size_t)r * cols + j] /= s;
+        }
+    }
+}
+
+inline void layernorm(const std::vector<float>& in,
+                      const std::vector<float>& gamma,
+                      const std::vector<float>& beta, uint32_t rows,
+                      uint32_t cols, double eps, std::vector<double>& out) {
+    out.assign((size_t)rows * cols, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        const float* row = in.data() + (size_t)r * cols;
+        double s1 = 0.0, s2 = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) {
+            s1 += row[j];
+            s2 += (double)row[j] * row[j];
+        }
+        double mean = s1 / cols;
+        double var = std::max(s2 / cols - mean * mean, 0.0);
+        double rstd = 1.0 / std::sqrt(var + eps);
+        for (uint32_t j = 0; j < cols; ++j) {
+            out[(size_t)r * cols + j] =
+                ((double)row[j] - mean) * rstd * gamma[j] + beta[j];
+        }
+    }
+}
+
+inline void rmsnorm(const std::vector<float>& in,
+                    const std::vector<float>& gamma, uint32_t rows,
+                    uint32_t cols, double eps, std::vector<double>& out) {
+    out.assign((size_t)rows * cols, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        const float* row = in.data() + (size_t)r * cols;
+        double s2 = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) {
+            s2 += (double)row[j] * row[j];
+        }
+        double inv_rms = 1.0 / std::sqrt(s2 / cols + eps);
+        for (uint32_t j = 0; j < cols; ++j) {
+            out[(size_t)r * cols + j] = (double)row[j] * inv_rms * gamma[j];
+        }
+    }
+}
+
+} // namespace ref
+
+#endif // VORTEX_DL_TEST_REF_H
