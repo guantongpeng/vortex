@@ -421,12 +421,12 @@ AI 完成代码后必须报告“改了什么、为什么、运行了哪些命�
 - [x] `P2-02` 创建 `libhip_vortex` device/memory/stream/event/module 子集。（双 XLEN 端到端通过，见 p2_02_libhip_vortex.md；RV32 指针宽度 ABI 修复）
 - [x] `P2-03` 完成 native HIP GEMM、atomic、async overlap 和 conformance smoke。（2026-09-14,simx+rtlsim 双后端通过;两大硬件发现:老 spawn 模型多 warp `__syncthreads` 不可靠、float atomicAdd 无 ZACAS 活锁;chipStar 对照与 hiprtc stub 留待,见 p2_03 文档）
 - [x] `P3-01` 以 FP16/BF16 GEMM 为种子实现 BLAS dispatch 和 TCU fallback。（tiled FPU kernel 三 dtype 三后端通过;VOLT 缓存 arg 字段 miscompile 与 launch 维度=0 两个发现;TCU 变体待 capability ID）
-- [x] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。（activation/reduce/argmax/softmax/LN/RMS + tests/dl/ref.h;conv/attention/RNG 属后续层）
-- [x] `P4-01` 让 Triton vector add/matmul/softmax/layernorm 通过 interpreter/SimX/rtlsim。（v0.1:entry-point 注册 + driver 设备执行 + interpreter 参考数值;llir→vxbin codegen 路线文档化,见 p4_01 文档）
+- [x] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。（第一层+conv/pool/bn 完成;**attention/RNG/LLM 支持算子/RoPE/SwiGLU/KV-cache 经工作流批次补齐**(p3_03),Mamba selective scan 前体就位）
+- [x] `P4-01` 让 Triton vector add/matmul/softmax/layernorm 通过 interpreter/SimX/rtlsim。（**codegen 里程碑达成**:TTIR→C→vxbin 转译器使官方 vecadd 经真实 `triton.compile` 管线编译并在 SimX 运行(max_abs=0);softmax/reduce 类 1.5e-08;白名单外类型响亮报错。tl.dot 布局与 MLIR 原生 lowering 仍为文档化开放项;matmul/layernorm 教程形状部分依赖 tl.dot,见 p4_01 文档）
 - [x] `P5-01` 完成 PyTorch PrivateUse1 allocator/device guard/basic ATen ops。（torch 2.4,真实设备内存与 kernel,pytest 7/7;torch 2.4 踩坑全记录）
 - [x] `P5-02` 跑 ResNet eager，再接 `torch.export` 和 Inductor/Triton。（2026-09-15:P3 第二层 conv/pool/bn 已交付,MiniResNet 全设备前向 logits 与 CPU 差 ≤1e-7、零 CPU fallback,见 p5_02 文档;torch.compile/Inductor 依赖 P4 codegen,维持开放）
 - [x] `P6-01` 完成 W4A16、INT8 的 pack/dequant/matmul 与精度报告。（pack bit-exact、gemm 6.3e-05/1.1e-07,三后端;模型级精度报告待 P7 harness）
-- [x] `P6-02` 逐项打开 FP8、MX/NVFP4、2:4 sparse，并加入 capability/CI gate。（部分完成:FP8 E4M3/E5M2 软件 kernel 双格式双精度通过(0.00e+00 / 8.9e-08);`VX_CAPS_TCU_DTYPES` gate 已落地(默认=FP16 位);MX/NVFP4/sparse 保持 gate 关闭,待 TCU 构建树 + golden,见 p6_02 文档）
+- [x] `P6-02` 逐项打开 FP8、MX/NVFP4、2:4 sparse，并加入 capability/CI gate。（FP8 E4M3/E5M2 + MXFP8 + NVFP4 + 2:4 sparse 的**软件路径**全部完成:pack bit-exact、GEMM ≤1e-06 级、sparse metadata 真消费(毒化验证);`VX_CAPS_TCU_DTYPES` gate 落地。审计发现并修复了 e4m3 编码器两个真实 bug(次正规窗口、顶 binade NaN),独立 oracle 199k 点零错。**硬件 TCU 加速变体**仍待 TCU 构建树,见 p6_02/p3_03 文档）
 - [x] `P7-01` 依次交付 ResNet、YOLO、SAM、DINOv3、Mamba、LLM、VLM checkpoint 报告。（第一份:ResNet 族(MiniResNet)按 §11 框架交付 —— 覆盖表/零 fallback/内存/数值;其余模型阻塞清单如实列出,见 p7_01 报告）
 - [ ] `P7-02` 在 U55C/V80 等目标上完成 XRT 集成、roofline 和端到端性能报告。
 
