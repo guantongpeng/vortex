@@ -43,6 +43,7 @@ constexpr Cap kCaps[] = {
     {"cp_supports_draw", VX_CAPS_CP_SUPPORTS_DRAW},
     {"cp_supports_qmd", VX_CAPS_CP_SUPPORTS_QMD},
     {"cp_mmu_fault_report", VX_CAPS_CP_MMU_FAULT_REPORT},
+    {"tcu_dtypes", VX_CAPS_TCU_DTYPES},
 };
 
 void print_json_string(const char* value) {

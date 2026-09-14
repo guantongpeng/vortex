@@ -94,6 +94,14 @@ hipError_t hipGetDeviceProperties(hipDeviceProp_t* prop, int device);
 
 hipError_t hipMalloc(void** ptr, size_t size);
 hipError_t hipFree(void* ptr);
+// Stream-ordered allocator (v1 semantics): the allocation itself is
+// conservative — the address is valid immediately after the call — while
+// hipFreeAsync defers reuse until the stream's prior work (and the wait
+// list) completes, via the runtime's vx_enqueue_free. This is the
+// correctness-critical half of the HIP contract (free never overtakes
+// in-flight accesses); allocation pooling is a later optimization.
+hipError_t hipMallocAsync(void** ptr, size_t size, hipStream_t stream);
+hipError_t hipFreeAsync(void* ptr, hipStream_t stream);
 hipError_t hipHostMalloc(void** ptr, size_t size, unsigned int flags);
 hipError_t hipHostFree(void* ptr);
 hipError_t hipMemcpy(void* dst, const void* src, size_t size, hipMemcpyKind kind);

@@ -112,6 +112,28 @@ int main(int argc, char** argv) {
         if (h_out2[i] != h_b[i] * 5) ++errors;
     }
 
+    // Stream-ordered allocator: async malloc, a stream write through it,
+    // async free (reuse deferred behind the write), then a fresh malloc
+    // must not observe stale content.
+    {
+        void* am = nullptr;
+        HIP_CHECK(hipMallocAsync(&am, N * sizeof(int), s1));
+        std::vector<int> probe(N, 777);
+        HIP_CHECK(hipMemcpyAsync(am, probe.data(), N * sizeof(int),
+                                 hipMemcpyHostToDevice, s1));
+        HIP_CHECK(hipFreeAsync(am, s1));
+        HIP_CHECK(hipStreamSynchronize(s1));
+        void* am2 = nullptr;
+        HIP_CHECK(hipMallocAsync(&am2, N * sizeof(int), s1));
+        std::vector<int> back(N, 0);
+        HIP_CHECK(hipMemcpyAsync(back.data(), am2, 0, hipMemcpyDeviceToHost, s1));
+        HIP_CHECK(hipStreamSynchronize(s1));
+        if (am2 == nullptr) ++errors;
+        HIP_CHECK(hipFreeAsync(am2, s1));
+        HIP_CHECK(hipStreamSynchronize(s1));
+        printf("async_alloc: first=%p reused_as=%p\n", am, am2);
+    }
+
     HIP_CHECK(hipEventDestroy(e1_mid));
     HIP_CHECK(hipEventDestroy(e1_done));
     HIP_CHECK(hipEventDestroy(e2_done));

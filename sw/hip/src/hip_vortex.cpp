@@ -275,6 +275,42 @@ hipError_t hipFree(void* ptr) {
     return RET_VX(r);
 }
 
+hipError_t hipMallocAsync(void** ptr, size_t size, hipStream_t stream) {
+    // v1: eager allocation (address valid immediately — conservative and
+    // correct); pooling is deferred until a real stream-ordered malloc
+    // primitive exists in the runtime. See hip_runtime_api.h.
+    (void)stream;
+    return hipMalloc(ptr, size);
+}
+
+hipError_t hipFreeAsync(void* ptr, hipStream_t stream) {
+    if (!ptr) return hipSuccess;
+    uint64_t addr = (uint64_t)(uintptr_t)ptr;
+    vx_buffer_h buf = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        BufferRecord* rec = find_buffer_mut(addr);
+        if (!rec) return RET(hipErrorInvalidResourceHandle);
+        if (rec->mapped_host) {
+            vx_buffer_unmap(rec->buf, rec->mapped_host);
+            rec->mapped_host = nullptr;
+        }
+        buf = rec->buf;
+        rec->buf = nullptr;  // hand the handle to the queued free
+        g_by_addr.erase(addr);
+    }
+    // Reuse is gated on the stream's prior commands: vx_enqueue_free
+    // retains the buffer until then (P1-01 primitive).
+    vx_event_h ev = nullptr;
+    vx_result_t r = vx_enqueue_free(stream_queue(stream), buf, 0, nullptr, &ev);
+    if (r != VX_SUCCESS) {
+        vx_buffer_release(buf);
+        return RET_VX(r);
+    }
+    if (ev) vx_event_release(ev);
+    return RET_VX(r);
+}
+
 hipError_t hipHostMalloc(void** ptr, size_t size, unsigned int flags) {
     (void)flags;
     if (!ptr || size == 0) return RET(hipErrorInvalidValue);

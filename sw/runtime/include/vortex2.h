@@ -98,6 +98,21 @@ typedef struct vx_kernel_info {
 #define VX_CAPS_CP_SUPPORTS_DRAW    0x15  // CP decodes CMD_DRAW
 #define VX_CAPS_CP_SUPPORTS_QMD     0x16  // CP decodes CMD_LAUNCH_QMD
 #define VX_CAPS_CP_MMU_FAULT_REPORT 0x17  // CP exposes MMU fault DCRs
+#define VX_CAPS_TCU_DTYPES          0x18  // tensor-core dtype bitmap (VX_TCU_DTYPE_*)
+
+// TCU dtype bitmap bits (decode a VX_CAPS_TCU_DTYPES query result).
+// Order follows the VX_config.toml TCU enable macros; bit 0 (FP16) is
+// the only dtype enabled by the default configuration.
+#define VX_TCU_DTYPE_FP16    (1ull << 0)
+#define VX_TCU_DTYPE_TF32    (1ull << 1)
+#define VX_TCU_DTYPE_FP8     (1ull << 2)
+#define VX_TCU_DTYPE_FP4     (1ull << 3)
+#define VX_TCU_DTYPE_INT8    (1ull << 4)
+#define VX_TCU_DTYPE_INT4    (1ull << 5)
+#define VX_TCU_DTYPE_MXFP8   (1ull << 6)
+#define VX_TCU_DTYPE_NVFP4   (1ull << 7)
+#define VX_TCU_DTYPE_SPARSE24 (1ull << 8)
+#define VX_TCU_DTYPE_WGMMA   (1ull << 9)
 
 // ============================================================================
 // Device ISA flags  (decode a VX_CAPS_ISA_FLAGS query result)

@@ -1206,6 +1206,43 @@ vx_result_t Device::query_caps(uint32_t caps_id, uint64_t* out_value) {
     case VX_CAPS_CP_SUPPORTS_DRAW:    *out_value = (cp_dev_caps_ >> 25) & 0x1u; break;
     case VX_CAPS_CP_SUPPORTS_QMD:     *out_value = (cp_dev_caps_ >> 26) & 0x1u; break;
     case VX_CAPS_CP_MMU_FAULT_REPORT: *out_value = (cp_dev_caps_ >> 27) & 0x1u; break;
+    case VX_CAPS_TCU_DTYPES: {
+        // Bitmap mirrors the VX_config.toml TCU enable macros this runtime
+        // was built with (bit order in vortex2.h's VX_TCU_DTYPE_*).
+        uint64_t tcu = 0;
+#if defined(VX_CFG_TCU_FP16_ENABLED) && VX_CFG_TCU_FP16_ENABLED
+        tcu |= VX_TCU_DTYPE_FP16;
+#endif
+#if defined(VX_CFG_TCU_TF32_ENABLED) && VX_CFG_TCU_TF32_ENABLED
+        tcu |= VX_TCU_DTYPE_TF32;
+#endif
+#if defined(VX_CFG_TCU_FP8_ENABLED) && VX_CFG_TCU_FP8_ENABLED
+        tcu |= VX_TCU_DTYPE_FP8;
+#endif
+#if defined(VX_CFG_TCU_FP4_ENABLED) && VX_CFG_TCU_FP4_ENABLED
+        tcu |= VX_TCU_DTYPE_FP4;
+#endif
+#if defined(VX_CFG_TCU_INT8_ENABLED) && VX_CFG_TCU_INT8_ENABLED
+        tcu |= VX_TCU_DTYPE_INT8;
+#endif
+#if defined(VX_CFG_TCU_INT4_ENABLED) && VX_CFG_TCU_INT4_ENABLED
+        tcu |= VX_TCU_DTYPE_INT4;
+#endif
+#if defined(VX_CFG_TCU_MXFP4_ENABLED) && VX_CFG_TCU_MXFP4_ENABLED
+        tcu |= VX_TCU_DTYPE_MXFP8;
+#endif
+#if defined(VX_CFG_TCU_NVFP4_ENABLED) && VX_CFG_TCU_NVFP4_ENABLED
+        tcu |= VX_TCU_DTYPE_NVFP4;
+#endif
+#if defined(VX_CFG_TCU_SPARSE_ENABLED) && VX_CFG_TCU_SPARSE_ENABLED
+        tcu |= VX_TCU_DTYPE_SPARSE24;
+#endif
+#if defined(VX_CFG_TCU_WGMMA_ENABLED) && VX_CFG_TCU_WGMMA_ENABLED
+        tcu |= VX_TCU_DTYPE_WGMMA;
+#endif
+        *out_value = tcu;
+        break;
+    }
     default:                      return VX_ERR_INVALID_VALUE;
     }
     return VX_SUCCESS;
