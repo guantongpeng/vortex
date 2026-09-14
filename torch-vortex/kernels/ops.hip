@@ -51,6 +51,15 @@ __global__ void mul_kernel(binary_args_t* arg) {
     }
 }
 
+__global__ void relu_kernel(fill_args_t* arg) {
+    // reuses fill layout: dst + n (value unused)
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
+         i += blockDim.x * gridDim.x) {
+        float* dst = (float*)(uintptr_t)arg->dst;
+        dst[i] = dst[i] > 0.0f ? dst[i] : 0.0f;
+    }
+}
+
 __global__ void fill_kernel(fill_args_t* arg) {
     for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
          i += blockDim.x * gridDim.x) {

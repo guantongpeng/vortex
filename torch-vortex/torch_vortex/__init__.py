@@ -55,7 +55,7 @@ except RuntimeError:
 _BUILD = os.environ.get("VORTEX_BUILD", _BUILD)
 _VXBIN = os.environ.get(
     "TORCH_VORTEX_VXBIN",
-    os.path.join(os.path.dirname(__file__), "..", "kernels", "torch_ops.vxbin"),
+    os.path.join(os.path.dirname(__file__), "..", "kernels", "torch_all.vxbin"),
 )
 
 _ext = None
@@ -94,7 +94,7 @@ def _load():
         ],
         verbose=False,
     )
-    _ext.load_ops(_VXBIN)
+    _ext.load_ops(_VXBIN, "")
     _register_device_module()
     return _ext
 
