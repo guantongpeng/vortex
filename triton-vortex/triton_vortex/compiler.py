@@ -90,6 +90,15 @@ class VortexBackend(BaseBackend):
     def load_dialects(self, ctx):
         pass
 
+    def get_codegen_implementation(self, options):
+        # Minimal codegen hooks: Triton's generic code generator consults
+        # these for naming/attribute decisions; the defaults (shared with
+        # the in-tree backends' base behavior) suffice for IR generation.
+        from triton.runtime import interpreter as _interp  # noqa: F401
+        codegen_fns = type("CodegenFns", (), {})()
+        module_map = {}
+        return codegen_fns, module_map
+
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
             stages["ttir"] = lambda src, metadata: self.make_ttir(
@@ -104,46 +113,48 @@ class VortexBackend(BaseBackend):
         stages["bin"] = lambda src, metadata: self.make_vxbin(
             src, metadata, options)
 
-    # ---- generic Triton passes (frontend lowering is target-agnostic) ----
+    # ---- generic Triton passes -------------------------------------------
+    # Stages receive the module produced by compile()'s make_ir and must
+    # return the next module (verified against the NVIDIA backend's shape).
 
-    def make_ttir(self, src, metadata, opt):
-        from triton._C.libtriton import ir
-        from triton.compiler.code_generator import ast_to_ttir
-        mod, sig_keys, constants, attrs = ast_to_ttir(
-            src, self, options=opt)
+    def make_ttir(self, mod, metadata, opt):
+        from triton._C.libtriton import ir, passes
         pm = ir.pass_manager(mod.context)
-        pm.enable_print(False)
-        from triton._C.libtriton import transforms as _transforms
-        _transforms.common.optimize_ttgir(mod, 1)
-        metadata.name = src.fn.__name__
-        metadata.sig_keys = sig_keys
+        pm.enable_debug()
+        passes.common.add_inliner(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_combine(pm)
+        passes.ttir.add_reorder_broadcast(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        passes.ttir.add_loop_unroll(pm)
+        pm.run(mod, "make_ttir")
         return mod
 
-    def make_ttgir(self, src, metadata, opt):
-        # No target-specific layout/legalization yet: the generic module
-        # flows to llir; layout decisions belong to the vxbin translation.
-        return src
-
-    def make_llir(self, src, metadata, opt):
-        from triton._C.libtriton import ir, passes as _passes
-        mod = src
-        pm = ir.pass_manager(mod.context)
-        pm.enable_print(False)
-        _passes.convert_scf_to_cf(pm)
-        _passes.optimize_llir(pm)
-        import io, contextlib
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            mod.print()
-        return out.getvalue().encode()
+    def make_ttgir(self, mod, metadata, opt):
+        # Explored 2026-09-15: the ttgir->llvm-ir conversion is a
+        # per-backend C++ pass (nvidia.passes.ttgpuir.add_to_llvmir /
+        # AMD's equivalent) — there is no target-generic entry. A Vortex
+        # version means an MLIR pass linked into the backend; until then
+        # the pipeline deliberately stops before layout legalization and
+        # make_vxbin raises (see below). ttgir is passed through so IR
+        # dumps remain usable for writing that pass.
+        return mod
 
     # ---- the Vortex-specific final stage ----
 
+    def make_llir(self, mod, metadata, opt):
+        raise NotImplementedError(
+            "triton-vortex: the ttgir->llvm-ir pass is backend-specific "
+            "(see make_ttgir note); a Vortex MLIR pass must be written and "
+            "linked into the backend before an llir even exists to lower "
+            "into a vxbin. Roadmap: (1) Vortex add_to_llvmir mapping "
+            "program-id/lane ops onto the vx_spawn2 CSRs, (2) VOLT clang "
+            "-x ir + the hipcc two-pass link to vxbin, (3) VXKMDATA arg "
+            "metadata from the Triton signature. Until then: interpreter "
+            "for reference numerics, triton_vortex.hip for device runs.")
+
     def make_vxbin(self, llir_bytes, metadata, opt):
         raise NotImplementedError(
-            "triton-vortex: llir->vxbin codegen is not implemented yet "
-            "(P4 roadmap in triton-vortex/README.md): program-id lowering "
-            "to Vortex CSRs, VOLT clang -x ir link with vxbin.py, and "
-            "VXKMDATA arg metadata from the Triton signature. Use the "
-            "Triton interpreter for reference numerics and the driver "
-            "(triton_vortex.hip) with hipcc-compiled kernels meanwhile.")
+            "triton-vortex: unreachable before make_llir is implemented "
+            "(see make_llir).")
