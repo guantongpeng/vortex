@@ -21,7 +21,7 @@ LDLIBS += -L$(RUNTIME_DIR) -lvortex
 
 PROJECT := libvortex_dl.so
 
-OBJS := blas_host.o prim_host.o
+OBJS := blas_host.o prim_host.o quant_host.o
 
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) \
@@ -55,7 +55,7 @@ PRIM_RMSNORM_SIZE := 20
 endif
 PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
-all: $(PROJECT) blas.vxbin prim.vxbin
+all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin
 
 blas.vxbin: $(SRC_DIR)/blas_kernels.hip $(SRC_DIR)/blas_args.h \
             $(VORTEX_HOME)/ci/hipcc_vortex.py
@@ -75,10 +75,34 @@ blas_host.o: $(SRC_DIR)/blas_host.cpp $(SRC_DIR)/blas_args.h
 prim_host.o: $(SRC_DIR)/prim_host.cpp $(SRC_DIR)/prim_args.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# quant arg-block sizes (device-width pointers).
+# pack4/unpack4: 3 ptr + 3 u32 -> rv64 36/align8=40, rv32 24
+# gemm w4a16: 4 ptr + 4 u32 -> rv64 48, rv32 32
+# gemm w8a8: 4 ptr + float + u32 + 3 u32 -> rv64 48, rv32 32
+ifeq ($(XLEN),64)
+Q_PACK_SIZE := 40
+Q_GEMM4_SIZE := 48
+Q_GEMM8_SIZE := 48
+else
+Q_PACK_SIZE := 24
+Q_GEMM4_SIZE := 32
+Q_GEMM8_SIZE := 32
+endif
+QUANT_META := [{"name": "quant_scales4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_pack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_unpack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_gemm_w4a16_kernel", "args_size": $(Q_GEMM4_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "quant_gemm_w8a8_kernel", "args_size": $(Q_GEMM8_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
+
+quant.vxbin: $(SRC_DIR)/quant_kernels.hip $(SRC_DIR)/quant_args.h \
+             $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(QUANT_META)' > quant_meta.json
+	VX_KERNEL_METADATA=$$PWD/quant_meta.json \
+	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 $(PROJECT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 clean:
-	rm -f *.o $(PROJECT) blas.vxbin prim.vxbin blas_meta.json prim_meta.json *.hipcc_tmp*
+	rm -f *.o $(PROJECT) blas.vxbin prim.vxbin quant.vxbin blas_meta.json prim_meta.json quant_meta.json *.hipcc_tmp*
 
 .PHONY: all clean
