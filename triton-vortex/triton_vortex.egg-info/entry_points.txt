@@ -1,0 +1,2 @@
+[triton.backends]
+vortex = triton_vortex

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-vortex"
+version = "0.1.0"
+description = "Out-of-tree Triton backend for Vortex GPUs (P4-01 milestone)"
+requires-python = ">=3.10"
+
+[project.entry-points."triton.backends"]
+vortex = "triton_vortex"
+
+[tool.setuptools.packages.find]
+include = ["triton_vortex*"]

@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: triton-vortex
+Version: 0.1.0
+Summary: Out-of-tree Triton backend for Vortex GPUs (P4-01 milestone)
+Requires-Python: >=3.10
