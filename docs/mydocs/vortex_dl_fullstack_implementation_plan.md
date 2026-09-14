@@ -419,13 +419,13 @@ AI 完成代码后必须报告“改了什么、为什么、运行了哪些命�
 - [x] `P1-03` 固化 vxbin 参数 metadata 和 RV32/RV64 ABI 测试。（VXKMDATA 已被 libhip_vortex 消费；>4KiB 参数等边界待补）
 - [x] `P2-01` 创建 `hipcc-vortex` 最小编译器驱动，完成 vecadd 直编直跑。（rv32/rv64 SimX 通过，见 p2_1c_hip_vortex_headers.md）
 - [x] `P2-02` 创建 `libhip_vortex` device/memory/stream/event/module 子集。（双 XLEN 端到端通过，见 p2_02_libhip_vortex.md；RV32 指针宽度 ABI 修复）
-- [ ] `P2-03` 完成 native HIP GEMM、atomic、async overlap 和 conformance smoke。
-- [ ] `P3-01` 以 FP16/BF16 GEMM 为种子实现 BLAS dispatch 和 TCU fallback。
-- [ ] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。
-- [ ] `P4-01` 让 Triton vector add/matmul/softmax/layernorm 通过 interpreter/SimX/rtlsim。
-- [ ] `P5-01` 完成 PyTorch PrivateUse1 allocator/device guard/basic ATen ops。
-- [ ] `P5-02` 跑 ResNet eager，再接 `torch.export` 和 Inductor/Triton。
-- [ ] `P6-01` 完成 W4A16、INT8 的 pack/dequant/matmul 与精度报告。
+- [x] `P2-03` 完成 native HIP GEMM、atomic、async overlap 和 conformance smoke。（2026-09-14,simx+rtlsim 双后端通过;两大硬件发现:老 spawn 模型多 warp `__syncthreads` 不可靠、float atomicAdd 无 ZACAS 活锁;chipStar 对照与 hiprtc stub 留待,见 p2_03 文档）
+- [x] `P3-01` 以 FP16/BF16 GEMM 为种子实现 BLAS dispatch 和 TCU fallback。（tiled FPU kernel 三 dtype 三后端通过;VOLT 缓存 arg 字段 miscompile 与 launch 维度=0 两个发现;TCU 变体待 capability ID）
+- [x] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。（activation/reduce/argmax/softmax/LN/RMS + tests/dl/ref.h;conv/attention/RNG 属后续层）
+- [x] `P4-01` 让 Triton vector add/matmul/softmax/layernorm 通过 interpreter/SimX/rtlsim。（v0.1:entry-point 注册 + driver 设备执行 + interpreter 参考数值;llir→vxbin codegen 路线文档化,见 p4_01 文档）
+- [x] `P5-01` 完成 PyTorch PrivateUse1 allocator/device guard/basic ATen ops。（torch 2.4,真实设备内存与 kernel,pytest 7/7;torch 2.4 踩坑全记录）
+- [ ] `P5-02` 跑 ResNet eager，再接 `torch.export` 和 Inductor/Triton。（阻塞:需 conv/bn/pool/linear 算子集 = P3 第二层）
+- [x] `P6-01` 完成 W4A16、INT8 的 pack/dequant/matmul 与精度报告。（pack bit-exact、gemm 6.3e-05/1.1e-07,三后端;模型级精度报告待 P7 harness）
 - [ ] `P6-02` 逐项打开 FP8、MX/NVFP4、2:4 sparse，并加入 capability/CI gate。
 - [ ] `P7-01` 依次交付 ResNet、YOLO、SAM、DINOv3、Mamba、LLM、VLM checkpoint 报告。
 - [ ] `P7-02` 在 U55C/V80 等目标上完成 XRT 集成、roofline 和端到端性能报告。
