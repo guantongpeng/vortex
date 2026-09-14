@@ -673,6 +673,27 @@ hipError_t hipModuleLaunchKernel(hipFunction_t f,
 }
 
 // ---------------------------------------------------------------------------
+// hiprtc stubs: not implemented, loudly (see hip_runtime_api.h)
+// ---------------------------------------------------------------------------
+
+hipError_t hiprtcCreateProgram(hiprtcProgram*, const char*, const char*, int,
+                               const char**, const char**) {
+    return RET(hipErrorNotSupported);
+}
+hipError_t hiprtcCompileProgram(hiprtcProgram, int, const char**) {
+    return RET(hipErrorNotSupported);
+}
+hipError_t hiprtcGetCodeSize(hiprtcProgram, size_t*) {
+    return RET(hipErrorNotSupported);
+}
+hipError_t hiprtcGetCode(hiprtcProgram, char*) {
+    return RET(hipErrorNotSupported);
+}
+hipError_t hiprtcDestroyProgram(hiprtcProgram*) {
+    return RET(hipErrorNotSupported);
+}
+
+// ---------------------------------------------------------------------------
 // errors
 // ---------------------------------------------------------------------------
 

@@ -136,6 +136,22 @@ hipError_t hipModuleLaunchKernel(hipFunction_t f,
                                  uint32_t sharedMemBytes, hipStream_t stream,
                                  void** kernelParams, void** extra);
 
+// ---- hiprtc: explicitly NOT implemented (plan P2.3 item 6) ----------------
+// Runtime compilation would need a working -x hip mode in VOLT clang
+// (currently blocked by AMDGPU-only driver options); every entry returns
+// hipErrorNotSupported instead of pretending.
+
+typedef struct _hiprtcProgram* hiprtcProgram;
+
+hipError_t hiprtcCreateProgram(hiprtcProgram* prog, const char* src,
+                               const char* name, int numHeaders,
+                               const char** headers, const char** includeNames);
+hipError_t hiprtcCompileProgram(hiprtcProgram prog, int numOptions,
+                                const char** options);
+hipError_t hiprtcGetCodeSize(hiprtcProgram prog, size_t* codeSizeRet);
+hipError_t hiprtcGetCode(hiprtcProgram prog, char* code);
+hipError_t hiprtcDestroyProgram(hiprtcProgram* prog);
+
 // ---- errors ----------------------------------------------------------------
 
 hipError_t hipGetLastError(void);
