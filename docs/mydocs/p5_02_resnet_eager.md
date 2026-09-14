@@ -34,6 +34,6 @@ mini-resnet logits cpu   : [[-0.0451, -0.0726, 0.1493, 0.1896]]
 
 ## 未覆盖(如实)
 
-- `torch.compile`/Inductor 路径:依赖 P4 codegen(开放);`torch.export` 图导出可在 CPU 侧做,设备执行仍走 eager。
+- `torch.compile`/Inductor 路径:依赖两层 —— P4 完整 codegen(Inductor),以及**每个 PrivateUse1 op 的 meta/形状规则**(Dynamo 的 FakeTensor 前端;2026-09-16 实测:custom backend 捕获在 fake_tensor 对 privateuse1 设备的 dispatch 断言处失败,失败模式与预期一致,不静默)。`torch.export` 图导出可在 CPU 侧做,设备执行仍走 eager。
 - torchvision resnet18 全模型:op 集已大体覆盖但需要 7x7 stem conv(LMEM 界内)、ceil_mode 池化等边角 + simx 时长不可行(224² 输入)。
 - fp16 推理、训练、动态 batch:后续节点。

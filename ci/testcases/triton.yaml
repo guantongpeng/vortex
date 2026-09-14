@@ -1,0 +1,18 @@
+# Triton-on-Vortex tests (triton-vortex, plan M3/P4-01). The interpreter specs
+# pin the reference NUMERICS on the host (official-tutorial shapes: vector add,
+# softmax, layernorm) — no Vortex hardware or build tree involved, so they are
+# driverless host cells. The Triton codegen subset (VortexBackend) lands
+# separately; once it does, codegen parity specs against these interpreter
+# goldens are added here.
+category: triton
+defaults:
+  # Host-side interpreter only: xlen-independent, pinned to one value so the
+  # matrix emits a single host cell rather than one per ambient tree.
+  xlen: [64]
+  tier: smoke
+tests:
+  # Interpreter mode (TRITON_INTERPRET=1) numerics for the tutorial kernels,
+  # run through the dedicated conda env that holds torch/triton.
+  - id: interpreter
+    via: script
+    run: "$HOME/miniconda3/envs/vortex/bin/python -m pytest /home/guantp/aichip/vortex/triton-vortex/tests/test_interpreter.py"

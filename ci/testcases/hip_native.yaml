@@ -1,0 +1,61 @@
+category: hip_native
+defaults:
+  xlen:
+  - 32
+  - 64
+  tier: smoke
+tests:
+- id: vecadd
+  via: make-run
+  dir: tests/hip_native/vecadd
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: reduction
+  via: make-run
+  dir: tests/hip_native/reduction
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: sgemm
+  via: make-run
+  dir: tests/hip_native/sgemm
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: stream_overlap
+  via: make-run
+  dir: tests/hip_native/stream_overlap
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: module_api
+  via: make-run
+  dir: tests/hip_native/module_api
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: atomics
+  via: make-run
+  dir: tests/hip_native/atomics
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+  configs: -DVX_CFG_EXT_A_ENABLE
+  tier: full
+- id: rtc_stub
+  via: make-run
+  dir: tests/hip_native/rtc_stub
+  drivers:
+  - simx
+- id: bigargs
+  via: make-run
+  dir: tests/hip_native/bigargs
+  drivers:
+  - simx

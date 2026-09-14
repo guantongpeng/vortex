@@ -1,0 +1,77 @@
+category: dl
+defaults:
+  xlen:
+  - 32
+  - 64
+  tier: smoke
+tests:
+- id: blas
+  via: make-run
+  dir: tests/dl/blas
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: prim
+  via: make-run
+  dir: tests/dl/prim
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: quant
+  via: make-run
+  dir: tests/dl/quant
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: dnn
+  via: make-run
+  dir: tests/dl/dnn
+  target: run-{driver}
+  drivers:
+  - simx
+  - rtlsim
+- id: mxfp8
+  via: make-run
+  dir: tests/dl/mxfp8
+  drivers:
+  - simx
+  - rtlsim
+- id: nvfp4
+  via: make-run
+  dir: tests/dl/nvfp4
+  drivers:
+  - simx
+  - rtlsim
+- id: sparse24
+  via: make-run
+  dir: tests/dl/sparse24
+  drivers:
+  - simx
+  - rtlsim
+- id: attn
+  via: make-run
+  dir: tests/dl/attn
+  drivers:
+  - simx
+  - rtlsim
+- id: llm
+  via: make-run
+  dir: tests/dl/llm
+  drivers:
+  - simx
+  - rtlsim
+- id: mamba
+  via: make-run
+  dir: tests/dl/mamba
+  drivers:
+  - simx
+  - rtlsim
+- id: rng
+  via: make-run
+  dir: tests/dl/rng
+  drivers:
+  - simx
+  - rtlsim
