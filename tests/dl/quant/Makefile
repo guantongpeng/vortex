@@ -8,7 +8,7 @@ RUNTIME_DIR := $(ROOT_DIR)/sw/runtime
 
 CXX := g++
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wfatal-errors -Werror
-CXXFLAGS += -I$(VORTEX_HOME)/sw/dl/include -I$(VORTEX_HOME)/sw/runtime/include
+CXXFLAGS += -I$(VORTEX_HOME)/sw/dl/include -I$(VORTEX_HOME)/sw/dl/src -I$(VORTEX_HOME)/sw/runtime/include
 
 LDFLAGS += -L$(DL_DIR) -lvortex_dl -L$(RUNTIME_DIR) -lvortex
 LDFLAGS += -Wl,-rpath,$(DL_DIR) -Wl,-rpath,$(RUNTIME_DIR)

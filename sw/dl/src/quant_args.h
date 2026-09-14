@@ -81,4 +81,18 @@ typedef struct {
     uint32_t k;
 } vx_quant_gemm_w8a8_args_t;
 
+// FP8 W8A8 GEMM (plan P6-02 Q3 software path): act M x K and weights
+// N x K stored as e4m3 (mode 0) or e5m2 (mode 1), FP32 accumulate, out
+// M x N FP32. Per-tensor scales applied by the caller (dequant on host
+// or a prim kernel); the kernel multiplies raw codes.
+typedef struct {
+    vx_dl_ptr_t act;
+    vx_dl_ptr_t weights;
+    vx_dl_ptr_t out;
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    uint32_t mode;
+} vx_quant_gemm_fp8_args_t;
+
 #endif // VORTEX_DL_QUANT_ARGS_H

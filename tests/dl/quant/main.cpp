@@ -7,6 +7,8 @@
 #include <vortex/dtypes.h>
 #include <vortex2.h>
 
+#include "quant_fp8.h"  // host side of the fp8 conversions (sw/dl/src)
+
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -271,6 +273,50 @@ int main(int argc, char** argv) {
         }
         printf("gemm_w8a8:    max_rel=%.2e bad=%u\n", maxrel, bad);
         if (bad) ++failures;
+    }
+
+    // ---- FP8 e4m3 / e5m2 GEMM (P6-02 software path) --------------------
+    for (uint32_t mode = 0; mode < 2; ++mode) {
+        // Quantize act/w in fp8 on the host with the same header the
+        // kernels use; reference = quantized values, double accumulate.
+        std::vector<uint8_t> a8((size_t)M * K), w8q((size_t)N * K);
+        for (size_t i = 0; i < a8.size(); ++i)
+            a8[i] = mode ? vx_f32_to_e5m2(act[i]) : vx_f32_to_e4m3(act[i]);
+        for (size_t i = 0; i < w8q.size(); ++i)
+            w8q[i] = mode ? vx_f32_to_e5m2(w[i]) : vx_f32_to_e4m3(w[i]);
+        std::vector<double> ref8((size_t)M * N, 0.0);
+        for (uint32_t m = 0; m < M; ++m)
+            for (uint32_t nn = 0; nn < N; ++nn) {
+                double acc = 0.0;
+                for (uint32_t kk = 0; kk < K; ++kk) {
+                    double av = mode ? (double)vx_e5m2_to_f32(a8[(size_t)m * K + kk])
+                                     : (double)vx_e4m3_to_f32(a8[(size_t)m * K + kk]);
+                    double wv = mode ? (double)vx_e5m2_to_f32(w8q[(size_t)nn * K + kk])
+                                     : (double)vx_e4m3_to_f32(w8q[(size_t)nn * K + kk]);
+                    acc += av * wv;
+                }
+                ref8[(size_t)m * N + nn] = acc;
+            }
+        DevBuf bfa = make_buf(dev, a8.size());
+        DevBuf bfw = make_buf(dev, w8q.size());
+        upload(q, bfa, a8.data(), a8.size());
+        upload(q, bfw, w8q.data(), w8q.size());
+        CHECK(vx_quant_gemm_fp8(q, bfa.addr, bfw.addr, bo.addr, M, N, K, mode));
+        CHECK(vx_queue_flush(q));
+        download(q, got_out, bo);
+        uint32_t bad = 0;
+        double maxrel = 0.0;
+        for (size_t i = 0; i < got_out.size(); ++i) {
+            double rel = fabs((double)got_out[i] - ref8[i]) /
+                         (fabs(ref8[i]) + 1e-2);
+            if (rel > maxrel) maxrel = rel;
+            if (rel > 2e-3) ++bad;
+        }
+        printf("gemm_fp8_%s: max_rel=%.2e bad=%u\n",
+               mode ? "e5m2" : "e4m3", maxrel, bad);
+        if (bad) ++failures;
+        vx_buffer_release(bfa.h);
+        vx_buffer_release(bfw.h);
     }
 
     for (DevBuf* b : {&bw, &bp, &bs, &bdq, &ba, &bo, &ba8, &bw8, &bws}) {

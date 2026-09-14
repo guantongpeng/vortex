@@ -29,6 +29,7 @@ struct QuantState {
     vx_kernel_h unpack4 = nullptr;
     vx_kernel_h gemm_w4a16 = nullptr;
     vx_kernel_h gemm_w8a8 = nullptr;
+    vx_kernel_h gemm_fp8 = nullptr;
 };
 
 QuantState g_q;
@@ -71,6 +72,7 @@ vx_quant_status vx_quant_init(vx_device_h dev, const char* vxbin_path) {
         {"quant_unpack4_kernel", &g_q.unpack4},
         {"quant_gemm_w4a16_kernel", &g_q.gemm_w4a16},
         {"quant_gemm_w8a8_kernel", &g_q.gemm_w8a8},
+        {"quant_gemm_fp8_kernel", &g_q.gemm_fp8},
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_q.module, e.name, e.slot) != VX_SUCCESS) {
@@ -84,7 +86,7 @@ vx_quant_status vx_quant_init(vx_device_h dev, const char* vxbin_path) {
 vx_quant_status vx_quant_finalize(void) {
     if (!g_q.module) return VX_QUANT_OK;
     vx_kernel_h ks[] = {g_q.scales4, g_q.pack4, g_q.unpack4, g_q.gemm_w4a16,
-                        g_q.gemm_w8a8};
+                        g_q.gemm_w8a8, g_q.gemm_fp8};
     for (vx_kernel_h k : ks) {
         if (k) vx_kernel_release(k);
     }
@@ -199,6 +201,40 @@ vx_quant_status vx_quant_gemm_w8a8(vx_queue_h q, uint64_t act,
     li.ndim = 3;
     li.grid_dim[0] = (n + 15) / 16;
     li.grid_dim[1] = (m + 15) / 16;  // W8A8 kernel maps blockIdx.y to M
+    li.grid_dim[2] = 1;
+    li.block_dim[0] = 16;
+    li.block_dim[1] = 1;
+    li.block_dim[2] = 1;
+    li.lmem_size = 1024;
+    return vx_enqueue_launch(q, &li, 0, nullptr, nullptr) == VX_SUCCESS
+               ? VX_QUANT_OK
+               : VX_QUANT_ERR_LAUNCH;
+}
+
+vx_quant_status vx_quant_gemm_fp8(vx_queue_h q, uint64_t act,
+                                  uint64_t weights, uint64_t out,
+                                  uint32_t m, uint32_t n, uint32_t k,
+                                  uint32_t mode) {
+    if (!g_q.module) return VX_QUANT_ERR_NOT_INITIALIZED;
+    if (!act || !weights || !out || m == 0 || n == 0 || k == 0 || mode > 1) {
+        return VX_QUANT_ERR_BAD_ARGS;
+    }
+    vx_quant_gemm_fp8_args_t args = {};
+    args.act = (vx_dl_ptr_t)act;
+    args.weights = (vx_dl_ptr_t)weights;
+    args.out = (vx_dl_ptr_t)out;
+    args.m = m;
+    args.n = n;
+    args.k = k;
+    args.mode = mode;
+    vx_launch_info_t li = {};
+    li.struct_size = sizeof(li);
+    li.kernel = g_q.gemm_fp8;
+    li.args_host = &args;
+    li.args_size = sizeof(args);
+    li.ndim = 3;
+    li.grid_dim[0] = (n + 15) / 16;
+    li.grid_dim[1] = (m + 15) / 16;
     li.grid_dim[2] = 1;
     li.block_dim[0] = 16;
     li.block_dim[1] = 1;

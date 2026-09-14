@@ -66,6 +66,14 @@ vx_quant_status vx_quant_gemm_w8a8(vx_queue_h q, uint64_t act,
                                    float act_scale, uint64_t out,
                                    uint32_t m, uint32_t n, uint32_t k);
 
+// FP8 W8A8 (software path): mode 0 = e4m3, 1 = e5m2. Per-tensor scale
+// application stays with the caller; the hardware TCU FP8 variant
+// (VX_TCU_DTYPE_FP8) replaces this kernel behind the same signature.
+vx_quant_status vx_quant_gemm_fp8(vx_queue_h q, uint64_t act,
+                                  uint64_t weights, uint64_t out,
+                                  uint32_t m, uint32_t n, uint32_t k,
+                                  uint32_t mode);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

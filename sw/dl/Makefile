@@ -88,10 +88,16 @@ Q_PACK_SIZE := 24
 Q_GEMM4_SIZE := 32
 Q_GEMM8_SIZE := 32
 endif
-QUANT_META := [{"name": "quant_scales4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_pack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_unpack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_gemm_w4a16_kernel", "args_size": $(Q_GEMM4_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "quant_gemm_w8a8_kernel", "args_size": $(Q_GEMM8_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
+# gemm fp8: 3 ptr + 4 u32 -> rv64 40, rv32 28
+ifeq ($(XLEN),64)
+Q_FP8_SIZE := 40
+else
+Q_FP8_SIZE := 28
+endif
+QUANT_META := [{"name": "quant_scales4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_pack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_unpack4_kernel", "args_size": $(Q_PACK_SIZE)}, {"name": "quant_gemm_w4a16_kernel", "args_size": $(Q_GEMM4_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "quant_gemm_w8a8_kernel", "args_size": $(Q_GEMM8_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "quant_gemm_fp8_kernel", "args_size": $(Q_FP8_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
 
 quant.vxbin: $(SRC_DIR)/quant_kernels.hip $(SRC_DIR)/quant_args.h \
-             $(VORTEX_HOME)/ci/hipcc_vortex.py
+             $(SRC_DIR)/quant_fp8.h $(VORTEX_HOME)/ci/hipcc_vortex.py
 	echo '$(QUANT_META)' > quant_meta.json
 	VX_KERNEL_METADATA=$$PWD/quant_meta.json \
 	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@

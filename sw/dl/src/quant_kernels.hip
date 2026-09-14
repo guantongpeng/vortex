@@ -23,6 +23,7 @@
 #include <math.h>
 
 #include "quant_args.h"
+#include "quant_fp8.h"
 
 #define Q_TILE 16
 #define Q_KC 8
@@ -224,4 +225,52 @@ __global__ void quant_gemm_w8a8_kernel(vx_quant_gemm_w8a8_args_t* arg) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FP8 W8A8 GEMM: same 16x16-tile shape, codes converted at staging time.
+// ---------------------------------------------------------------------------
+
+__global__ void quant_gemm_fp8_kernel(vx_quant_gemm_fp8_args_t* arg) {
+    float* lA = (float*)__local_mem();
+    float* lB = lA + Q_TILE * Q_KC;
+    const uint32_t t = threadIdx.x;
+    const uint32_t r0 = (t / 4) * 4, c0 = (t % 4) * 4;
+    const uint32_t m0 = blockIdx.y * Q_TILE;
+    const uint32_t n0 = blockIdx.x * Q_TILE;
+    float acc[4][4] = {{0}};
+    for (uint32_t k0 = 0; k0 < arg->k; k0 += Q_KC) {
+        for (uint32_t e = t; e < Q_TILE * Q_KC; e += 16) {
+            const uint32_t r = e / Q_KC, kk = e % Q_KC;
+            const uint32_t gm = m0 + r, gk = k0 + kk;
+            float a = 0.0f, w = 0.0f;
+            if (gm < arg->m && gk < arg->k) {
+                const uint8_t c = ((const uint8_t*)(uintptr_t)arg->act)
+                    [(size_t)gm * arg->k + gk];
+                a = arg->mode == 0 ? vx_e4m3_to_f32(c) : vx_e5m2_to_f32(c);
+            }
+            if (n0 + r < arg->n && gk < arg->k) {
+                const uint8_t c = ((const uint8_t*)(uintptr_t)arg->weights)
+                    [(size_t)(n0 + r) * arg->k + gk];
+                w = arg->mode == 0 ? vx_e4m3_to_f32(c) : vx_e5m2_to_f32(c);
+            }
+            lA[r * Q_KC + kk] = a;
+            lB[kk * Q_TILE + r] = w;
+        }
+        __syncthreads();
+        for (uint32_t kk = 0; kk < Q_KC; ++kk)
+            for (uint32_t ii = 0; ii < 4; ++ii) {
+                float a = lA[(r0 + ii) * Q_KC + kk];
+                for (uint32_t jj = 0; jj < 4; ++jj)
+                    acc[ii][jj] += a * lB[kk * Q_TILE + c0 + jj];
+            }
+        __syncthreads();
+    }
+    for (uint32_t ii = 0; ii < 4; ++ii)
+        for (uint32_t jj = 0; jj < 4; ++jj) {
+            const uint32_t gm = m0 + r0 + ii, gn = n0 + c0 + jj;
+            if (gm < arg->m && gn < arg->n)
+                ((float*)(uintptr_t)arg->out)[(size_t)gm * arg->n + gn] =
+                    acc[ii][jj];
+        }
 }
