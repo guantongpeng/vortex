@@ -86,6 +86,8 @@ hip.hipMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
 hip.hipMemcpy.restype = ctypes.c_int
 hip.hipModuleLoad.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p]
 hip.hipModuleLoad.restype = ctypes.c_int
+hip.hipModuleUnload.argtypes = [ctypes.c_void_p]
+hip.hipModuleUnload.restype = ctypes.c_int
 hip.hipModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p),
                                      ctypes.c_void_p, ctypes.c_char_p]
 hip.hipModuleGetFunction.restype = ctypes.c_int
@@ -146,6 +148,10 @@ def load_module(path):
     return m.value
 
 
+def unload_module(module):
+    check(hip.hipModuleUnload(ctypes.c_void_p(module)), "hipModuleUnload")
+
+
 def get_function(module, name):
     f = ctypes.c_void_p()
     check(hip.hipModuleGetFunction(ctypes.byref(f), ctypes.c_void_p(module),
@@ -153,12 +159,14 @@ def get_function(module, name):
     return f.value
 
 
-def launch(func, grid, block, args_blob):
-    """Launch with the single-pointer arg-block ABI (args_size = len)."""
+def launch(func, grid, block, args_blob, shared=0):
+    """Launch with the single-pointer arg-block ABI (args_size = len).
+    `shared` maps to the launch's lmem_size field (kernels using
+    __local_mem() must pass their CTA local memory request)."""
     params = (ctypes.c_void_p * 1)(ctypes.cast(args_blob, ctypes.c_void_p))
     check(hip.hipModuleLaunchKernel(
         ctypes.c_void_p(func), grid[0], grid[1] or 1, grid[2] or 1,
-        block[0], block[1] or 1, block[2] or 1, 0, None, params, None),
+        block[0], block[1] or 1, block[2] or 1, shared, None, params, None),
         "hipModuleLaunchKernel")
 
 

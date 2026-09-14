@@ -6,6 +6,7 @@ triton_vortex/__init__.py
 triton_vortex/compiler.py
 triton_vortex/driver.py
 triton_vortex/hip.py
+triton_vortex/ttir_to_c.py
 triton_vortex.egg-info/PKG-INFO
 triton_vortex.egg-info/SOURCES.txt
 triton_vortex.egg-info/dependency_links.txt

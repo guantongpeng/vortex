@@ -11,13 +11,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""triton-vortex compiler backend (plan P4-01, v0.1).
+"""triton-vortex compiler backend (plan P4-01/P4-02).
 
 Registers the `vortex` backend and reuses Triton's generic frontend
-lowering (ttir/ttgir/llir). The final `llir -> vxbin` translation is NOT
-implemented yet — see the roadmap in the package README. Kernels raised to
-the `bin` stage fail with an explicit error naming the missing pieces,
-never with a silent CPU path.
+lowering (ttir/ttgir). The final lowering to a device image is a
+deliberate, documented source-to-source path: `make_llir` serializes the
+TTIR and transpiles it to a KMU C kernel (triton_vortex.ttir_to_c), and
+`make_vxbin` compiles that C with ci/hipcc_vortex.py --kernel-lib=vortex2
+into a real .vxbin recorded in the compile metadata. Ops outside the
+transpiler whitelist fail with NotImplementedError naming the op — never
+a silent CPU path.
 """
 
 from __future__ import annotations
@@ -61,6 +64,11 @@ class VortexOptions:
         self.debug = kwargs.get("debug", False)
         self.bench = kwargs.get("bench", False)
         self.sanitize_overflow = False
+        # Frontend hooks consulted during TTIR generation (tl.dot et al.
+        # query these before the transpiler ever sees the op; the values
+        # only shape IR generation, never the P4-02 lowering).
+        self.allowed_dot_input_precisions = ["tf32", "tf32x3", "ieee"]
+        self.max_num_imprecise_acc_default = 0
         self.arch = "vortex64"
 
     def hash(self):
@@ -73,6 +81,7 @@ class VortexBackend(BaseBackend):
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
         self.capability = 1  # vortex64 fpu baseline
+        self.binary_ext = "vxbin"
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -87,17 +96,31 @@ class VortexBackend(BaseBackend):
     def get_module_map(self) -> Dict[str, ModuleType]:
         return {}
 
+    def pack_metadata(self, metadata):
+        # Consumed by the launcher glue (driver.VortexUtils.launch): the
+        # launch geometry and arg-block contract of the transpiled kernel.
+        return {
+            "name": metadata.name,
+            "num_warps": metadata.num_warps,
+            "shared": metadata.shared,
+            "args_size": metadata.args_size,
+            "sig": metadata.sig,
+        }
+
     def load_dialects(self, ctx):
         pass
 
     def get_codegen_implementation(self, options):
-        # Minimal codegen hooks: Triton's generic code generator consults
-        # these for naming/attribute decisions; the defaults (shared with
-        # the in-tree backends' base behavior) suffice for IR generation.
-        from triton.runtime import interpreter as _interp  # noqa: F401
-        codegen_fns = type("CodegenFns", (), {})()
-        module_map = {}
-        return codegen_fns, module_map
+        # Minimal codegen hooks: Triton's semantic layer queries these as a
+        # dict during IR generation. min_dot_size is permissive so tl.dot
+        # kernels reach TTIR and are then rejected by the P4-02 transpiler
+        # whitelist with an error naming tt.dot (instead of an opaque
+        # AttributeError inside the frontend).
+        # NOTE: return the dict itself — compile() forwards this verbatim
+        # to ASTSource.make_ir (the nvidia backend returns a bare dict).
+        return {
+            "min_dot_size": lambda lhs_type, rhs_type: (1, 1, 1),
+        }
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
@@ -110,7 +133,10 @@ class VortexBackend(BaseBackend):
                 "triton-vortex: only Language.TRITON is wired up")
         stages["llir"] = lambda src, metadata: self.make_llir(
             src, metadata, options)
-        stages["bin"] = lambda src, metadata: self.make_vxbin(
+        # NOTE: the stage name is the artifact extension compile() uses;
+        # it must equal binary_ext ("vxbin") so CompiledKernel.asm reads
+        # the device image as bytes.
+        stages["vxbin"] = lambda src, metadata: self.make_vxbin(
             src, metadata, options)
 
     # ---- generic Triton passes -------------------------------------------
@@ -136,25 +162,44 @@ class VortexBackend(BaseBackend):
         # per-backend C++ pass (nvidia.passes.ttgpuir.add_to_llvmir /
         # AMD's equivalent) — there is no target-generic entry. A Vortex
         # version means an MLIR pass linked into the backend; until then
-        # the pipeline deliberately stops before layout legalization and
-        # make_vxbin raises (see below). ttgir is passed through so IR
-        # dumps remain usable for writing that pass.
+        # the module is passed through as TTIR and the final lowering is
+        # the P4-02 source-to-source path in make_llir below. ttgir stays
+        # a real (pass-through) stage so IR dumps remain usable for
+        # writing that pass later.
         return mod
 
     # ---- the Vortex-specific final stage ----
 
     def make_llir(self, mod, metadata, opt):
-        raise NotImplementedError(
-            "triton-vortex: the ttgir->llvm-ir pass is backend-specific "
-            "(see make_ttgir note); a Vortex MLIR pass must be written and "
-            "linked into the backend before an llir even exists to lower "
-            "into a vxbin. Roadmap: (1) Vortex add_to_llvmir mapping "
-            "program-id/lane ops onto the vx_spawn2 CSRs, (2) VOLT clang "
-            "-x ir + the hipcc two-pass link to vxbin, (3) VXKMDATA arg "
-            "metadata from the Triton signature. Until then: interpreter "
-            "for reference numerics, triton_vortex.hip for device runs.")
+        """TTIR -> C transpilation (plan P4-02).
 
-    def make_vxbin(self, llir_bytes, metadata, opt):
-        raise NotImplementedError(
-            "triton-vortex: unreachable before make_llir is implemented "
-            "(see make_llir).")
+        The per-backend ttgir->llvm-ir MLIR pass is not available (see
+        make_ttgir), so the elementwise subset is source-to-source lowered
+        instead: the TTIR module is serialized and transpiled by
+        triton_vortex.ttir_to_c into a KMU C kernel; the returned "llir"
+        artifact is that C source (kept in the cache next to the vxbin for
+        reproducibility). Anything outside the whitelist raises
+        NotImplementedError naming the op.
+        """
+        from . import ttir_to_c
+        ptr_bits = int(str(opt.arch)[-2:])
+        info = ttir_to_c.transpile(mod, ptr_bits=ptr_bits)
+        metadata["name"] = info["name"]
+        metadata["shared"] = info["lmem"]        # CTA local memory bytes
+        metadata["args_size"] = info["args_size"]
+        # Host packing contract: ordered [param, pack_args fmt] pairs;
+        # constexprs are baked into the kernel and never appear here.
+        metadata["sig"] = [[f[0], f[2]] for f in info["args"]]
+        return info["c_src"]
+
+    def make_vxbin(self, c_src, metadata, opt):
+        """Compile the transpiled C with ci/hipcc_vortex.py into a real
+        .vxbin written next to the cache metadata; return its bytes."""
+        from . import ttir_to_c
+        ptr_bits = int(str(opt.arch)[-2:])
+        vxbin_path = ttir_to_c.compile_vxbin(
+            c_src, metadata["name"], metadata["args_size"],
+            metadata["shared"], metadata["hash"], ptr_bits=ptr_bits)
+        metadata["vxbin_path"] = vxbin_path
+        with open(vxbin_path, "rb") as f:
+            return f.read()
