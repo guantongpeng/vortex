@@ -40,20 +40,24 @@ static inline vx_fp8e4m3_t vx_f32_to_e4m3(float f) {
     uint32_t man = x & 0x7fffff;
 
     if (biased == 0xff) return (vx_fp8e4m3_t)(sign | 0x7f);  // inf/nan -> nan
+    if (biased == 0) return (vx_fp8e4m3_t)sign;               // f32 subnormal -> 0
     int32_t exp = (int32_t)biased - 127 + 7;                  // fp8 bias
     if (exp >= 16) return (vx_fp8e4m3_t)(sign | 0x7e);        // saturate to 448
     if (exp <= 0) {
-        if (exp < -3) return (vx_fp8e4m3_t)sign;              // underflow -> 0
-        // subnormal: value = man(24b incl. implicit) * 2^(exp-3-... )
+        // Subnormal e4m3 grid: q * 2^-9 with q in [0,8). The f32 value is
+        // man24 * 2^(biased-127-23), so q = man24 * 2^(biased-141) rounded
+        // to nearest even. The shift applies to the 24-bit mantissa — an
+        // earlier revision shifted 17 bits too few, which rounded every
+        // input in [2^-10, 2^-6) up to the minimum normal.
+        if (exp < -3) return (vx_fp8e4m3_t)sign;              // < half of min subnormal
         uint32_t man24 = man | 0x800000;
-        uint32_t shift = (uint32_t)(4 - exp);                  // 4..7
+        uint32_t shift = (uint32_t)(141 - biased);            // 21..23
         uint32_t q = man24 >> shift;
         uint32_t rem = man24 & ((1u << shift) - 1);
         uint32_t half = 1u << (shift - 1);
         if (rem > half || (rem == half && (q & 1))) ++q;
-        if (q > 0x7) q = 0x8;                                  // carry to min normal
-        if (q & 0x8) {                                         // becomes normal
-            return (vx_fp8e4m3_t)(sign | (1u << 3) | 0);       // exp=1, man=0
+        if (q > 0x7) {
+            return (vx_fp8e4m3_t)(sign | 0x08);               // carried to min normal
         }
         return (vx_fp8e4m3_t)(sign | q);
     }
@@ -65,6 +69,11 @@ static inline vx_fp8e4m3_t vx_f32_to_e4m3(float f) {
         if (m > 0x7) { m = 0; ++exp; }                         // carry
     }
     if (exp >= 16) return (vx_fp8e4m3_t)(sign | 0x7e);        // saturate
+    if (exp == 15 && m == 7) {
+        // RNE reached 480, whose encoding is the reserved NaN code —
+        // saturate to the largest finite value 448 instead.
+        return (vx_fp8e4m3_t)(sign | 0x7e);
+    }
     return (vx_fp8e4m3_t)(sign | ((uint32_t)exp << 3) | m);
 }
 
@@ -108,16 +117,20 @@ static inline vx_fp8e5m2_t vx_f32_to_e5m2(float f) {
     int32_t exp = (int32_t)biased - 127 + 15;
     if (exp >= 31) return (vx_fp8e5m2_t)(sign | 0x7c);        // inf
     if (exp <= 0) {
-        if (exp < -2) return (vx_fp8e5m2_t)sign;
+        // Subnormal e5m2 grid: q * 2^-16 with q in [0,4). q is the f32
+        // 24-bit mantissa scaled by 2^(biased-134), RNE (24-bit-mantissa
+        // shift; an earlier revision was 17 bits too small).
+        if (exp < -2) return (vx_fp8e5m2_t)sign;               // rounds to zero
         uint32_t man24 = man | 0x800000;
-        uint32_t shift = (uint32_t)(3 - exp);                  // 3..5
+        uint32_t shift = (uint32_t)(134 - biased);             // 22
         uint32_t q = man24 >> shift;
         uint32_t rem = man24 & ((1u << shift) - 1);
         uint32_t half = 1u << (shift - 1);
         if (rem > half || (rem == half && (q & 1))) ++q;
-        if (q > 0x3) { q = 0; exp = 1; }
-        else if (q & 0x0) { /* subnormal stays */ }
-        if (exp == 1 && q == 0) {}                             // carried below
+        if (q > 0x3) {
+            // carried into the minimum normal (2^-15)
+            return (vx_fp8e5m2_t)(sign | 0x04);
+        }
         return (vx_fp8e5m2_t)(sign | q);                       // exp=0, subnormal
     }
     uint32_t m = man >> 21;

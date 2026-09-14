@@ -15,6 +15,33 @@
 #include <cstring>
 #include <vector>
 
+// Independent RNE oracle for the fp8 encoders: scan the |decode| of every
+// finite code (decoders are simple and separately spot-checked), pick the
+// nearest with even-mantissa ties, saturate beyond the format range. This
+// avoids the circularity of testing an encoder against itself — the audit
+// that found the two encoder bugs (subnormal window, top-binade NaN) showed
+// why a mirror test alone is not enough.
+static uint8_t fp8_oracle(float x, bool e5) {
+    double ax = std::fabs((double)x);
+    uint8_t best_c = 0;
+    double bestd = 1e300;
+    int best_tie = -1;
+    for (int c = 0; c < 128; ++c) {
+        if (e5) { if (((c >> 2) & 0x1f) == 0x1f) continue; }
+        else    { if (c == 0x7f) continue; }
+        float v = e5 ? vx_e5m2_to_f32((uint8_t)c) : vx_e4m3_to_f32((uint8_t)c);
+        double d = std::fabs((double)v - ax);
+        int mant = e5 ? (c & 0x3) : (c & 0x7);
+        int tie = (mant % 2 == 0);
+        if (d < bestd || (d == bestd && tie && !best_tie)) {
+            bestd = d; best_c = (uint8_t)c; best_tie = tie;
+        }
+    }
+    if (e5 && ax > 61440.0) best_c = 0x7c;  // past max-finite/inf midpoint
+    if (!e5 && ax > 448.0) best_c = 0x7e;   // saturating format
+    return (uint8_t)(best_c | (x < 0 ? 0x80 : 0x00));
+}
+
 #define CHECK(expr) do { \
     if ((expr) != 0) { \
         fprintf(stderr, "FAILED at %s:%d: '%s'\n", __FILE__, __LINE__, #expr); \
@@ -273,6 +300,32 @@ int main(int argc, char** argv) {
         }
         printf("gemm_w8a8:    max_rel=%.2e bad=%u\n", maxrel, bad);
         if (bad) ++failures;
+    }
+
+    // ---- FP8 encoder oracle (independent of the mirror tests) ------------
+    {
+        std::vector<float> xs;
+        float corners[] = {0.001953125f, 0.00390625f, 0.0078125f, 0.015625f,
+                           0.001f, 0.03f, 448.0f, 449.0f, 464.0f, 465.0f,
+                           479.9f, 480.0f, 512.0f, 1000.0f, 0.5f, 1e-30f,
+                           1e30f, 57344.0f, 60000.0f, 1.0f / 1024, 1.0f / 2048};
+        for (float c : corners) { xs.push_back(c); xs.push_back(-c); }
+        uint32_t seed2 = 987654321;
+        for (int i = 0; i < 200000; ++i) {
+            seed2 = seed2 * 1103515245u + 12345u;
+            uint32_t bits = (seed2 ^ (seed2 >> 13)) * 2654435761u;
+            float f;
+            memcpy(&f, &bits, 4);
+            if (std::isfinite((double)f)) xs.push_back(f);
+        }
+        uint32_t bad4 = 0, bad5 = 0;
+        for (float x : xs) {
+            if (vx_f32_to_e4m3(x) != fp8_oracle(x, false)) ++bad4;
+            if (vx_f32_to_e5m2(x) != fp8_oracle(x, true)) ++bad5;
+        }
+        printf("fp8_oracle:    e4m3_bad=%u e5m2_bad=%u (of %zu pts)\n",
+               bad4, bad5, xs.size());
+        if (bad4 || bad5) ++failures;
     }
 
     // ---- FP8 e4m3 / e5m2 GEMM (P6-02 software path) --------------------
