@@ -21,7 +21,9 @@ LDLIBS += -L$(RUNTIME_DIR) -lvortex
 
 PROJECT := libvortex_dl.so
 
-OBJS := blas_host.o prim_host.o quant_host.o dnn_host.o
+OBJS := blas_host.o prim_host.o quant_host.o dnn_host.o mxfp8_host.o \
+         nvfp4_host.o sparse24_host.o attn_host.o llm_host.o mamba_host.o \
+         rng_host.o
 
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) \
@@ -55,7 +57,8 @@ PRIM_RMSNORM_SIZE := 20
 endif
 PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
-all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin
+all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin mxfp8.vxbin \
+     nvfp4.vxbin sparse24.vxbin attn.vxbin llm.vxbin mamba.vxbin rng.vxbin
 
 blas.vxbin: $(SRC_DIR)/blas_kernels.hip $(SRC_DIR)/blas_args.h \
             $(VORTEX_HOME)/ci/hipcc_vortex.py
@@ -129,10 +132,103 @@ dnn.vxbin: $(SRC_DIR)/dnn_kernels.hip $(SRC_DIR)/dnn_args.h \
 dnn_host.o: $(SRC_DIR)/dnn_host.cpp $(SRC_DIR)/dnn_args.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# --- new modules (workflow batch): metadata args_size = true struct sizeof --
+# mxfp8 pack/unpack: 3p+3u -> 40/24; gemm: 5p+4u -> 56/36
+# nvfp4 pack: 3p+f+3u -> 40/28; unpack/gemm same family 40/56 (rv64) with
+#   rv32 28/44 (unpack: 3p+f+u; gemm: 4p+f+3u)
+# sparse24 prune: 3p+2u -> 32/20; gemm: 4p+4u -> 48/32
+# attn: 4p+5u+f -> 56/40
+# llm rope 1p+3u+f -> 16/12; swiglu 3p+u -> 32/16; embed 2p+2u -> 24/12;
+#   kv_append 2p+3u+f -> 24/16 (check struct; kept in meta per kernel)
+# mamba scan: 6p+4u -> 64/40
+# rng: 1p+u+2xu64 -> 32/20
+ifeq ($(XLEN),64)
+MX_PACK := 40
+MX_GEMM := 56
+N4_PACK := 40
+N4_GEMM := 56
+SP_PRUNE := 32
+SP_GEMM := 48
+ATTN_SZ := 56
+LLM_ROPE := 16
+LLM_SWI := 32
+LLM_EMB := 24
+LLM_KV := 24
+MAMBA_SZ := 64
+RNG_SZ := 32
+else
+MX_PACK := 24
+MX_GEMM := 36
+N4_PACK := 28
+N4_GEMM := 44
+SP_PRUNE := 20
+SP_GEMM := 32
+ATTN_SZ := 40
+LLM_ROPE := 12
+LLM_SWI := 16
+LLM_EMB := 12
+LLM_KV := 20
+MAMBA_SZ := 40
+RNG_SZ := 20
+endif
+VXBIN_RULE = echo '$(2)' > $(1)_meta.json && \
+	VX_KERNEL_METADATA=$$PWD/$(1)_meta.json $(HIPCC) $(HIPCC_FLAGS) $(3) -o $@
+
+MXFP8_META := [{"name": "mxfp8_scales_kernel", "args_size": $(MX_PACK)}, {"name": "mxfp8_pack_kernel", "args_size": $(MX_PACK)}, {"name": "mxfp8_dequant_kernel", "args_size": $(MX_PACK)}, {"name": "mxfp8_gemm_kernel", "args_size": $(MX_GEMM), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
+NVFP4_META := [{"name": "nvfp4_scales_kernel", "args_size": $(N4_PACK)}, {"name": "nvfp4_pack_kernel", "args_size": $(N4_PACK)}, {"name": "nvfp4_unpack_kernel", "args_size": $(N4_PACK)}, {"name": "nvfp4_gemm_kernel", "args_size": $(N4_GEMM), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
+SPARSE24_META := [{"name": "sparse24_prune_kernel", "args_size": $(SP_PRUNE)}, {"name": "sparse24_gemm_kernel", "args_size": $(SP_GEMM), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
+ATTN_META := [{"name": "attn_forward_kernel", "args_size": $(ATTN_SZ)}]
+LLM_META := [{"name": "llm_rope_kernel", "args_size": $(LLM_ROPE)}, {"name": "llm_swiglu_kernel", "args_size": $(LLM_SWI)}, {"name": "llm_embedding_kernel", "args_size": $(LLM_EMB)}, {"name": "llm_kv_append_kernel", "args_size": $(LLM_KV)}]
+MAMBA_META := [{"name": "mamba_scan_kernel", "args_size": $(MAMBA_SZ)}]
+RNG_META := [{"name": "rng_philox4x32_uniform_kernel", "args_size": $(RNG_SZ)}]
+
+mxfp8.vxbin: $(SRC_DIR)/mxfp8_kernels.hip $(SRC_DIR)/mxfp8_args.h $(SRC_DIR)/quant_fp8.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(MXFP8_META)' > mxfp8_meta.json
+	VX_KERNEL_METADATA=$$PWD/mxfp8_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+nvfp4.vxbin: $(SRC_DIR)/nvfp4_kernels.hip $(SRC_DIR)/nvfp4_args.h $(SRC_DIR)/quant_fp8.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(NVFP4_META)' > nvfp4_meta.json
+	VX_KERNEL_METADATA=$$PWD/nvfp4_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+sparse24.vxbin: $(SRC_DIR)/sparse24_kernels.hip $(SRC_DIR)/sparse24_args.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(SPARSE24_META)' > sparse24_meta.json
+	VX_KERNEL_METADATA=$$PWD/sparse24_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+attn.vxbin: $(SRC_DIR)/attn_kernels.hip $(SRC_DIR)/attn_args.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(ATTN_META)' > attn_meta.json
+	VX_KERNEL_METADATA=$$PWD/attn_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+llm.vxbin: $(SRC_DIR)/llm_kernels.hip $(SRC_DIR)/llm_args.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(LLM_META)' > llm_meta.json
+	VX_KERNEL_METADATA=$$PWD/llm_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+mamba.vxbin: $(SRC_DIR)/mamba_kernels.hip $(SRC_DIR)/mamba_args.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(MAMBA_META)' > mamba_meta.json
+	VX_KERNEL_METADATA=$$PWD/mamba_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+rng.vxbin: $(SRC_DIR)/rng_kernels.hip $(SRC_DIR)/rng_args.h $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(RNG_META)' > rng_meta.json
+	VX_KERNEL_METADATA=$$PWD/rng_meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+mxfp8_host.o: $(SRC_DIR)/mxfp8_host.cpp $(SRC_DIR)/mxfp8_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+nvfp4_host.o: $(SRC_DIR)/nvfp4_host.cpp $(SRC_DIR)/nvfp4_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+sparse24_host.o: $(SRC_DIR)/sparse24_host.cpp $(SRC_DIR)/sparse24_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+attn_host.o: $(SRC_DIR)/attn_host.cpp $(SRC_DIR)/attn_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+llm_host.o: $(SRC_DIR)/llm_host.cpp $(SRC_DIR)/llm_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+mamba_host.o: $(SRC_DIR)/mamba_host.cpp $(SRC_DIR)/mamba_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+rng_host.o: $(SRC_DIR)/rng_host.cpp $(SRC_DIR)/rng_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 $(PROJECT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 clean:
-	rm -f *.o $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin blas_meta.json prim_meta.json quant_meta.json dnn_meta.json *.hipcc_tmp*
+	rm -f *.o $(PROJECT) *.vxbin *_meta.json *.hipcc_tmp*
 
 .PHONY: all clean
