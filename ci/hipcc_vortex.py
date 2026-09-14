@@ -110,6 +110,7 @@ def build_command(args, extra, status):
     command.extend([
         "-I" + (paths["hip_include"] or DEFAULT_HIP_INCLUDE),
         "-I" + os.path.join(REPO_ROOT, "sw", "kernel", "include"),
+        "-I" + os.path.join(REPO_ROOT, "sw", "dl", "include"),
         "-I" + os.path.join(REPO_ROOT, "sw"),
         "-I" + os.path.join(args.build_dir, "sw"),
         "-O3",
