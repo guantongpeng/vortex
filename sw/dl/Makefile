@@ -21,7 +21,7 @@ LDLIBS += -L$(RUNTIME_DIR) -lvortex
 
 PROJECT := libvortex_dl.so
 
-OBJS := blas_host.o prim_host.o quant_host.o
+OBJS := blas_host.o prim_host.o quant_host.o dnn_host.o
 
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) \
@@ -55,7 +55,7 @@ PRIM_RMSNORM_SIZE := 20
 endif
 PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
-all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin
+all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin
 
 blas.vxbin: $(SRC_DIR)/blas_kernels.hip $(SRC_DIR)/blas_args.h \
             $(VORTEX_HOME)/ci/hipcc_vortex.py
@@ -99,10 +99,34 @@ quant.vxbin: $(SRC_DIR)/quant_kernels.hip $(SRC_DIR)/quant_args.h \
 quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# dnn arg-block sizes (device-width pointers).
+# conv: 4 ptr + 17 u32 -> rv64 96, rv32 84 (align 4/8 resp.)
+# pool: 2 ptr + 15 u32 -> rv64 88, rv32 68
+# bn:   6 ptr + 2 u32  -> rv64 56, rv32 32
+ifeq ($(XLEN),64)
+D_CONV_SIZE := 96
+D_POOL_SIZE := 88
+D_BN_SIZE := 56
+else
+D_CONV_SIZE := 84
+D_POOL_SIZE := 68
+D_BN_SIZE := 32
+endif
+DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE)}]
+
+dnn.vxbin: $(SRC_DIR)/dnn_kernels.hip $(SRC_DIR)/dnn_args.h \
+           $(VORTEX_HOME)/ci/hipcc_vortex.py
+	echo '$(DNN_META)' > dnn_meta.json
+	VX_KERNEL_METADATA=$$PWD/dnn_meta.json \
+	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@
+
+dnn_host.o: $(SRC_DIR)/dnn_host.cpp $(SRC_DIR)/dnn_args.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 $(PROJECT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
 clean:
-	rm -f *.o $(PROJECT) blas.vxbin prim.vxbin quant.vxbin blas_meta.json prim_meta.json quant_meta.json *.hipcc_tmp*
+	rm -f *.o $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin blas_meta.json prim_meta.json quant_meta.json dnn_meta.json *.hipcc_tmp*
 
 .PHONY: all clean

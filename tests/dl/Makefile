@@ -5,7 +5,7 @@ include $(ROOT_DIR)/config.mk
 # they need a TOOLDIR with the native HIP toolchain inputs plus a
 # configured build tree with sw/dl built.
 
-TESTS := blas prim quant
+TESTS := blas prim quant dnn
 
 BACKENDS := simx rtlsim
 
