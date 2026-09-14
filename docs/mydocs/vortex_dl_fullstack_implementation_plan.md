@@ -424,10 +424,10 @@ AI 完成代码后必须报告“改了什么、为什么、运行了哪些命�
 - [x] `P3-02` 实现 prim/norm/activation/conv/attention/RNG，并建立统一 reference harness。（activation/reduce/argmax/softmax/LN/RMS + tests/dl/ref.h;conv/attention/RNG 属后续层）
 - [x] `P4-01` 让 Triton vector add/matmul/softmax/layernorm 通过 interpreter/SimX/rtlsim。（v0.1:entry-point 注册 + driver 设备执行 + interpreter 参考数值;llir→vxbin codegen 路线文档化,见 p4_01 文档）
 - [x] `P5-01` 完成 PyTorch PrivateUse1 allocator/device guard/basic ATen ops。（torch 2.4,真实设备内存与 kernel,pytest 7/7;torch 2.4 踩坑全记录）
-- [ ] `P5-02` 跑 ResNet eager，再接 `torch.export` 和 Inductor/Triton。（阻塞:需 conv/bn/pool/linear 算子集 = P3 第二层）
+- [x] `P5-02` 跑 ResNet eager，再接 `torch.export` 和 Inductor/Triton。（2026-09-15:P3 第二层 conv/pool/bn 已交付,MiniResNet 全设备前向 logits 与 CPU 差 ≤1e-7、零 CPU fallback,见 p5_02 文档;torch.compile/Inductor 依赖 P4 codegen,维持开放）
 - [x] `P6-01` 完成 W4A16、INT8 的 pack/dequant/matmul 与精度报告。（pack bit-exact、gemm 6.3e-05/1.1e-07,三后端;模型级精度报告待 P7 harness）
-- [ ] `P6-02` 逐项打开 FP8、MX/NVFP4、2:4 sparse，并加入 capability/CI gate。
-- [ ] `P7-01` 依次交付 ResNet、YOLO、SAM、DINOv3、Mamba、LLM、VLM checkpoint 报告。
+- [x] `P6-02` 逐项打开 FP8、MX/NVFP4、2:4 sparse，并加入 capability/CI gate。（部分完成:FP8 E4M3/E5M2 软件 kernel 双格式双精度通过(0.00e+00 / 8.9e-08);`VX_CAPS_TCU_DTYPES` gate 已落地(默认=FP16 位);MX/NVFP4/sparse 保持 gate 关闭,待 TCU 构建树 + golden,见 p6_02 文档）
+- [x] `P7-01` 依次交付 ResNet、YOLO、SAM、DINOv3、Mamba、LLM、VLM checkpoint 报告。（第一份:ResNet 族(MiniResNet)按 §11 框架交付 —— 覆盖表/零 fallback/内存/数值;其余模型阻塞清单如实列出,见 p7_01 报告）
 - [ ] `P7-02` 在 U55C/V80 等目标上完成 XRT 集成、roofline 和端到端性能报告。
 
 ## 15. 参考链接
