@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Error conversion and per-thread last error
@@ -111,15 +112,55 @@ vx_result_t queue_create_profiled(vx_device_h dev, vx_queue_h* out) {
     return vx_queue_create(dev, &qi, out);
 }
 
+// Every queue this process has handed out, so hipDeviceSynchronize can be a
+// device-wide barrier rather than a default-queue one. Guarded by g_mutex.
+std::vector<vx_queue_h> g_live_queues;
+
 vx_queue_h default_queue() {
-    if (!g_default_queue) {
-        queue_create_profiled(g_device.dev, &g_default_queue);
-    }
-    return g_default_queue;
+    // Function-local static: the previous lazy init was an unsynchronized
+    // check-then-set, and the c10 allocator's deleter can run this on any
+    // thread. C++11 guarantees the initialisation is done exactly once.
+    static vx_queue_h q = [] {
+        vx_queue_h created = nullptr;
+        queue_create_profiled(g_device.dev, &created);
+        return created;
+    }();
+    g_default_queue = q;
+    return q;
 }
 
 vx_queue_h stream_queue(hipStream_t s) {
     return s ? ((StreamState*)s)->q : default_queue();
+}
+
+void register_queue(vx_queue_h q) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_live_queues.push_back(q);
+}
+
+void unregister_queue(vx_queue_h q) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (size_t i = 0; i < g_live_queues.size(); ++i) {
+        if (g_live_queues[i] == q) {
+            g_live_queues.erase(g_live_queues.begin() + i);
+            return;
+        }
+    }
+}
+
+// Device-wide barrier: finish the default queue and every queue still alive.
+vx_result_t finish_all_queues() {
+    std::vector<vx_queue_h> queues;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        queues = g_live_queues;
+        queues.push_back(default_queue());
+    }
+    for (vx_queue_h q : queues) {
+        vx_result_t r = vx_queue_finish(q, VX_TIMEOUT_INFINITE);
+        if (r != VX_SUCCESS) return r;
+    }
+    return VX_SUCCESS;
 }
 
 const BufferRecord* find_buffer(uint64_t addr) {
@@ -208,7 +249,10 @@ hipError_t hipDeviceSynchronize(void) {
     //
     // VX_TIMEOUT_INFINITE, not 0: a zero timeout is a poll (wait_for(0ns)),
     // not "wait forever" -- Event::wait_value returns VX_ERR_TIMEOUT at once.
-    return RET_VX(vx_queue_finish(default_queue(), VX_TIMEOUT_INFINITE));
+    //
+    // Device-wide, not just the default queue: work launched on an explicit
+    // stream has to be covered too, which is what the name promises.
+    return RET_VX(finish_all_queues());
 }
 
 hipError_t hipDeviceReset(void) {
@@ -315,6 +359,11 @@ hipError_t hipFreeAsync(void* ptr, hipStream_t stream) {
         return RET_VX(r);
     }
     if (ev) vx_event_release(ev);
+    // Drop the caller's reference now that the queue holds its own
+    // (Queue::enqueue_free retains). Without this the buffer is never
+    // destroyed: the queued release takes the refcount from 2 back to 1 and
+    // nothing ever takes it to 0, so every hipFreeAsync leaked.
+    vx_buffer_release(buf);
     return RET_VX(r);
 }
 
@@ -475,6 +524,7 @@ hipError_t hipStreamCreate(hipStream_t* stream) {
         delete s;
         return RET_VX(r);
     }
+    register_queue(s->q);   // so hipDeviceSynchronize covers this stream
     *stream = (hipStream_t)s;
     return hipSuccess;
 }
@@ -487,6 +537,7 @@ hipError_t hipStreamDestroy(hipStream_t stream) {
     // use-after-free rather than a lost stream.
     vx_result_t r = vx_queue_finish(s->q, VX_TIMEOUT_INFINITE);
     if (r != VX_SUCCESS) return RET_VX(r);
+    unregister_queue(s->q);
     r = vx_queue_release(s->q);
     delete s;
     return RET_VX(r);

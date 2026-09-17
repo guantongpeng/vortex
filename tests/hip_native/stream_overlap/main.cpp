@@ -115,6 +115,10 @@ int main(int argc, char** argv) {
     // Stream-ordered allocator: async malloc, a stream write through it,
     // async free (reuse deferred behind the write), then a fresh malloc
     // must not observe stale content.
+    //
+    // Asserting REUSE is the point. Only checking am2 != nullptr let a
+    // hipFreeAsync that never released the caller's reference leak every
+    // buffer it freed and still pass this test.
     {
         void* am = nullptr;
         HIP_CHECK(hipMallocAsync(&am, N * sizeof(int), s1));
@@ -122,16 +126,35 @@ int main(int argc, char** argv) {
         HIP_CHECK(hipMemcpyAsync(am, probe.data(), N * sizeof(int),
                                  hipMemcpyHostToDevice, s1));
         HIP_CHECK(hipFreeAsync(am, s1));
+        // sync is now a real barrier (it used to be vx_queue_flush), so the
+        // free has completed by the time this returns
         HIP_CHECK(hipStreamSynchronize(s1));
+
         void* am2 = nullptr;
         HIP_CHECK(hipMallocAsync(&am2, N * sizeof(int), s1));
-        std::vector<int> back(N, 0);
-        HIP_CHECK(hipMemcpyAsync(back.data(), am2, 0, hipMemcpyDeviceToHost, s1));
-        HIP_CHECK(hipStreamSynchronize(s1));
         if (am2 == nullptr) ++errors;
+        if (am2 != am) {
+            printf("async_alloc: freed %p but reallocated %p -- hipFreeAsync "
+                   "did not return the block\n", am, am2);
+            ++errors;
+        }
+
+        // the freshly allocated block must not still hold the stale contents
+        std::vector<int> fresh(N, 5);
+        std::vector<int> back(N, 0);
+        HIP_CHECK(hipMemcpyAsync(am2, fresh.data(), N * sizeof(int),
+                                 hipMemcpyHostToDevice, s1));
+        HIP_CHECK(hipMemcpyAsync(back.data(), am2, N * sizeof(int),
+                                 hipMemcpyDeviceToHost, s1));
+        HIP_CHECK(hipStreamSynchronize(s1));
+        for (uint32_t i = 0; i < N; ++i) {
+            if (back[i] != 5) { ++errors; break; }
+        }
+
         HIP_CHECK(hipFreeAsync(am2, s1));
         HIP_CHECK(hipStreamSynchronize(s1));
-        printf("async_alloc: first=%p reused_as=%p\n", am, am2);
+        printf("async_alloc: first=%p reused_as=%p reuse=%s\n", am, am2,
+               (am2 == am) ? "yes" : "no");
     }
 
     HIP_CHECK(hipEventDestroy(e1_mid));

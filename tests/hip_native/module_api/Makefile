@@ -3,6 +3,10 @@ include $(ROOT_DIR)/config.mk
 
 PROJECT := module_api
 
+# Host sources live in the source tree, like tests/hip/* does it. A bare
+# `main.cpp` silently compiled whatever stale copy a build tree held.
+SRC_DIR := $(VORTEX_HOME)/tests/hip_native/$(PROJECT)
+
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) \
                --offload-arch=vortex$(XLEN) --kernel-lib=vortex2
@@ -41,7 +45,7 @@ kernel.vxbin: kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
 	VX_KERNEL_METADATA=$$PWD/kernel_meta.json \
 	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@
 
-$(PROJECT): main.cpp
+$(PROJECT): $(SRC_DIR)/main.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 run-simx: $(PROJECT) kernel.vxbin
