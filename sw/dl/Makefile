@@ -57,6 +57,22 @@ PRIM_RMSNORM_SIZE := 20
 endif
 PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
+include $(ROOT_DIR)/sw/common/module_slots.mk
+
+# Give every image its own link address so several can be loaded into one
+# process (see sw/common/module_slots.mk).
+$(eval blas.vxbin: HIPCC_FLAGS += $(call module_flags_of,blas))
+$(eval prim.vxbin: HIPCC_FLAGS += $(call module_flags_of,prim))
+$(eval dnn.vxbin: HIPCC_FLAGS += $(call module_flags_of,dnn))
+$(eval quant.vxbin: HIPCC_FLAGS += $(call module_flags_of,quant))
+$(eval mxfp8.vxbin: HIPCC_FLAGS += $(call module_flags_of,mxfp8))
+$(eval nvfp4.vxbin: HIPCC_FLAGS += $(call module_flags_of,nvfp4))
+$(eval sparse24.vxbin: HIPCC_FLAGS += $(call module_flags_of,sparse24))
+$(eval attn.vxbin: HIPCC_FLAGS += $(call module_flags_of,attn))
+$(eval llm.vxbin: HIPCC_FLAGS += $(call module_flags_of,llm))
+$(eval mamba.vxbin: HIPCC_FLAGS += $(call module_flags_of,mamba))
+$(eval rng.vxbin: HIPCC_FLAGS += $(call module_flags_of,rng))
+
 all: $(PROJECT) blas.vxbin prim.vxbin quant.vxbin dnn.vxbin mxfp8.vxbin \
      nvfp4.vxbin sparse24.vxbin attn.vxbin llm.vxbin mamba.vxbin rng.vxbin
 

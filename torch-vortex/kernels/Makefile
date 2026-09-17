@@ -1,10 +1,13 @@
 ROOT_DIR := $(realpath ../..)
 include $(ROOT_DIR)/config.mk
+include $(ROOT_DIR)/sw/common/module_slots.mk
 
-# torch-vortex op images (P5-01/P5-02). Everything links into ONE vxbin:
-# the simx backend loads modules at a fixed base address, so multiple
-# images would overlap (measured: second hipModuleLoad fails with an
-# address-range conflict).
+# torch-vortex op images (P5-01/P5-02). The ops and dnn kernels share one
+# vxbin because they share a module; that is a packaging choice, not a
+# constraint any more. Each image gets its own link address from
+# sw/common/module_slots.mk, so several images can be loaded into one process
+# (this used to be impossible: every image linked at 0x80000000 and the second
+# hipModuleLoad failed with an address-range conflict).
 #
 # The argument-block sizes in the VXKMDATA footer are generated from measured
 # sizeof() by gen_metadata, not typed here: they used to be hand-maintained and
@@ -38,6 +41,8 @@ $(META): gen_metadata torch_kernel_args.h
 	./gen_metadata --xlen=$(XLEN) --meta=$(META) --sidecar=$(SIDECAR)
 
 $(SIDECAR): $(META)
+
+$(VXBIN): HIPCC_FLAGS += $(call module_flags_of,torch_all)
 
 $(VXBIN): ops.hip dnn.hip torch_kernel_args.h $(META) $(VORTEX_HOME)/ci/hipcc_vortex.py
 	$(HIPCC) $(HIPCC_FLAGS) -I$(CURDIR) ops.hip -c -o ops.o

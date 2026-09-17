@@ -31,7 +31,22 @@ from hip_native_probe import probe
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEFAULT_HIP_INCLUDE = os.path.join(REPO_ROOT, "third_party", "hip-vortex", "include")
+# Base address of the module region. Every image linked without --image-base
+# lands at exactly this address, which is why two images cannot share a
+# process: the common module loader reserves [min_vma, max_vma) per image and
+# the second reserve overlaps the first. Pass --image-base (or --image-slot) to
+# place an image elsewhere; see sw/common/module_slots.mk for the slot table.
 STARTUP_ADDR = "0x80000000"
+IMAGE_SLOT_STRIDE = 0x00040000  # 256 KiB; the largest image today is < 20 KiB
+
+
+def resolve_image_base(image_base, image_slot):
+    """--image-base wins; otherwise slot * stride from the region base."""
+    if image_base:
+        return int(image_base, 0)
+    if image_slot is not None:
+        return int(STARTUP_ADDR, 0) + int(image_slot) * IMAGE_SLOT_STRIDE
+    return int(STARTUP_ADDR, 0)
 
 REQUIRED_INPUTS = (
     "clang",
@@ -126,6 +141,8 @@ def build_command(args, extra, status):
 
 
 def link_command(args, objects, elf_path, status):
+    image_base = resolve_image_base(getattr(args, "image_base", ""),
+                                    getattr(args, "image_slot", None))
     xlen, p = arch_params(args.arch)
     paths = status["paths"]
     kernel_lib = os.path.join(args.build_dir, "sw", "kernel",
@@ -146,7 +163,7 @@ def link_command(args, objects, elf_path, status):
         kernel_lib,
         "-Wl,-Bstatic,--gc-sections",
         "-Wl,-T," + p["link_script"],
-        "-Wl,--defsym=STARTUP_ADDR=" + STARTUP_ADDR,
+        "-Wl,--defsym=STARTUP_ADDR=" + hex(image_base),
         "-L" + os.path.join(libc, "lib"), "-lm", "-lc",
         os.path.join(libcrt, "lib", "baremetal",
                      f"libclang_rt.builtins-riscv{xlen}.a"),
@@ -259,6 +276,12 @@ def main(argv=None):
                         choices=("vortex", "vortex2"),
                         help="device runtime: vortex = hostless spawn model, "
                              "vortex2 = KMU images launched by a host runtime")
+    parser.add_argument("--image-base", default="",
+                        help="link address for this image (default: the region base). "
+                             "Use this, not an appended -Wl,--defsym: the defsym "
+                             "below is added first and wins.")
+    parser.add_argument("--image-slot", type=int, default=None,
+                        help="slot index; base = STARTUP_ADDR + slot * 256 KiB")
     parser.add_argument("--print-command", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args, extra = parser.parse_known_args(argv)
