@@ -49,12 +49,31 @@ extern "C" {
 // compiler. Never declare an argument struct in this file.
 #include "torch_kernel_args.h"
 
+// The device DL library (sw/dl). Ops that have an equivalent there call into
+// it rather than keeping a second copy of the same algorithm -- see W3.1 of
+// docs/mydocs/pytorch_plan.md. Its entry points speak vortex2.h and take this
+// process's device and queue, which is why sw/hip exposes the two accessors.
+#include <vortex/blas.h>
+#include <vortex/dnn.h>
+#include <vortex/prim.h>
+
 #define VX_CHECK(expr)                                                        \
     do {                                                                      \
         hipError_t _e = (expr);                                               \
         TORCH_CHECK(_e == hipSuccess, "torch_vortex: " #expr " failed: ",     \
                     hipGetErrorString(_e));                                   \
     } while (0)
+
+// The DL library has its own status enums (all with 0 = OK) rather than
+// hipError_t, so it gets its own check.
+#define DL_CHECK(expr)                                                        \
+    do {                                                                      \
+        const int _s = (int)(expr);                                           \
+        TORCH_CHECK(_s == 0, "torch_vortex: " #expr " failed with status ",   \
+                    _s);                                                      \
+    } while (0)
+
+
 
 // ---------------------------------------------------------------------------
 // Counters
@@ -234,6 +253,14 @@ c10::Stream create_stream() {
 // and the guard's stream was decorative.
 hipStream_t current_hip_stream() {
     return hip_stream_of(t_current_stream);
+}
+
+// The DL library's queue for whatever stream the caller is on, so a DL launch
+// lands behind the caller's own work rather than on a parallel queue.
+vx_queue_h current_queue() {
+    void* q = nullptr;
+    VX_CHECK(hipStreamGetQueue(current_hip_stream(), &q));
+    return (vx_queue_h)q;
 }
 
 } // namespace
@@ -615,6 +642,10 @@ TORCH_KERNEL_TABLE(TORCH_KERNEL_DECLARE)
 // Filled in by load_ops. The conv kernel stages one filter's weights in LMEM,
 // so this is the ceiling on ci*kh*kw*4.
 int64_t g_shared_mem_per_block = 0;
+
+// The DL library's device handle: the same one the HIP layer owns, handed to
+// it rather than opened separately.
+vx_device_h g_dl_device = nullptr;
 
 void launch_binary_op(uint64_t dst, uint64_t a, uint64_t b, uint32_t n,
                       uint32_t op) {
@@ -1438,13 +1469,6 @@ static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
 }
 
 
-static void launch_conv(const conv_args_t& args) {
-    // one CTA per (output row, output channel, sample); 16 threads per row;
-    // all of one filter's weights staged in LMEM
-    launch(h_tv_conv2d_kernel, args, args.ho, args.co, args.n, 16,
-           (uint32_t)(args.ci * args.kh * args.kw * 4));
-}
-
 static torch::Tensor convolution_impl(
     const torch::Tensor& input, const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias, c10::IntArrayRef stride,
@@ -1472,19 +1496,17 @@ static torch::Tensor convolution_impl(
     const int64_t ho = window_out(is[2], kh, ph, sh, "conv height");
     const int64_t wo = window_out(is[3], kw, pw, sw, "conv width");
 
-    // One output channel stages all of its weights in LMEM at once. This is
-    // the real ceiling on a full-resolution ResNet stem (ci=512, 3x3, fp32
-    // needs 18 KiB against a 16 KiB default): shrinking the input image does
-    // not reduce it, so say so instead of hanging.
+    // One output channel stages all of its weights in LMEM at once, and the DL
+    // kernel's ceiling for that is 16384 bytes. This is the real bound on a
+    // full-resolution ResNet stem (ci=512, 3x3, fp32 needs 18 KiB), and
+    // shrinking the input image does not reduce it. Checked before anything is
+    // allocated, so a rejected call does nothing at all.
     const int64_t lmem_needed = ci * kh * kw * 4;
-    if (g_shared_mem_per_block > 0) {
-        TORCH_CHECK(lmem_needed <= g_shared_mem_per_block, "torch_vortex: conv ",
-                    "needs ", lmem_needed, " bytes of local memory to stage one ",
-                    "filter (ci=", ci, " kh=", kh, " kw=", kw, " x 4 bytes), but ",
-                    "only ", g_shared_mem_per_block, " bytes are available. ",
-                    "Tile the weights across output channels; a smaller input ",
-                    "image does not reduce this.");
-    }
+    TORCH_CHECK(lmem_needed <= 16384, "torch_vortex: conv needs ", lmem_needed,
+                " bytes of local memory to stage one filter (ci=", ci, " kh=",
+                kh, " kw=", kw, " x 4 bytes), but the DL kernel allows 16384. ",
+                "Tile the weights across output channels; a smaller input ",
+                "image does not reduce this.");
 
     auto out = torch::empty({is[0], co, ho, wo}, input.options());
     uint64_t baddr = 0;
@@ -1495,17 +1517,27 @@ static torch::Tensor convolution_impl(
         TORCH_CHECK(bias->numel() == co, "torch_vortex: bias size mismatch");
         baddr = (uint64_t)(uintptr_t)bias->data_ptr();
     }
-    conv_args_t args = {(uint64_t)(uintptr_t)input.data_ptr(),
-                        (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
-                        (uint64_t)(uintptr_t)out.data_ptr(),
-                        u32_dim(is[0], "conv batch"), u32_dim(ci, "conv ci"),
-                        u32_dim(is[2], "conv hi"), u32_dim(is[3], "conv wi"),
-                        u32_dim(co, "conv co"), u32_dim(ho, "conv ho"),
-                        u32_dim(wo, "conv wo"), u32_dim(kh, "conv kh"),
-                        u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
-                        u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"),
-                        u32_dim(sw, "conv sw"), baddr != 0};
-    launch_conv(args);
+    // An all-empty result is not a launch: the DL kernel refuses n == 0 (and a
+    // zero-sized dimension), and there is nothing to compute anyway. The
+    // output is still allocated with the right shape, so this matches what
+    // PyTorch does rather than being a special case.
+    if (out.numel() == 0) {
+        return out;
+    }
+    // The kernel lives in the DL library, so the ATen path and a direct
+    // vx_dnn_conv2d call are the *same* kernel rather than two copies that
+    // have to be kept in agreement (W3.1).
+    const int status = (int)vx_dnn_conv2d(
+        current_queue(), (uint64_t)(uintptr_t)input.data_ptr(),
+        (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
+        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(is[0], "conv batch"),
+        u32_dim(ci, "conv ci"), u32_dim(is[2], "conv hi"),
+        u32_dim(is[3], "conv wi"), u32_dim(co, "conv co"),
+        u32_dim(kh, "conv kh"), u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
+        u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"), u32_dim(sw, "conv sw"));
+    TORCH_CHECK(status == 0, "torch_vortex: vx_dnn_conv2d failed with status ",
+                status, " (2 is bad args, 3 is a shape the DL kernel rejects)");
+    ++g_stats.launches;
     return out;
 }
 
@@ -1926,11 +1958,13 @@ static void vortex_no_fallback(const c10::OperatorHandle& op,
 // Module init
 // ---------------------------------------------------------------------------
 
-void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
-    // One combined image (ops + dnn kernels): the simx backend loads modules
-    // at a fixed base address, so separate images would overlap. `dnn_path` is
-    // accepted for call compatibility but ignored.
-    (void)dnn_path;
+void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
+    // Two image sets now: this backend's own (torch_all.vxbin) and the DL
+    // library's, which the unified ops launch. Every image has its own link
+    // address (sw/common/module_slots.mk), so they coexist in one process --
+    // that used to be impossible and is why the ops and dnn kernels were
+    // merged into one image.
+    //
 
     // Idempotent for the same image, loud for a different one.
     //
@@ -1965,6 +1999,19 @@ void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
     hipDeviceProp_t prop;
     VX_CHECK(hipGetDeviceProperties(&prop, 0));
     g_shared_mem_per_block = (int64_t)prop.sharedMemPerBlock;
+
+    // The DL library speaks vortex2.h and needs *this* process's device, not
+    // one of its own: a second device context would break ordering with
+    // everything launched through HIP. The handles come from the HIP layer,
+    // which is the only thing that owns them.
+    void* vxdev = nullptr;
+    VX_CHECK(hipGetVxDevice(&vxdev));
+    g_dl_device = (vx_device_h)vxdev;
+    const auto dl_image = [&](const char* name) {
+        return dl_dir + "/" + name + ".vxbin";
+    };
+    DL_CHECK(vx_dnn_init(g_dl_device, dl_image("dnn").c_str()));
+    DL_CHECK(vx_blas_init(g_dl_device, dl_image("blas").c_str()));
 
     VX_CHECK(hipModuleLoad(&g_ops_module, vxbin_path.c_str()));
 #define TORCH_KERNEL_RESOLVE(name, type, mbx, lmem)                            \
@@ -2012,6 +2059,12 @@ void vortex_at_exit() {
         return;
     }
     device_synchronize_impl();
+    // The DL modules hold their own refs on the device and their images; the
+    // extension owns their lifetime because nothing in sw/dl finalizes them
+    // (it has no lifetime hooks by construction). Order matters: finalize
+    // first, then reset, or the device goes away underneath them.
+    vx_blas_finalize();
+    vx_dnn_finalize();
     hipDeviceReset();
 }
 

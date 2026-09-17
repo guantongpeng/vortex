@@ -124,6 +124,23 @@ hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream);
 hipError_t hipEventSynchronize(hipEvent_t event);
 hipError_t hipEventElapsedTime(float* ms, hipEvent_t start, hipEvent_t stop);
 
+// ---- vortex2 handles (bridge to the DL libraries) --------------------------
+//
+// The device DL libraries (sw/dl) speak vortex2.h: their entry points take a
+// vx_device_h and a vx_queue_h. Handing them handles that belong to a *second*
+// device or queue would break ordering with everything launched through HIP, so
+// they are exposed here instead of letting a caller open its own.
+//
+// The queue is the one the given stream would launch on, so a DL launch lands
+// behind the caller's own work on that stream. A null stream means the default
+// queue. Unlike hipDeviceGet, which round-trips the device handle through an
+// integer type, this says what it is for.
+
+// Both are `void*` in the vortex2 ABI (see vx_device_h in vortex2.h). They are
+// spelled as void** here so this header keeps no dependency on vortex2.h.
+hipError_t hipGetVxDevice(void** out);
+hipError_t hipStreamGetQueue(hipStream_t stream, void** out);
+
 // ---- module / kernel -------------------------------------------------------
 
 hipError_t hipModuleLoad(hipModule_t* module, const char* fname);

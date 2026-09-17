@@ -514,6 +514,22 @@ hipError_t hipMemsetAsync(void* dst, int value, size_t size,
 // stream / event
 // ---------------------------------------------------------------------------
 
+hipError_t hipGetVxDevice(void** out) {
+    if (!out) return RET(hipErrorInvalidValue);
+    if (!g_device.initialized) return RET(hipErrorNotInitialized);
+    *out = g_device.dev;
+    return hipSuccess;
+}
+
+hipError_t hipStreamGetQueue(hipStream_t stream, void** out) {
+    if (!out) return RET(hipErrorInvalidValue);
+    if (!g_device.initialized) return RET(hipErrorNotInitialized);
+    // stream_queue(nullptr) is the default queue; passing the caller's stream
+    // through unchanged is what keeps DL launches ordered behind its work.
+    *out = stream_queue(stream);
+    return hipSuccess;
+}
+
 hipError_t hipStreamCreate(hipStream_t* stream) {
     if (!stream) return RET(hipErrorInvalidValue);
     hipError_t e = hipSetDevice(0);

@@ -169,13 +169,6 @@ struct copy_strided_args_t {
 
 // ---- cnn ------------------------------------------------------------------
 
-// tv_conv2d_kernel (NCHW, dilation 1, groups 1)
-struct conv_args_t {
-    uint64_t in, weight, bias, out;
-    uint32_t n, ci, hi, wi, co, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, has_bias;
-};
-
 // tv_pool2d_kernel (op 0 = max, 1 = avg)
 struct pool_args_t {
     uint64_t in, out;
@@ -260,7 +253,6 @@ struct bias_args_t {
     X(reduce_rows_kernel, reduce_args_t, 0, 0)                                \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
-    X(tv_conv2d_kernel, conv_args_t, 16, 0)                                    \
     X(tv_pool2d_kernel, pool_args_t, 16, 0)                                    \
     X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \
     X(tv_mm_kernel, mm_args_t, 16, 1024)                                       \

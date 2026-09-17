@@ -26,7 +26,8 @@ Environment:
 
 import os
 
-__all__ = ["find_repo", "find_build", "find_vxbin", "build_error"]
+__all__ = ["find_repo", "find_build", "find_vxbin", "find_dl_dir",
+           "build_error"]
 
 _BUILD_MARKERS = ("config.mk", os.path.join("sw", "runtime", "libvortex.so"))
 _REPO_MARKERS = ("VX_config.toml", "sw")
@@ -105,6 +106,21 @@ def find_build():
             return candidate
 
     raise build_error("no configured build tree found; " + _CONFIGURE_HINT)
+
+
+def find_dl_dir(build=None):
+    """Directory holding the sw/dl kernel images and libvortex_dl.so.
+
+    These are the DL library's own images (blas/dnn/prim/...), separate from
+    this backend's torch_all.vxbin. They are what the unified ops launch, so
+    the same kernel serves both the ATen path and the standalone DL API.
+    """
+    explicit = os.environ.get("TORCH_VORTEX_DL_DIR")
+    if explicit:
+        return os.path.abspath(explicit)
+    if build is None:
+        build = find_build()
+    return os.path.join(build, "sw", "dl")
 
 
 def find_vxbin(build=None):

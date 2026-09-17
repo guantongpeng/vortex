@@ -35,9 +35,16 @@ import pytest
 
 from torch_vortex import _paths
 
-# The two structs whose hand-typed sizes were wrong. Pinned so that a silent
-# ABI change fails by name with both numbers visible.
-PINNED_SIZES = {"tv_conv2d_kernel": 88, "tv_pool2d_kernel": 72}
+# The struct whose hand-typed size was wrong (88 declared for a 72-byte struct).
+# Pinned so a silent ABI change fails by name with both numbers visible.
+#
+# tv_conv2d_kernel used to be pinned here too (104 declared for 88). It is gone:
+# conv2d is served by the DL library's kernel now, so its argument block is
+# sw/dl's to get right -- and it does not: sw/dl/Makefile declares 96 for the
+# same 88-byte shape and 88 for the 72-byte pool struct. That layer passes its
+# own sizeof() at launch rather than reading the metadata, so it is latent
+# rather than active, and it is recorded in p5_05.
+PINNED_SIZES = {"tv_pool2d_kernel": 72}
 
 
 @pytest.fixture(scope="module")

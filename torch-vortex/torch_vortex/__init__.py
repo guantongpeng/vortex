@@ -186,6 +186,7 @@ def _load():
 
     runtime_dir = os.path.join(build, "sw", "runtime")
     hip_dir = os.path.join(build, "sw", "hip")
+    dl_dir = _paths.find_dl_dir(build)
     hip_inc = os.path.join(repo, "sw", "hip", "include")
     src = os.environ.get(
         "TORCH_VORTEX_EXT_SRC",
@@ -214,6 +215,12 @@ def _load():
         extra_include_paths=[
             hip_inc,
             os.path.normpath(os.path.join(os.path.dirname(src), "..", "kernels")),
+            # sw/dl's public headers: the unified ops call into that library
+            # rather than reimplementing its kernels. They include vortex2.h,
+            # which lives in the runtime's public include dir.
+            os.path.join(repo, "sw", "dl", "include"),
+            os.path.join(repo, "sw", "runtime", "include"),
+            os.path.join(build, "sw", "runtime", "include"),
         ],
         # No -std override: torch 2.14 requires C++20 and cpp_extension already
         # selects it. Pinning an older standard here fails deep inside ATen
@@ -224,13 +231,16 @@ def _load():
             "-lhip_vortex",
             "-L%s" % runtime_dir,
             "-lvortex",
+            "-L%s" % dl_dir,
+            "-lvortex_dl",
             "-Wl,-rpath,%s" % hip_dir,
             "-Wl,-rpath,%s" % runtime_dir,
+            "-Wl,-rpath,%s" % dl_dir,
         ],
         build_directory=build_dir,
         verbose=bool(os.environ.get("TORCH_VORTEX_VERBOSE")),
     )
-    _ext.load_ops(vxbin, os.environ.get("TORCH_VORTEX_DNN_VXBIN", ""))
+    _ext.load_ops(vxbin, dl_dir)
     _check_arg_sizes(vxbin, _ext)
     return _ext
 

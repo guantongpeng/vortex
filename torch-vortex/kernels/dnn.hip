@@ -25,51 +25,8 @@
 // exactly how the host/device layout drift started.
 #include "torch_kernel_args.h"
 
-__global__ void tv_conv2d_kernel(conv_args_t* arg) {
-    const uint32_t n = blockIdx.z;
-    const uint32_t co = blockIdx.y;
-    const uint32_t oy = blockIdx.x;
-
-    const float* w = (const float*)(uintptr_t)arg->weight +
-                     ((size_t)co * arg->ci) * (arg->kh * arg->kw);
-    float* stage = (float*)__local_mem();
-    const uint32_t wtotal = arg->ci * arg->kh * arg->kw;
-    for (uint32_t e = threadIdx.x; e < wtotal; e += 16) {
-        stage[e] = w[e];
-    }
-    __syncthreads();
-
-    const float* in_base = (const float*)(uintptr_t)arg->in +
-                           (size_t)n * arg->ci * arg->hi * arg->wi;
-    float* out_row = (float*)(uintptr_t)arg->out +
-                     (((size_t)n * arg->co + co) * arg->ho + oy) * arg->wo;
-    const float bias = arg->has_bias
-                           ? ((const float*)(uintptr_t)arg->bias)[co]
-                           : 0.0f;
-
-    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        float acc = bias;
-        uint32_t we = 0;
-        for (uint32_t ci = 0; ci < arg->ci; ++ci) {
-            const float* in_ch = in_base + (size_t)ci * arg->hi * arg->wi;
-            for (uint32_t kh = 0; kh < arg->kh; ++kh) {
-                const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
-                if (iy < 0 || iy >= (int32_t)arg->hi) {
-                    we += arg->kw;
-                    continue;
-                }
-                for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                    const int32_t ix = (int32_t)(ox * arg->sw + kw) - (int32_t)arg->pw;
-                    if (ix >= 0 && ix < (int32_t)arg->wi) {
-                        acc += in_ch[(size_t)iy * arg->wi + ix] * stage[we];
-                    }
-                    ++we;
-                }
-            }
-        }
-        out_row[ox] = acc;
-    }
-}
+// conv2d lives in the DL library now (vx_dnn_conv2d). Keeping a second
+// copy here is what W3.1 exists to remove.
 
 // ---- pooling (op 0 = max, 1 = avg) ----------------------------------------
 __global__ void tv_pool2d_kernel(pool_args_t* arg) {
