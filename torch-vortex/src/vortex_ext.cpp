@@ -945,6 +945,52 @@ static bool is_host_scalar(const torch::Tensor& t) {
     return t.device().type() == c10::DeviceType::CPU && t.dim() == 0;
 }
 
+// Right-aligned broadcasting, the rule ATen uses. Returns false when the
+// shapes do not broadcast; the caller has already produced a better message
+// via at::infer_size, so this only has to agree with it. A broadcast
+// dimension is a stride of 0, which the kernel reads as "same element".
+static bool broadcast_layout(const torch::Tensor& a, const torch::Tensor& b,
+                             uint32_t sizes[4], uint32_t a_strides[4],
+                             uint32_t b_strides[4], uint32_t& ndim) {
+    const int64_t na = a.dim(), nb = b.dim();
+    const int64_t nd = std::max(na, nb);
+    if (nd > 4) {
+        return false;
+    }
+    ndim = (uint32_t)nd;
+    for (int64_t d = 0; d < nd; ++d) {
+        const int64_t ia = na - 1 - d, ib = nb - 1 - d;
+        const int64_t sa = ia >= 0 ? a.size(ia) : 1;
+        const int64_t sb = ib >= 0 ? b.size(ib) : 1;
+        if (sa != sb && sa != 1 && sb != 1) {
+            return false;
+        }
+        const int64_t size = std::max(sa, sb);
+        const int64_t at = nd - 1 - d;
+        sizes[at] = u32_dim(size, "broadcast size");
+        a_strides[at] = (sa == 1 && size != 1) ? 0
+                        : u32_dim(ia >= 0 ? a.stride(ia) : 0, "broadcast stride");
+        b_strides[at] = (sb == 1 && size != 1) ? 0
+                        : u32_dim(ib >= 0 ? b.stride(ib) : 0, "broadcast stride");
+    }
+    return true;
+}
+
+static void launch_broadcast_op(const torch::Tensor& a, const torch::Tensor& b,
+                                torch::Tensor& out, uint32_t op) {
+    broadcast_op_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
+    args.a = (uint64_t)(uintptr_t)a.data_ptr();
+    args.b = (uint64_t)(uintptr_t)b.data_ptr();
+    args.op = op;
+    args.total = u32_numel(out, "elementwise output");
+    TORCH_CHECK(broadcast_layout(a, b, args.sizes, args.a_strides,
+                                 args.b_strides, args.ndim),
+                "torch_vortex: shapes ", a.sizes(), " and ", b.sizes(),
+                " do not broadcast, or exceed 4 dimensions");
+    launch(h_broadcast_op_kernel, args, (args.total + 3) / 4);
+}
+
 static void launch_elementwise(const torch::Tensor& a, const torch::Tensor& b,
                                torch::Tensor& out, uint32_t op) {
     const uint64_t dst = (uint64_t)(uintptr_t)out.data_ptr();
@@ -955,9 +1001,12 @@ static void launch_elementwise(const torch::Tensor& a, const torch::Tensor& b,
     } else if (is_host_scalar(a)) {
         launch_scalar_op(dst, (uint64_t)(uintptr_t)b.data_ptr(),
                          a.item<float>(), n, op, 1);
-    } else {
+    } else if (a.sizes() == b.sizes()) {
+        // the common case, and the kernel shape that is known-good
         launch_binary_op(dst, (uint64_t)(uintptr_t)a.data_ptr(),
                          (uint64_t)(uintptr_t)b.data_ptr(), n, op);
+    } else {
+        launch_broadcast_op(a, b, out, op);
     }
 }
 
@@ -969,16 +1018,21 @@ static void check_elementwise(const torch::Tensor& a, const torch::Tensor& b,
                 " with two host scalars should have been folded by torch");
     check_vortex_f32(a_scalar ? b : a, name);
     if (!a_scalar && !b_scalar) {
-        TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: ", name,
-                    " needs equal shapes in v1; broadcasting is W3.2 in "
-                    "docs/mydocs/pytorch_plan.md");
+        // at::infer_size is ATen's own broadcasting rule, so a shape it
+        // rejects is rejected with ATen's message rather than ours.
+        at::infer_size(a.sizes(), b.sizes());
+        check_vortex_f32(b, name);
     }
 }
 
 static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                                uint32_t op, const char* name) {
     check_elementwise(a, b, name);
-    auto out = torch::empty_like(is_host_scalar(a) ? b : a);
+    const bool a_scalar = is_host_scalar(a), b_scalar = is_host_scalar(b);
+    auto out = (a_scalar || b_scalar)
+                   ? torch::empty_like(a_scalar ? b : a)
+                   : torch::empty(at::infer_size(a.sizes(), b.sizes()),
+                                  a.options());
     launch_elementwise(a, b, out, op);
     return out;
 }
@@ -988,8 +1042,12 @@ static torch::Tensor& binary_op_(torch::Tensor& self, const torch::Tensor& other
     check_vortex_f32(self, name);
     if (!is_host_scalar(other)) {
         check_vortex_f32(other, name);
-        TORCH_CHECK(self.sizes() == other.sizes(), "torch_vortex: ", name,
-                    " needs equal shapes in v1; broadcasting is W3.2");
+        // broadcasting is allowed, but only if it lands exactly on self --
+        // growing in place is what the out-of-place form is for
+        TORCH_CHECK(at::infer_size(self.sizes(), other.sizes()) == self.sizes(),
+                    "torch_vortex: ", name, " would need to grow ", self.sizes(),
+                    " to ", at::infer_size(self.sizes(), other.sizes()),
+                    ", which in place cannot do");
     }
     launch_elementwise(self, other, self, op);
     return self;
@@ -1170,6 +1228,29 @@ static torch::Tensor& unary_op_(torch::Tensor& self, uint32_t op,
     return self;
 }
 
+// gelu takes a second parameter, so it does not fit the one-argument macro.
+// the default is the erf form; approximate="tanh" is a different function,
+// not a different spelling of the same one.
+static uint32_t gelu_op(const std::string_view& approximate, const char* name) {
+    if (approximate == "none") {
+        return TORCH_UNARY_GELU;
+    }
+    if (approximate == "tanh") {
+        return TORCH_UNARY_GELU_TANH;
+    }
+    TORCH_CHECK(false, "torch_vortex: ", name, " approximate='", approximate,
+                "' is unsupported; use 'none' or 'tanh'");
+}
+
+static torch::Tensor gelu_impl(const torch::Tensor& self,
+                               std::string_view approximate) {
+    return unary_op(self, gelu_op(approximate, "gelu"), "gelu");
+}
+static torch::Tensor& gelu__impl(torch::Tensor& self,
+                                 std::string_view approximate) {
+    return unary_op_(self, gelu_op(approximate, "gelu_"), "gelu_");
+}
+
 static torch::Tensor relu_impl(const torch::Tensor& self) {
     return unary_op(self, TORCH_UNARY_RELU, "relu");
 }
@@ -1194,6 +1275,7 @@ VX_UNARY_OP(rsqrt, TORCH_UNARY_RSQRT, "rsqrt")
 VX_UNARY_OP(sigmoid, TORCH_UNARY_SIGMOID, "sigmoid")
 VX_UNARY_OP(tanh, TORCH_UNARY_TANH, "tanh")
 VX_UNARY_OP(reciprocal, TORCH_UNARY_RECIPROCAL, "reciprocal")
+VX_UNARY_OP(silu, TORCH_UNARY_SILU, "silu")
 #undef VX_UNARY_OP
 
 // ---------------------------------------------------------------------------
@@ -1587,6 +1669,9 @@ void register_vortex_ops() {
     VX_REGISTER_UNARY(sigmoid);
     VX_REGISTER_UNARY(tanh);
     VX_REGISTER_UNARY(reciprocal);
+    VX_REGISTER_UNARY(silu);
+    VX_IMPL("gelu", &gelu_impl);
+    VX_IMPL("gelu_", &gelu__impl);
 #undef VX_REGISTER_UNARY
     VX_IMPL("convolution", &convolution_impl);
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);

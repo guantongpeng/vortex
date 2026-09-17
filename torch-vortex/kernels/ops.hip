@@ -45,6 +45,15 @@ __device__ inline float torch_unary_apply(float x, uint32_t op) {
     case TORCH_UNARY_SIGMOID:    return 1.0f / (1.0f + expf(-x));
     case TORCH_UNARY_TANH:       return tanhf(x);
     case TORCH_UNARY_RECIPROCAL: return 1.0f / x;
+    // Two gelu forms, because torch has two: the default is erf-based and
+    // approximate="tanh" is the tanh one. They are not interchangeable.
+    case TORCH_UNARY_GELU:
+        return 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
+    case TORCH_UNARY_GELU_TANH:
+        return 0.5f * x *
+               (1.0f + tanhf(0.7978845608028654f *
+                             (x + 0.044715f * x * x * x)));
+    case TORCH_UNARY_SILU:       return x / (1.0f + expf(-x));
     default:                     return x;
     }
 }
@@ -125,5 +134,24 @@ __global__ void copy_strided_kernel(copy_strided_args_t* arg) {
         }
         ((float*)(uintptr_t)arg->dst)[dst_off] =
             ((const float*)(uintptr_t)arg->src)[src_off];
+    }
+}
+
+// a <op> b with broadcasting. Strides of 0 are the broadcast dimensions; the
+// output is contiguous, so its index is the linear one. Same decomposition as
+// the copy kernel, which is the shape VOLT handles correctly.
+__global__ void broadcast_op_kernel(broadcast_op_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i, a_off = 0, b_off = 0;
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t c = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            a_off += c * arg->a_strides[d];
+            b_off += c * arg->b_strides[d];
+        }
+        ((float*)(uintptr_t)arg->dst)[i] =
+            torch_binary_apply(((const float*)(uintptr_t)arg->a)[a_off],
+                               ((const float*)(uintptr_t)arg->b)[b_off], arg->op);
     }
 }

@@ -112,11 +112,67 @@ def test_division_by_zero_matches_cpu(backend):
     assert_matches_cpu(v(a) / v(b), a / b)
 
 
+@pytest.mark.parametrize("shapes", [
+    ((4, 6), (6,)),          # bias vector
+    ((4, 6), (1, 6)),        # row
+    ((4, 6), (4, 1)),        # column
+    ((4, 6), (1, 1)),        # scalar-shaped tensor
+    ((2, 3, 4), (4,)),       # trailing only
+    ((2, 3, 4), (3, 1)),     # middle
+    ((2, 3, 4), (2, 1, 1)),
+])
+def test_broadcasting(backend, shapes):
+    """`x + bias` is the shape models actually write."""
+    torch.manual_seed(7)
+    a = torch.randn(*shapes[0])
+    b = torch.randn(*shapes[1])
+    for op in ("add", "sub", "mul", "div"):
+        assert_matches_cpu(getattr(torch, op)(v(a), v(b)),
+                           getattr(torch, op)(a, b), rtol=1e-5, atol=1e-6)
+
+
+def test_broadcast_matches_expanded_reference(backend):
+    """Checked against an explicit expand, not just against CPU torch."""
+    a = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    b = torch.tensor([1.0, 2.0, 3.0])
+    want = a + b.unsqueeze(0).expand(2, 3)
+    assert_matches_cpu(v(a) + v(b), want, rtol=0, atol=0)
+
+
+def test_inplace_broadcast_cannot_grow(backend):
+    """In place, a broadcast that would grow self is refused."""
+    col = v(torch.randn(4, 1))
+    wide = v(torch.randn(4, 6))
+    with assert_rejected("which in place cannot do", backend):
+        col.add_(wide)
+
+
+@pytest.mark.parametrize("name,kwargs", [
+    ("silu", {}), ("gelu", {}), ("gelu", {"approximate": "tanh"}),
+])
+def test_activations(backend, name, kwargs):
+    fn = getattr(torch.nn.functional, name)
+    assert_matches_cpu(fn(v(X), **kwargs), fn(X, **kwargs), rtol=1e-5, atol=1e-6)
+
+
+def test_gelu_forms_differ(backend):
+    """The default is erf-based; approximate='tanh' is a different function."""
+    a = torch.tensor([-2.0, -0.5, 0.0, 0.5, 2.0])
+    va = v(a)   # hoisted: the device transfer is not part of what is rejected
+    erf_form = torch.nn.functional.gelu(va).cpu()
+    tanh_form = torch.nn.functional.gelu(va, approximate="tanh").cpu()
+    assert not torch.allclose(erf_form, tanh_form, rtol=1e-6, atol=1e-6)
+    assert_matches_cpu(torch.nn.functional.gelu(va),
+                       torch.nn.functional.gelu(a), rtol=1e-6, atol=1e-7)
+    with assert_rejected("unsupported", backend):
+        torch.nn.functional.gelu(va, approximate="nonsense")
+
+
 def test_shape_mismatch_is_refused(backend):
     # operands are prepared outside the assertion: moving them to the device
     # is not part of the call being rejected
     four, five = v(torch.ones(4)), v(torch.ones(5))
-    with assert_rejected("equal shapes", backend):
+    with assert_rejected("must match the size", backend):
         four + five
 
 
