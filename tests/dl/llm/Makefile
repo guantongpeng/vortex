@@ -3,6 +3,13 @@ include $(ROOT_DIR)/config.mk
 
 PROJECT := llm_test
 
+# The host sources live in the source tree, like tests/hip and
+# tests/hip_native do. A bare `main.cpp` silently compiled whatever
+# stale copy a build tree happened to hold, so an edit to the source
+# was tested as a no-op -- and a header change made it a link error
+# against the old call.
+SRC_DIR := $(VORTEX_HOME)/tests/dl/llm
+
 DL_DIR := $(ROOT_DIR)/sw/dl
 RUNTIME_DIR := $(ROOT_DIR)/sw/runtime
 
@@ -18,7 +25,7 @@ all: $(PROJECT)
 $(DL_DIR)/llm.vxbin $(DL_DIR)/libvortex_dl.so:
 	$(MAKE) -C $(DL_DIR)
 
-$(PROJECT): main.cpp $(DL_DIR)/libvortex_dl.so
+$(PROJECT): $(SRC_DIR)/main.cpp $(DL_DIR)/libvortex_dl.so
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 run-simx: $(PROJECT) $(DL_DIR)/llm.vxbin

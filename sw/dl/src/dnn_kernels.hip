@@ -90,7 +90,10 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
 
     // Output columns split across the CTA's threads.
     for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        float acc = (arg->op == 0) ? -3.4e38f : 0.0f;
+        // -INFINITY, not a finite sentinel: -3.4e38f dropped -inf inputs and
+        // turned an all-NaN window into that sentinel instead of propagating
+        // NaN (F10 in docs/mydocs/pytorch_plan.md).
+        float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
             const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
@@ -100,7 +103,9 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
                 if (ix < 0 || ix >= (int32_t)arg->wi) continue;
                 float v = in_ch[(size_t)iy * arg->wi + ix];
                 if (arg->op == 0) {
-                    if (v > acc) acc = v;
+                    // NaN must win: plain `v > acc` (and fmaxf, which ignores
+                    // NaN) would leave the accumulator at the sentinel.
+                    if (v > acc || isnan(v)) acc = v;
                 } else {
                     acc += v;
                 }
@@ -113,15 +118,19 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
 
 __global__ void dnn_bn_affine_kernel(vx_dnn_bn_args_t* arg) {
     const float* mean = (const float*)(uintptr_t)arg->mean;
-    const float* rstd = (const float*)(uintptr_t)arg->rstd;
+    const float* var = (const float*)(uintptr_t)arg->var;
     const float* weight = (const float*)(uintptr_t)arg->weight;
     const float* bias = (const float*)(uintptr_t)arg->bias;
-    const uint32_t plane = arg->total / arg->c;
+    // hw, not total/c: the latter is N*H*W and picks the right channel only at
+    // N == 1.
+    const uint32_t plane = arg->hw;
     for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
          idx < arg->total; idx += blockDim.x * gridDim.x) {
         const uint32_t ch = (idx / plane) % arg->c;
         const float x = ((const float*)(uintptr_t)arg->in)[idx];
+        // 1/sqrt, matching what the CPU reference computes, rather than rsqrt
+        const float rstd = 1.0f / sqrtf(var[ch] + arg->eps);
         ((float*)(uintptr_t)arg->out)[idx] =
-            (x - mean[ch]) * rstd[ch] * weight[ch] + bias[ch];
+            (x - mean[ch]) * rstd * weight[ch] + bias[ch];
     }
 }

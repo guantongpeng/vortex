@@ -152,22 +152,21 @@ int main(int argc, char** argv) {
         if (badp) ++failures;
 
         // ---- batch norm on the conv output -----------------------------
-        std::vector<float> mean(CO), rstd(CO), gw(CO), gb(CO);
+        std::vector<float> mean(CO), var(CO), gw(CO), gb(CO);
         for (uint32_t c = 0; c < CO; ++c) {
             mean[c] = frand() * 0.1f;
-            rstd[c] = 0.5f + (float)c * 0.01f;
+            var[c] = 0.5f + (float)c * 0.01f;
             gw[c] = 0.8f + frand() * 0.4f;
             gb[c] = frand() * 0.1f;
         }
         DevBuf bm = make_buf(dev, CO * 4), br = make_buf(dev, CO * 4);
         DevBuf bgw = make_buf(dev, CO * 4), bgb = make_buf(dev, CO * 4);
         upload(q, bm, mean.data(), CO * 4);
-        upload(q, br, rstd.data(), CO * 4);
+        upload(q, br, var.data(), CO * 4);
         upload(q, bgw, gw.data(), CO * 4);
         upload(q, bgb, gb.data(), CO * 4);
         CHECK(vx_dnn_bn_affine(q, bo.addr, bm.addr, br.addr, bgw.addr,
-                               bgb.addr, bo.addr,
-                               N * CO * HO * WO, CO));
+                               bgb.addr, bo.addr, N, CO, HO * WO, 1e-5f));
         CHECK(vx_queue_flush(q));
         std::vector<float> gotbn((size_t)N * CO * HO * WO);
         download(q, gotbn, bo);
@@ -175,11 +174,79 @@ int main(int argc, char** argv) {
         uint32_t badbn = 0;
         for (size_t i = 0; i < gotbn.size(); ++i) {
             uint32_t c = (i / (HO * WO)) % CO;
-            double ref = ((double)got[i] - mean[c]) * rstd[c] * gw[c] + gb[c];
+            const double r = 1.0 / std::sqrt((double)var[c] + 1e-5);
+            double ref = ((double)got[i] - mean[c]) * r * gw[c] + gb[c];
             if (std::fabs(gotbn[i] - ref) > 1e-5 * (std::fabs(ref) + 1.0)) ++badbn;
         }
         printf("bn_affine:     bad=%u\n", badbn);
         if (badbn) ++failures;
+
+        // ---- batch norm with N > 1 ------------------------------------
+        // The per-channel span must be H*W. Deriving it as total/c gives
+        // N*H*W and selects the right channel only when N == 1, which is why
+        // the check above -- running at N == 1 -- could never see it.
+        {
+            const uint32_t BN = 2, BC = 3, BH = 2, BW = 2;
+            const uint32_t span = BH * BW, total_bn = BN * BC * span;
+            std::vector<float> ib(total_bn), mb(BC), vb(BC), wb(BC), bb(BC);
+            for (uint32_t c = 0; c < BC; ++c) {
+                mb[c] = 0.1f * (float)c;
+                vb[c] = 0.5f + 0.25f * (float)c;
+                wb[c] = 1.0f + 0.5f * (float)c;
+                bb[c] = -0.2f * (float)c;
+            }
+            for (uint32_t i = 0; i < total_bn; ++i) ib[i] = 0.01f * (float)i;
+            DevBuf di = make_buf(dev, total_bn * 4), dm = make_buf(dev, BC * 4);
+            DevBuf dv = make_buf(dev, BC * 4), dw = make_buf(dev, BC * 4);
+            DevBuf db = make_buf(dev, BC * 4), dout = make_buf(dev, total_bn * 4);
+            upload(q, di, ib.data(), total_bn * 4);
+            upload(q, dm, mb.data(), BC * 4);
+            upload(q, dv, vb.data(), BC * 4);
+            upload(q, dw, wb.data(), BC * 4);
+            upload(q, db, bb.data(), BC * 4);
+            CHECK(vx_dnn_bn_affine(q, di.addr, dm.addr, dv.addr, dw.addr,
+                                   db.addr, dout.addr, BN, BC, span, 1e-5f));
+            CHECK(vx_queue_flush(q));
+            std::vector<float> got_b(total_bn);
+            download(q, got_b, dout);
+            uint32_t bad_b = 0;
+            for (uint32_t i = 0; i < total_bn; ++i) {
+                const uint32_t ch = (i / span) % BC;   // NOT total/BC
+                const double r = 1.0 / std::sqrt((double)vb[ch] + 1e-5);
+                const double ref = ((double)ib[i] - mb[ch]) * r * wb[ch] + bb[ch];
+                if (std::fabs(got_b[i] - ref) > 1e-5 * (std::fabs(ref) + 1.0)) {
+                    ++bad_b;
+                }
+            }
+            printf("bn_affine N=2: bad=%u\n", bad_b);
+            if (bad_b) ++failures;
+        }
+
+        // ---- max pool over -inf and NaN -------------------------------
+        // The accumulator used to start at the finite -3.4e38f, so an all
+        // -inf window came back as that sentinel and a NaN window lost the
+        // NaN. Neither is visible to a test that only uses finite inputs.
+        {
+            const uint32_t PN = 1, PC = 2, PH = 2, PW = 2;
+            // channel 0 is entirely -inf (so its window is a real all -inf
+            // window); channel 1 contains a NaN
+            std::vector<float> pin = {-INFINITY, -INFINITY, -INFINITY, -INFINITY,
+                                      NAN, 0.0f, 3.0f, 4.0f};
+            DevBuf dpi = make_buf(dev, PN * PC * PH * PW * 4);
+            DevBuf dpo = make_buf(dev, PN * PC * 1 * 1 * 4);
+            upload(q, dpi, pin.data(), PN * PC * PH * PW * 4);
+            // (q, in, out, n, c, hi, wi, kh, kw, ph, pw, sh, sw, op)
+            CHECK(vx_dnn_pool2d(q, dpi.addr, dpo.addr, PN, PC, PH, PW,
+                                2, 2, 0, 0, 2, 2, 0));
+            CHECK(vx_queue_flush(q));
+            std::vector<float> pout(PN * PC);
+            download(q, pout, dpo);
+            uint32_t bad_p = 0;
+            if (pout[0] != -INFINITY) ++bad_p;      // all -inf window
+            if (!std::isnan(pout[1])) ++bad_p;      // NaN must propagate
+            printf("maxpool spec:  bad=%u (got %g, %g)\n", bad_p, pout[0], pout[1]);
+            if (bad_p) ++failures;
+        }
 
         // ---- stride-2 conv (downsampling path) -------------------------
         const uint32_t S2 = 2;

@@ -52,16 +52,26 @@ typedef struct {
 } vx_dnn_pool_args_t;
 
 // Inference batch norm as a fused per-channel affine:
-//   y = (x - mean[c]) * rstd[c] * weight[c] + bias[c]
+//   y = (x - mean[c]) * (1/sqrt(var[c] + eps)) * weight[c] + bias[c]
+//
+// `hw` is the spatial span H*W and is passed explicitly rather than derived.
+// Deriving it as total/c gives N*H*W, which is the right per-channel span only
+// when N == 1 -- the bug torch-vortex's copy of this kernel had and fixed
+// (F03 in docs/mydocs/pytorch_plan.md).
+//
+// `var` is the running variance and eps is applied here, so the caller does
+// not have to make a host round-trip to take a square root per channel.
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t mean;     // [c]
-    vx_dl_ptr_t rstd;     // [c] = 1/sqrt(var + eps)
+    vx_dl_ptr_t var;      // [c] running variance
     vx_dl_ptr_t weight;   // [c]
     vx_dl_ptr_t bias;     // [c]
     vx_dl_ptr_t out;
-    uint32_t total;       // n*c*hi*wi
+    uint32_t total;       // n*c*hw
     uint32_t c;
+    uint32_t hw;          // H*W, the per-channel span
+    float eps;
 } vx_dnn_bn_args_t;
 
 #endif // VORTEX_DL_DNN_ARGS_H

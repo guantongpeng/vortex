@@ -54,11 +54,16 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
                             uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
                             uint32_t op);
 
-// Inference batch norm, fused affine: rstd = 1/sqrt(var + eps) precomputed
-// by the caller (host or a prim kernel).
+// Inference batch norm, fused affine. The kernel computes
+// rstd = 1/sqrt(var + eps) itself, so the caller passes the running variance
+// rather than making a host round-trip to take a square root per channel.
+//
+// `hw` is the per-channel spatial span H*W and is required, not derived:
+// total/c gives N*H*W, which is the right span only when N == 1.
 vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,
-                               uint64_t rstd, uint64_t weight, uint64_t bias,
-                               uint64_t out, uint32_t total, uint32_t c);
+                               uint64_t var, uint64_t weight, uint64_t bias,
+                               uint64_t out, uint32_t n, uint32_t c,
+                               uint32_t hw, float eps);
 
 #ifdef __cplusplus
 } // extern "C"

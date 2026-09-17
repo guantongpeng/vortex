@@ -161,22 +161,31 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
 }
 
 vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,
-                               uint64_t rstd, uint64_t weight, uint64_t bias,
-                               uint64_t out, uint32_t total, uint32_t c) {
+                               uint64_t var, uint64_t weight, uint64_t bias,
+                               uint64_t out, uint32_t n, uint32_t c,
+                               uint32_t hw, float eps) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
-    if (!in || !mean || !rstd || !weight || !bias || !out || total == 0 ||
-        c == 0 || total % c != 0) {
+    if (!in || !mean || !var || !weight || !bias || !out || n == 0 || c == 0 ||
+        hw == 0) {
         return VX_DNN_ERR_BAD_ARGS;
     }
+    // hw is not derivable from total and c, which is the whole point of
+    // passing it; check the product instead of trusting it.
+    const uint32_t total = n * c * hw;
+    if (n != 0 && total / n / c != hw) return VX_DNN_ERR_BAD_ARGS;
     vx_dnn_bn_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.mean = (vx_dl_ptr_t)mean;
-    args.rstd = (vx_dl_ptr_t)rstd;
+    args.var = (vx_dl_ptr_t)var;
     args.weight = (vx_dl_ptr_t)weight;
     args.bias = (vx_dl_ptr_t)bias;
     args.out = (vx_dl_ptr_t)out;
     args.total = total;
     args.c = c;
+    args.hw = hw;
+    args.eps = eps;
+    // launch3 hardcodes a 16-thread block, so the grid has to be sized for 16.
+    // It was (total+3)/4 here, launching four times the CTAs the work needs.
     return launch3(q, g_dnn.bn, &args, sizeof(args),
-                   (total + 3) / 4, 1, 1, 0);
+                   (total + 15) / 16, 1, 1, 0);
 }
