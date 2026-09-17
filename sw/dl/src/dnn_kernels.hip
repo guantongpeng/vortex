@@ -130,7 +130,11 @@ __global__ void dnn_bn_affine_kernel(vx_dnn_bn_args_t* arg) {
         const float x = ((const float*)(uintptr_t)arg->in)[idx];
         // 1/sqrt, matching what the CPU reference computes, rather than rsqrt
         const float rstd = 1.0f / sqrtf(var[ch] + arg->eps);
-        ((float*)(uintptr_t)arg->out)[idx] =
-            (x - mean[ch]) * rstd * weight[ch] + bias[ch];
+        // Optional affine: ATen's batch norm allows weight/bias to be absent,
+        // and the caller signals that by leaving both pointers null rather
+        // than by passing buffers of ones and zeros.
+        const float w = arg->has_affine ? weight[ch] : 1.0f;
+        const float b = arg->has_affine ? bias[ch] : 0.0f;
+        ((float*)(uintptr_t)arg->out)[idx] = (x - mean[ch]) * rstd * w + b;
     }
 }

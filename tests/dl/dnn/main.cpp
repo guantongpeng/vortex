@@ -222,6 +222,47 @@ int main(int argc, char** argv) {
             if (bad_b) ++failures;
         }
 
+        // ---- batch norm with no affine --------------------------------
+        // weight and bias are optional; the caller signals that by passing
+        // null for both rather than buffers of ones and zeros.
+        {
+            const uint32_t BN = 2, BC = 3, BH = 2, BW = 2;
+            const uint32_t span = BH * BW, total_bn = BN * BC * span;
+            std::vector<float> ib(total_bn), mb(BC), vb(BC);
+            for (uint32_t c = 0; c < BC; ++c) {
+                mb[c] = 0.1f * (float)c;
+                vb[c] = 0.5f + 0.25f * (float)c;
+            }
+            for (uint32_t i = 0; i < total_bn; ++i) ib[i] = 0.01f * (float)i;
+            DevBuf di = make_buf(dev, total_bn * 4), dm = make_buf(dev, BC * 4);
+            DevBuf dv = make_buf(dev, BC * 4), dout = make_buf(dev, total_bn * 4);
+            upload(q, di, ib.data(), total_bn * 4);
+            upload(q, dm, mb.data(), BC * 4);
+            upload(q, dv, vb.data(), BC * 4);
+            CHECK(vx_dnn_bn_affine(q, di.addr, dm.addr, dv.addr, 0, 0,
+                                   dout.addr, BN, BC, span, 1e-5f));
+            CHECK(vx_queue_flush(q));
+            std::vector<float> got_na(total_bn);
+            download(q, got_na, dout);
+            uint32_t bad_na = 0;
+            for (uint32_t i = 0; i < total_bn; ++i) {
+                const uint32_t ch = (i / span) % BC;
+                const double r = 1.0 / std::sqrt((double)vb[ch] + 1e-5);
+                const double ref = ((double)ib[i] - mb[ch]) * r;
+                if (std::fabs(got_na[i] - ref) > 1e-5 * (std::fabs(ref) + 1.0)) {
+                    ++bad_na;
+                }
+            }
+            printf("bn_affine none:bad=%u\n", bad_na);
+            if (bad_na) ++failures;
+            // one without the other is a caller mistake, not a request
+            if (vx_dnn_bn_affine(q, di.addr, dm.addr, dv.addr, dm.addr, 0,
+                                 dout.addr, BN, BC, span, 1e-5f) == 0) {
+                printf("bn_affine half: accepted a weight without a bias\n");
+                ++failures;
+            }
+        }
+
         // ---- max pool over -inf and NaN -------------------------------
         // The accumulator used to start at the finite -3.4e38f, so an all
         // -inf window came back as that sentinel and a NaN window lost the

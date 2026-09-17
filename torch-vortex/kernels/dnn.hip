@@ -32,30 +32,7 @@
 
 // pooling lives in the DL library now (vx_dnn_pool2d).
 
-// ---- batch-norm affine -----------------------------------------------------
-__global__ void tv_bn_affine_kernel(bn_args_t* arg) {
-    // arg->hw is H*W, the per-channel span in NCHW. Deriving it as total/c
-    // gives N*H*W instead, which selects the right channel only when N == 1 --
-    // the bug the batch>1 tests exist to catch.
-    const uint32_t plane = arg->hw;
-    for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-         idx < arg->total; idx += blockDim.x * gridDim.x) {
-        const uint32_t ch = (idx / plane) % arg->c;
-        const float x = ((const float*)(uintptr_t)arg->in)[idx];
-        const float mean = ((const float*)(uintptr_t)arg->mean)[ch];
-        const float var = ((const float*)(uintptr_t)arg->var)[ch];
-        const float w = arg->has_affine
-                            ? ((const float*)(uintptr_t)arg->weight)[ch]
-                            : 1.0f;
-        const float b = arg->has_affine
-                            ? ((const float*)(uintptr_t)arg->bias)[ch]
-                            : 0.0f;
-        // deliberate: 1/sqrt, not rsqrt, so the result is bit-comparable with
-        // the CPU reference instead of leaving an avoidable ULP to absorb
-        const float rstd = 1.0f / sqrtf(var + arg->eps);
-        ((float*)(uintptr_t)arg->out)[idx] = (x - mean) * rstd * w + b;
-    }
-}
+// batch norm lives in the DL library now (vx_dnn_bn_affine).
 
 __global__ void tv_bias_add_kernel(bias_args_t* arg) {
     for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;

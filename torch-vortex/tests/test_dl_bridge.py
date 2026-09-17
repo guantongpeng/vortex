@@ -78,7 +78,11 @@ def dl():
     gemm.restype = ctypes.c_int
     gemm.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_uint32] * 3 + \
                     [ctypes.c_float, ctypes.c_float] + [ctypes.c_uint64] * 3
-    return hip, conv, pool, gemm
+    bn = libdl.vx_dnn_bn_affine
+    bn.restype = ctypes.c_int
+    bn.argtypes = [ctypes.c_void_p] + [ctypes.c_uint64] * 6 + \
+                  [ctypes.c_uint32] * 3 + [ctypes.c_float]
+    return hip, conv, pool, gemm, bn
 
 
 def _upload(hip, data):
@@ -268,7 +272,7 @@ def test_aten_mm_is_the_dl_gemm(backend, dl, m, k, n):
     pre-zeroed C and the same alpha/beta -- so a difference would be a real
     difference rather than a difference in how the comparison was set up.
     """
-    hip, _, _, gemm = dl
+    hip, _, _, gemm = dl[0], dl[1], dl[2], dl[3]
     torch.manual_seed(m * 100 + k * 10 + n)
     a = torch.randn(m, k)
     b = torch.randn(k, n)
@@ -289,3 +293,47 @@ def test_aten_mm_is_the_dl_gemm(backend, dl, m, k, n):
     assert torch.equal(direct, aten), (
         "the ATen matmul and a direct vx_blas_gemm call disagree; they are not "
         "the same kernel.\n  max |diff| = %g" % (direct - aten).abs().max().item())
+
+
+def test_aten_batch_norm_is_the_dl_kernel(backend, dl):
+    """The third op W3.1 names, and the one that had the channel bug.
+
+    The DL kernel derived its per-channel span as total/c until this increment
+    fixed it, so this comparison is also what says the fix is the one being
+    used rather than a copy of it.
+    """
+    hip, _, _, _, bn = dl
+    torch.manual_seed(23)
+    n, c, h, w = 3, 4, 3, 5           # batch > 1 on purpose
+    x = torch.randn(n, c, h, w)
+    mean = torch.randn(c)
+    var = torch.rand(c) + 0.5
+    weight = torch.randn(c)
+    bias = torch.randn(c)
+    eps = 1e-5
+
+    want = F.batch_norm(x, mean, var, weight, bias, training=False, eps=eps)
+    got = F.batch_norm(x.to("vortex"), mean.to("vortex"), var.to("vortex"),
+                       weight.to("vortex"), bias.to("vortex"),
+                       training=False, eps=eps).cpu()
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dm = _upload(hip, mean.detach().contiguous().numpy().tobytes())
+    dv = _upload(hip, var.detach().contiguous().numpy().tobytes())
+    dw = _upload(hip, weight.detach().contiguous().numpy().tobytes())
+    db = _upload(hip, bias.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (n * c * h * w * 4))
+    rc = bn(queue, dx.value, dm.value, dv.value, dw.value, db.value,
+            dout.value, n, c, h * w, ctypes.c_float(eps))
+    assert rc == 0, "vx_dnn_bn_affine returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, n * c * h * w * 4)),
+                              dtype=torch.float32).reshape(n, c, h, w)
+
+    assert torch.equal(direct, got), (
+        "the ATen batch-norm path and a direct vx_dnn_bn_affine call disagree; "
+        "they are not the same kernel.\n  max |diff| = %g"
+        % (direct - got).abs().max().item())

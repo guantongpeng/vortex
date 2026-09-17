@@ -169,22 +169,6 @@ struct copy_strided_args_t {
 
 // ---- cnn ------------------------------------------------------------------
 
-// tv_bn_affine_kernel: inference batch norm over NCHW.
-//
-// `hw` is the spatial span H*W and is passed explicitly rather than derived:
-// the channel of element idx is (idx / (H*W)) % C, and deriving the divisor as
-// total/c gives N*H*W, which happens to be right only when N == 1.
-//
-// The kernel computes rstd = 1/sqrt(var + eps) itself, so var is passed
-// directly and no host-side sqrt round-trip is needed. has_affine selects
-// weight/bias (both pointers must be valid when it is set).
-struct bn_args_t {
-    uint64_t in, mean, var, weight, bias, out;
-    uint32_t total, c, hw;
-    float eps;
-    uint32_t has_affine;
-};
-
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
 struct bias_args_t {
     uint64_t out, bias;
@@ -213,7 +197,6 @@ struct bias_args_t {
     X(reduce_rows_kernel, reduce_args_t, 0, 0)                                \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
-    X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 
 #endif  // TORCH_VORTEX_KERNEL_ARGS_H

@@ -1645,17 +1645,24 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
         check_param(bias, "bias");
     }
 
+    if (total == 0) {
+        // nothing to compute, and the DL kernel rejects n == 0
+        auto empty_aux = torch::empty({0}, input.options());
+        return std::make_tuple(torch::empty_like(input), empty_aux, empty_aux);
+    }
     auto out = torch::empty_like(input);
-    bn_args_t args = {(uint64_t)(uintptr_t)input.data_ptr(),
-                      (uint64_t)(uintptr_t)running_mean->data_ptr(),
-                      (uint64_t)(uintptr_t)running_var->data_ptr(),
-                      has_affine ? (uint64_t)(uintptr_t)weight->data_ptr() : 0,
-                      has_affine ? (uint64_t)(uintptr_t)bias->data_ptr() : 0,
-                      (uint64_t)(uintptr_t)out.data_ptr(),
-                      u32_numel(input, "bn input"), u32_dim(c, "bn channels"),
-                      u32_dim(hw, "bn spatial span"), (float)eps,
-                      has_affine ? 1u : 0u};
-    launch(h_tv_bn_affine_kernel, args, (uint32_t)((total + 3) / 4));
+    // The DL kernel computes rstd from var + eps itself, so there is no host
+    // round-trip here; and it takes weight/bias as optional, which is why the
+    // ATen-side optional affine maps onto it without dummy buffers.
+    DL_CHECK(vx_dnn_bn_affine(
+        current_queue(), (uint64_t)(uintptr_t)input.data_ptr(),
+        (uint64_t)(uintptr_t)running_mean->data_ptr(),
+        (uint64_t)(uintptr_t)running_var->data_ptr(),
+        has_affine ? (uint64_t)(uintptr_t)weight->data_ptr() : 0,
+        has_affine ? (uint64_t)(uintptr_t)bias->data_ptr() : 0,
+        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(s[0], "bn batch"),
+        u32_dim(c, "bn channels"), u32_dim(hw, "bn spatial span"), (float)eps));
+    ++g_stats.launches;
     // rstd is computed inside the kernel from running_var, so this path makes
     // no host round-trip and allocates no scratch buffer. The previous version
     // copied running_var to the host, took a sqrt, copied it back, and freed

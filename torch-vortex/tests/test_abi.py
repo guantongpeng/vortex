@@ -35,10 +35,11 @@ import pytest
 
 from torch_vortex import _paths
 
-# Regression pins on the argument blocks that are still built here. The three
-# this list originally existed for are gone: conv2d, pooling and matmul are
-# served by the DL library's kernels now (W3.1), so their argument blocks are
-# sw/dl's to get right.
+# Regression pins on the argument blocks that are still built here. Every
+# struct this list originally existed for is gone: conv2d, pooling, matmul and
+# batch norm are served by the DL library's kernels now (W3.1), so their
+# argument blocks are sw/dl's to get right. What is left here is the
+# elementwise family, which the DL library does not have a general form of.
 #
 # sw/dl has not: its Makefile declares 96 bytes for the 88-byte conv shape and
 # 88 for the 72-byte pool shape, and gets the prim shapes wrong at XLEN=32.
@@ -49,7 +50,7 @@ from torch_vortex import _paths
 # The real guard is not this list: test_sidecar_matches_fresh_compiler_run
 # compares the image metadata against a fresh sizeof() from the host compiler
 # for every kernel, and that covers a struct nobody thought to pin.
-PINNED_SIZES = {"tv_bn_affine_kernel": 72, "tv_bias_add_kernel": 24}
+PINNED_SIZES = {"broadcast_op_kernel": 88, "tv_bias_add_kernel": 24}
 
 
 @pytest.fixture(scope="module")

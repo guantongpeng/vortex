@@ -165,10 +165,12 @@ vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,
                                uint64_t out, uint32_t n, uint32_t c,
                                uint32_t hw, float eps) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
-    if (!in || !mean || !var || !weight || !bias || !out || n == 0 || c == 0 ||
-        hw == 0) {
+    if (!in || !mean || !var || !out || n == 0 || c == 0 || hw == 0) {
         return VX_DNN_ERR_BAD_ARGS;
     }
+    // weight and bias are optional, but only as a pair: one without the other
+    // is a caller mistake rather than a way to ask for no affine.
+    if ((weight == 0) != (bias == 0)) return VX_DNN_ERR_BAD_ARGS;
     // hw is not derivable from total and c, which is the whole point of
     // passing it; check the product instead of trusting it.
     const uint32_t total = n * c * hw;
@@ -184,6 +186,7 @@ vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,
     args.c = c;
     args.hw = hw;
     args.eps = eps;
+    args.has_affine = (weight != 0) ? 1u : 0u;
     // launch3 hardcodes a 16-thread block, so the grid has to be sized for 16.
     // It was (total+3)/4 here, launching four times the CTAs the work needs.
     return launch3(q, g_dnn.bn, &args, sizeof(args),

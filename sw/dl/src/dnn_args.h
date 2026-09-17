@@ -72,6 +72,7 @@ typedef struct {
     uint32_t c;
     uint32_t hw;          // H*W, the per-channel span
     float eps;
+    uint32_t has_affine;  // 0 = weight/bias are null and mean 1/0
 } vx_dnn_bn_args_t;
 
 #endif // VORTEX_DL_DNN_ARGS_H
