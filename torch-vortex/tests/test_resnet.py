@@ -14,11 +14,21 @@
 """Mini-ResNet end-to-end on the vortex device (plan P5-02).
 
 A ResNet-family network (stem + basic blocks with residual adds +
-downsampling shortcut + global average pool + linear head) executed
-entirely through the registered PrivateUse1 ops on simx. The CPU run of
-the same module with the same weights is the reference. Small channels
-on purpose: simx is a functional simulator, and the milestone is
-numerical parity, not throughput.
+downsampling shortcut + global average pool + linear head) executed entirely
+through the registered PrivateUse1 ops on simx, against the CPU run of the
+same module with the same weights.
+
+Two things this test has to get right to be worth anything:
+
+  * batch size > 1. The batch-norm channel index was derived as total/c, which
+    is N*H*W rather than H*W, so it picked the right channel only at N == 1 and
+    the original single-sample test could not see it.
+  * non-default batch-norm buffers. With mean=0, var=1, weight=1, bias=0 every
+    channel produces the same output, so even at N > 1 a wrong channel
+    selection is invisible. Every BN here is randomised.
+
+The model-level test is marked slow (it dominates the suite's runtime); the
+milestone gate runs it with --tier=full.
 """
 
 import os
@@ -27,6 +37,26 @@ import sys
 import pytest
 import torch
 import torch.nn as nn
+
+from helpers import assert_matches_cpu
+
+
+def randomize_batch_norms(module, seed):
+    """Give every BatchNorm its own per-channel parameters.
+
+    Randomising the buffers is what turns a wrong channel index into a wrong
+    number rather than a masked one.
+    """
+    g = torch.Generator().manual_seed(seed)
+    for m in module.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            c = m.running_mean.numel()
+            m.running_mean.copy_(torch.randn(c, generator=g))
+            m.running_var.copy_(torch.rand(c, generator=g) + 0.5)
+            if m.weight is not None:
+                m.weight.data.copy_(torch.randn(c, generator=g))
+                m.bias.data.copy_(torch.randn(c, generator=g))
+    return module
 
 
 class BasicBlock(nn.Module):
@@ -51,7 +81,7 @@ class BasicBlock(nn.Module):
 
 
 class MiniResNet(nn.Module):
-    def __init__(self, ch=8, classes=4):
+    def __init__(self, ch=4, classes=2):
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(3, ch, 3, 1, 1, bias=False),
@@ -71,40 +101,82 @@ class MiniResNet(nn.Module):
         return self.head(self.layer2(self.layer1(self.stem(x))))
 
 
-@pytest.fixture(scope="module")
-def model_and_input():
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    torch.manual_seed(20260915)
-    m = MiniResNet(ch=8, classes=4)
-    x = torch.randn(1, 3, 16, 16)
-    return m, x
+def build(seed, batch, ch=4, classes=2, size=8):
+    """A CPU reference and a weight-identical vortex copy, plus an input."""
+    torch.manual_seed(seed)
+    ref_model = randomize_batch_norms(MiniResNet(ch, classes), seed).eval()
+    dev_model = MiniResNet(ch, classes)
+    dev_model.load_state_dict(ref_model.state_dict())
+    dev_model = dev_model.eval().to("vortex")
+    x = torch.randn(batch, 3, size, size)
+    return ref_model, dev_model, x
 
 
-def test_mini_resnet_device_matches_cpu(model_and_input):
-    import torch_vortex  # noqa: F401
-
-    m, x = model_and_input
-    ref = m.eval()(x)                       # CPU reference
-    md = MiniResNet(ch=8, classes=4)
-    md.load_state_dict(m.state_dict())      # identical weights
-    out = md.eval().to("vortex")(x.to("vortex"))
-    assert out.device.type == "vortex"
-    got = out.cpu()
-    torch.testing.assert_close(got, ref, rtol=1e-3, atol=1e-3)
-    print("mini-resnet logits device:", got.tolist())
-    print("mini-resnet logits cpu   :", ref.tolist())
+@pytest.mark.slow
+@pytest.mark.parametrize("batch", [1, 2, 3])
+def test_logits_match_cpu(backend, batch):
+    ref_model, dev_model, x = build(seed=20260915 + batch, batch=batch)
+    with torch.inference_mode():
+        ref = ref_model(x)
+        got = dev_model(x.to("vortex"))
+    assert got.device.type == "vortex"
+    assert_matches_cpu(got, ref, rtol=1e-3, atol=1e-3)
 
 
-def test_no_silent_cpu_ops(model_and_input):
-    # The forward must not raise NotImplementedError anywhere — i.e. every
-    # op in the ResNet path is device-registered (the loud-failure rule).
-    import torch_vortex  # noqa: F401
+@pytest.mark.slow
+def test_intermediate_layers_match_cpu(backend):
+    """Parity layer by layer, so a wrong middle does not hide behind logits."""
+    ref_model, dev_model, x = build(seed=7, batch=2)
+    names = ["stem", "layer1", "layer2", "head"]
+    ref_out, dev_out = {}, {}
 
-    m, x = model_and_input
-    md = MiniResNet(ch=8, classes=4)
-    md.load_state_dict(m.state_dict())
-    out = md.eval().to("vortex")(x.to("vortex"))
-    assert out.shape == (1, 4)
+    def capture(store):
+        def hook(name):
+            def fn(_module, _inputs, output):
+                store[name] = output.detach()
+            return fn
+        return hook
+
+    for name in names:
+        getattr(ref_model, name).register_forward_hook(capture(ref_out)(name))
+        getattr(dev_model, name).register_forward_hook(capture(dev_out)(name))
+
+    with torch.inference_mode():
+        ref_model(x)
+        dev_model(x.to("vortex"))
+
+    for name in names:
+        assert name in dev_out, "%s never ran on the device" % name
+        assert_matches_cpu(dev_out[name], ref_out[name], rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.slow
+def test_forward_uses_the_device(backend):
+    """Every op in the forward path is device-registered, and it shows up.
+
+    A silent CPU fallback would leave the launch count far below the number of
+    operators in the graph, so counting is the assertion.
+    """
+    ref_model, dev_model, x = build(seed=99, batch=2)
+    with torch.inference_mode():
+        backend.reset_stats()
+        out = dev_model(x.to("vortex"))
+        st = backend.stats()
+
+    assert out.shape == (2, 2)
+    # stem 2 + layer1 6 + layer2 12 + head 2 operators, each at least one launch
+    assert st["launches"] >= 20, (
+        "only %d launches for a ResNet forward; something ran on the CPU: %r"
+        % (st["launches"], st))
+
+
+@pytest.mark.slow
+def test_training_path_is_refused(backend):
+    """Inference only. A backward through the device must not be silent."""
+    _, dev_model, x = build(seed=5, batch=2)
+    vx = x.to("vortex").requires_grad_()
+    with pytest.raises(RuntimeError):
+        dev_model(vx).sum().backward()
 
 
 if __name__ == "__main__":
