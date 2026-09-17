@@ -1,5 +1,12 @@
 # P5.1 torch-vortex:PyTorch PrivateUse1 后端
 
+> **历史文档(2026-09-14, torch 2.4.1 / Python 3.8)。**
+> 当前状态见 [p5_03_m0_m1_baseline.md](p5_03_m0_m1_baseline.md):后端已迁移到
+> torch 2.14.0+cpu / Python 3.10,算子语义按 `pytorch_plan.md` 的 W1 重修。
+> 下文第 4 节的"torch 2.4 踩坑记录"是当时的实测记录,**其中第 7 条在 2.14 上
+> 已经反过来**(`rename_privateuse1_backend` 单独不再生成 `.vortex()`),照它
+> 推断会踩坑;现行结论在 p5_03 第 1 节。
+
 ## 目标
 
 完成计划 P5-01:PyTorch PrivateUse1 注册为 `vortex` 设备 —— allocator、device guard、copy、基础 ATen op,数据真实驻留 Vortex 设备内存、算子真实运行在设备 kernel 上(经 SimX 验证)。
