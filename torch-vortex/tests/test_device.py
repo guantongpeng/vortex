@@ -74,6 +74,53 @@ def test_device_index_is_single(backend):
         torch.empty(3, device="vortex:1")
 
 
+def test_set_device_refuses_an_impossible_index(backend):
+    torch.vortex.set_device(0)          # the only valid one
+    with pytest.raises(RuntimeError, match="only device 0 exists"):
+        torch.vortex.set_device(1)
+
+
+def test_device_properties_come_from_the_runtime(backend):
+    p = torch.vortex.properties()
+    assert p.total_memory > 0
+    assert p.shared_memory_per_block > 0
+    assert p.warp_size > 0
+    # the LMEM limit is the one the conv kernel is checked against
+    assert p.shared_memory_per_block == backend._ext.device_properties()[
+        "shared_mem_per_block"]
+
+
+def test_device_capability_is_not_overclaimed(backend):
+    """The default DeviceCapability claims every scalar type.
+
+    Reporting that unchanged would advertise double, half, int and the
+    quantized types, none of which this backend can compute on.
+    """
+    cap = torch.accelerator.get_device_capability()
+    assert cap["supported_dtypes"] == {torch.float32}
+
+
+def test_memory_stats_are_answerable(backend):
+    """These used to die with 'Allocator for vortex is not a DeviceAllocator'."""
+    n = 4096
+    t = torch.ones(n, device="vortex")
+    allocated = torch.accelerator.memory_allocated()
+    free, total = torch.accelerator.get_memory_info()
+    assert allocated >= n * 4, (
+        "memory_allocated() = %d, expected at least one tensor of %d bytes"
+        % (allocated, n * 4))
+    assert total > 0 and free <= total
+    # no pooling in v1, so reserved tracks allocated
+    assert torch.accelerator.memory_reserved() == allocated
+    assert torch_vortex_live_bytes() >= n * 4
+    del t
+
+
+def torch_vortex_live_bytes():
+    import torch_vortex
+    return torch_vortex.stats()["live_bytes"]
+
+
 def test_repeated_import_is_idempotent(backend):
     """Re-importing must not re-register the backend or reload the image.
 

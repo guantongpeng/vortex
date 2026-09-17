@@ -107,8 +107,42 @@ def _device_module():
         def current_device(self):
             return 0
 
+        def set_device(self, device):
+            """Only device 0 exists; anything else is refused, not ignored."""
+            index = device if isinstance(device, int) else getattr(device, "index", None)
+            if index not in (None, -1, 0):
+                raise RuntimeError(
+                    "torch_vortex: only device 0 exists, got %r" % (device,))
+
         def is_initialized(self):
             return True
+
+        def properties(self, device=None):
+            """What the runtime actually reports, rather than a guess.
+
+            Same shape as torch.cuda.get_device_properties: a plain object with
+            the fields the runtime can answer.
+            """
+            ext = _require_ext()
+            props = ext.device_properties()
+
+            class _Props:
+                name = "vortex"
+                major = 0
+                minor = 0
+                warp_size = props["warp_size"]
+                max_threads_per_block = props["max_threads_per_block"]
+                shared_memory_per_block = props["shared_mem_per_block"]
+                total_memory = props["total_global_mem"]
+
+                def __repr__(self):
+                    return ("_Props(name='vortex', warp_size=%d, "
+                            "max_threads_per_block=%d, shared_memory_per_block=%d, "
+                            "total_memory=%d)"
+                            % (self.warp_size, self.max_threads_per_block,
+                               self.shared_memory_per_block, self.total_memory))
+
+            return _Props()
 
         def _is_in_bad_fork(self):
             return False

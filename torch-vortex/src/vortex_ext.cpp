@@ -33,6 +33,7 @@
 #include <vector>
 
 #include <c10/core/Allocator.h>
+#include <c10/core/CachingDeviceAllocator.h>
 #include <ATen/EmptyTensor.h>
 #include <ATen/ops/view_native.h>
 #include <c10/core/Device.h>
@@ -74,6 +75,7 @@ struct VortexStats {
     std::atomic<uint64_t> d2d_bytes{0};
     std::atomic<uint64_t> allocations{0};
     std::atomic<uint64_t> allocated_bytes{0};
+    std::atomic<uint64_t> freed_bytes{0};
     std::atomic<uint64_t> frees{0};
     std::atomic<uint64_t> immediate_frees{0};
     std::atomic<uint64_t> blocking_syncs{0};
@@ -86,6 +88,13 @@ VortexStats g_stats;
 // torn down. The allocator's deleter consults it: the stream-ordered free
 // needs a live queue, and during teardown there may not be one.
 std::atomic<bool> g_device_ready{false};
+
+// Live device bytes. c10's deleter is a bare void(*)(void*) with no size in
+// it, so the size is remembered here for the duration of the block.
+std::atomic<int64_t> g_live_bytes{0};
+std::atomic<int64_t> g_peak_bytes{0};
+std::mutex g_block_mu;
+std::unordered_map<void*, size_t> g_block_sizes;
 
 // Epoch counters for the allocator's fast path.
 //
@@ -129,6 +138,8 @@ std::map<std::string, int64_t> stats_snapshot() {
         {"d2d_bytes", (int64_t)g_stats.d2d_bytes.load()},
         {"allocations", (int64_t)g_stats.allocations.load()},
         {"allocated_bytes", (int64_t)g_stats.allocated_bytes.load()},
+        {"freed_bytes", (int64_t)g_stats.freed_bytes.load()},
+        {"live_bytes", (int64_t)g_live_bytes.load()},
         {"frees", (int64_t)g_stats.frees.load()},
         {"immediate_frees", (int64_t)g_stats.immediate_frees.load()},
         {"blocking_syncs", (int64_t)g_stats.blocking_syncs.load()},
@@ -144,6 +155,7 @@ void stats_reset() {
     g_stats.d2d_bytes = 0;
     g_stats.allocations = 0;
     g_stats.allocated_bytes = 0;
+    g_stats.freed_bytes = 0;
     g_stats.frees = 0;
     g_stats.immediate_frees = 0;
     g_stats.blocking_syncs = 0;
@@ -266,13 +278,21 @@ namespace {
 
 void vortex_free(void* ctx);
 
-struct VortexAllocator final : public c10::Allocator {
+struct VortexAllocator final : public c10::DeviceAllocator {
     c10::DataPtr allocate(size_t n) override {
         void* p = nullptr;
         if (n != 0) {
             VX_CHECK(hipMalloc(&p, n));
             ++g_stats.allocations;
             g_stats.allocated_bytes += n;
+            {
+                std::lock_guard<std::mutex> g(g_block_mu);
+                g_block_sizes[p] = n;
+            }
+            g_live_bytes += (int64_t)n;
+            if (g_live_bytes.load() > g_peak_bytes.load()) {
+                g_peak_bytes = g_live_bytes.load();
+            }
         }
         return c10::DataPtr(p, p, &vortex_free,
                             c10::Device(c10::DeviceType::PrivateUse1, 0));
@@ -282,6 +302,88 @@ struct VortexAllocator final : public c10::Allocator {
         // mapping (same-address-space model on current backends).
         VX_CHECK(hipMemcpy(dest, src, count, hipMemcpyDeviceToDevice));
         g_stats.d2d_bytes += count;
+    }
+
+    // ---- c10::DeviceAllocator ----------------------------------------------
+    //
+    // torch calls these through getDeviceAllocator(), which dynamic_casts the
+    // registered allocator to DeviceAllocator and asserts. Before this the
+    // cast failed, so torch.accelerator.memory_allocated() died with
+    // "Allocator for vortex is not a DeviceAllocator".
+
+    bool initialized() override { return g_device_ready.load(); }
+
+    // There is no cache to empty: this allocator hands every block straight to
+    // hipMalloc and releases it through the queue (see vortex_free). It
+    // deliberately does not force the deferred frees to complete.
+    void emptyCache(c10::MempoolId_t = {0, 0}) override {}
+
+    // A caching allocator would tag the block with the stream so it is not
+    // recycled while that stream still uses it. There are no blocks to tag
+    // yet -- W2.1 defers the release through the queue instead -- so this is
+    // where W3.1's caching allocator will hang its bookkeeping.
+    void recordStream(const c10::DataPtr&, c10::Stream) override {}
+
+    c10::CachingDeviceAllocator::DeviceStats
+    getDeviceStats(c10::DeviceIndex) override {
+        // The header puts DeviceStats in one namespace and the Stat types
+        // in another; that is what it does, not a typo here.
+        using c10::CachingDeviceAllocator::DeviceStats;
+        using c10::CachingAllocator::Stat;
+        using c10::CachingAllocator::StatType;
+        DeviceStats s;
+        const size_t agg = static_cast<size_t>(StatType::AGGREGATE);
+        const int64_t live = g_live_bytes.load();
+
+        auto fill = [&](c10::CachingAllocator::StatArray& a, int64_t cur, int64_t peak,
+                        int64_t total, int64_t freed) {
+            Stat& st = a[agg];
+            st.current = cur;
+            st.peak = peak;
+            st.allocated = total;
+            st.freed = freed;
+        };
+        // Every block is live from hipMalloc until the queued release runs, and
+        // this allocator never pools or splits, so reserved == allocated and
+        // the header fields mirror the aggregate ones.
+        fill(s.allocation, g_stats.allocations.load(), g_stats.allocations.load(),
+             g_stats.allocations.load(), g_stats.frees.load());
+        fill(s.segment, g_stats.allocations.load(), g_stats.allocations.load(),
+             g_stats.allocations.load(), g_stats.frees.load());
+        fill(s.active, g_stats.allocations.load() - g_stats.frees.load(),
+             g_stats.allocations.load() - g_stats.frees.load(),
+             g_stats.allocations.load(), g_stats.frees.load());
+        fill(s.inactive_split, 0, 0, 0, 0);
+        fill(s.allocated_bytes, live, g_peak_bytes.load(),
+             g_stats.allocated_bytes.load(), g_stats.freed_bytes.load());
+        fill(s.reserved_bytes, live, g_peak_bytes.load(),
+             g_stats.allocated_bytes.load(), g_stats.freed_bytes.load());
+        fill(s.active_bytes, live, g_peak_bytes.load(),
+             g_stats.allocated_bytes.load(), g_stats.freed_bytes.load());
+        fill(s.inactive_split_bytes, 0, 0, 0, 0);
+        fill(s.requested_bytes, live, g_peak_bytes.load(),
+             g_stats.allocated_bytes.load(), g_stats.freed_bytes.load());
+        s.num_device_alloc = (int64_t)g_stats.allocations.load();
+        s.num_device_free = (int64_t)g_stats.frees.load();
+        s.num_alloc_retries = 0;
+        s.num_ooms = 0;
+        return s;
+    }
+
+    void resetAccumulatedStats(c10::DeviceIndex) override {
+        g_stats.allocated_bytes = 0;
+        g_stats.freed_bytes = 0;
+    }
+    void resetPeakStats(c10::DeviceIndex) override {
+        g_peak_bytes = g_live_bytes.load();
+    }
+
+    std::pair<size_t, size_t> getMemoryInfo(c10::DeviceIndex) override {
+        hipDeviceProp_t prop;
+        VX_CHECK(hipGetDeviceProperties(&prop, 0));
+        const size_t total = (size_t)prop.totalGlobalMem;
+        const size_t live = (size_t)g_live_bytes.load();
+        return {total > live ? total - live : 0, total};
     }
 };
 
@@ -306,6 +408,15 @@ void vortex_free(void* ctx) {
         return;
     }
     ++g_stats.frees;
+    {
+        std::lock_guard<std::mutex> g(g_block_mu);
+        auto it = g_block_sizes.find(ctx);
+        if (it != g_block_sizes.end()) {
+            g_stats.freed_bytes += it->second;
+            g_live_bytes -= (int64_t)it->second;
+            g_block_sizes.erase(it);
+        }
+    }
     // Fast path: nothing has been enqueued since the last host-side barrier,
     // so no kernel can still be reading this buffer.
     if (g_device_ready && work_since_last_barrier()) {
@@ -365,6 +476,15 @@ struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     c10::DeviceIndex deviceCount() const noexcept override { return 1; }
     void uncheckedSetDevice(c10::Device d) const noexcept override {
         t_current_device = (d.index() < 0) ? 0 : d.index();
+    }
+
+    // The default is "every scalar type is supported", which for this backend
+    // would claim double, half, int and the quantized types. Only float32 is
+    // implemented for compute in v1 (W3.2/W4.1), so say exactly that.
+    c10::DeviceCapability getDeviceCapability(c10::Device) const override {
+        c10::DeviceCapability cap;
+        cap.capability_data.capability_bits = 1ULL << c10::kIndex_Float;
+        return cap;
     }
 
     c10::Stream getStream(c10::Device) const noexcept override {
