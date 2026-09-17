@@ -132,6 +132,24 @@ struct unary_args_t {
     uint32_t op;
 };
 
+// reduce_rows_kernel: one thread per row, reducing `cols` contiguous values.
+//
+// Row-wise and contiguous, with no LMEM and no tree, which is the simplest
+// shape there is -- deliberate, given what an unusual kernel shape cost in
+// tv_mm_kernel. Anything that is not "reduce the trailing dimension" is
+// normalised on the host with movedim+contiguous before it gets here, so this
+// kernel never has to know about strides.
+//
+// op: 0 = sum, 1 = mean, 2 = max.
+struct reduce_args_t {
+    uint64_t in;
+    uint64_t out;
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t op;
+    uint32_t pad;
+};
+
 // copy_strided_kernel: elementwise copy between two arbitrarily strided
 // buffers of the same shape, up to 4 dimensions. A stride of 0 broadcasts,
 // which is how `x.t().to("vortex")` and `contiguous()` on a transposed tensor
@@ -239,6 +257,7 @@ struct bias_args_t {
     X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
     X(unary_op_kernel, unary_args_t, 0, 0)                                     \
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
+    X(reduce_rows_kernel, reduce_args_t, 0, 0)                                \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
     X(tv_conv2d_kernel, conv_args_t, 16, 0)                                    \

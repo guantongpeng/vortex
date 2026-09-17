@@ -930,6 +930,130 @@ static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src) {
     launch(h_copy_strided_kernel, args, (args.total + 3) / 4);
 }
 
+// ---- reductions -----------------------------------------------------------
+//
+// The kernel reduces the trailing dimension of a contiguous (rows, cols)
+// view. Everything else -- a full reduction, a middle dimension -- is
+// normalised into that shape on the host with movedim+contiguous before it
+// gets there, so the kernel never has to know about strides and stays in the
+// simple shape VOLT compiles correctly.
+//
+// The normalising copy costs a pass. A stride-aware reduction kernel is the
+// obvious next step (W7.1 measures whether it matters); correctness first.
+
+enum TorchReduceOp { TORCH_REDUCE_SUM = 0, TORCH_REDUCE_MEAN, TORCH_REDUCE_MAX };
+
+// The shape the result has, which ATen would otherwise compute for us.
+static std::vector<int64_t> reduced_shape(const torch::Tensor& self,
+                                          c10::OptionalArrayRef<int64_t> dim,
+                                          bool keepdim) {
+    const int64_t nd = self.dim();
+    std::vector<int64_t> s(self.sizes().begin(), self.sizes().end());
+    const bool all = !dim.has_value() || dim->size() == 0;
+    if (keepdim) {
+        for (int64_t i = 0; i < nd; ++i) {
+            if (all) {
+                s[i] = 1;
+            } else {
+                for (auto d : *dim) {
+                    if ((d < 0 ? d + nd : d) == i) s[i] = 1;
+                }
+            }
+        }
+        return s;
+    }
+    if (all) {
+        return {};
+    }
+    std::vector<int64_t> out;
+    for (int64_t i = 0; i < nd; ++i) {
+        bool reduced = false;
+        for (auto d : *dim) {
+            if ((d < 0 ? d + nd : d) == i) reduced = true;
+        }
+        if (!reduced) out.push_back(s[i]);
+    }
+    return out;
+}
+
+// Validate the dims before anything is allocated, so a bad call fails without
+// having sized a result first. The layout helper repeats these checks; this
+// only exists to run them earlier.
+static void check_reduce_dims(const torch::Tensor& self,
+                              c10::OptionalArrayRef<int64_t> dim,
+                              const char* name) {
+    const int64_t nd = self.dim();
+    TORCH_CHECK(nd <= 4, "torch_vortex: ", name,
+                " supports at most 4 dimensions in v1, got ", nd);
+    if (!dim.has_value() || dim->size() == 0) {
+        return;
+    }
+    TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
+                "dimensions at once is unsupported in v1; reduce one at a "
+                "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+    int64_t d = (*dim)[0];
+    if (d < 0) d += nd;
+    TORCH_CHECK(d >= 0 && d < nd, "torch_vortex: ", name, " dim ", (*dim)[0],
+                " is out of range for a ", nd, "-D tensor");
+}
+
+// A contiguous (rows, cols) view whose trailing dimension is the one being
+// reduced. A full reduction is one row of everything.
+static torch::Tensor reduce_layout(const torch::Tensor& self,
+                                   c10::OptionalArrayRef<int64_t> dim,
+                                   const char* name) {
+    const int64_t nd = self.dim();
+    if (nd > 4) {
+        TORCH_CHECK(false, "torch_vortex: ", name,
+                    " supports at most 4 dimensions in v1, got ", nd);
+    }
+    if (!dim.has_value() || dim->size() == 0) {
+        return self.reshape({1, -1}).contiguous();
+    }
+    TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
+                "dimensions at once is unsupported in v1; reduce one at a "
+                "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+    int64_t d = (*dim)[0];
+    if (d < 0) d += nd;
+    TORCH_CHECK(d >= 0 && d < nd, "torch_vortex: ", name, " dim ", (*dim)[0],
+                " is out of range for a ", nd, "-D tensor");
+    auto moved = (d == nd - 1) ? self : self.movedim(d, nd - 1);
+    auto contig = moved.contiguous();
+    const int64_t cols = contig.size(nd - 1);
+    TORCH_CHECK(cols > 0, "torch_vortex: ", name, " on an empty dimension");
+    return contig.reshape({contig.numel() / cols, cols});
+}
+
+static torch::Tensor& reduce_into(const torch::Tensor& self, torch::Tensor& out,
+                                  c10::OptionalArrayRef<int64_t> dim,
+                                  uint32_t op, const char* name) {
+    check_vortex_f32(self, name);
+    TORCH_CHECK(out.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: ", name, " out must be a vortex tensor");
+    TORCH_CHECK(out.scalar_type() == at::kFloat && out.is_contiguous(),
+                "torch_vortex: ", name, " out must be contiguous float32");
+    // holding the normalised view alive across the launch: the allocator
+    // defers its release behind the queue now, but the tensor still has to
+    // exist when the kernel reads it
+    auto src = reduce_layout(self, dim, name);
+    TORCH_CHECK(out.numel() == src.size(0), "torch_vortex: ", name, " out has ",
+                out.numel(), " elements but the reduction produces ",
+                src.size(0));
+    reduce_args_t args = {(uint64_t)(uintptr_t)src.data_ptr(),
+                          (uint64_t)(uintptr_t)out.data_ptr(),
+                          u32_dim(src.size(0), "reduce rows"),
+                          u32_dim(src.size(1), "reduce columns"), op, 0};
+    launch(h_reduce_rows_kernel, args, (args.rows + 3) / 4);
+    return out;
+}
+
+static void check_reduce_dtype(std::optional<c10::ScalarType> dtype,
+                               const char* name) {
+    TORCH_CHECK(!dtype.has_value() || *dtype == at::kFloat,
+                "torch_vortex: ", name, " dtype ", dtype.value(),
+                " is unsupported; only float32 is implemented (W3.2)");
+}
+
 // ---- elementwise ----------------------------------------------------------
 //
 // Op-code driven: one kernel per arity, with the operation selected by a field
@@ -1621,6 +1745,65 @@ static torch::Tensor addmm_impl(const torch::Tensor& self,
 // exits with a kernel still queued. The registrations are process-lifetime by
 // design, and leaking the handle is how torch intends that (see the note about
 // heap construction in torch/library.h).
+// ---- reduction call sites -------------------------------------------------
+
+static torch::Tensor sum_impl(const torch::Tensor& self,
+                              c10::OptionalArrayRef<int64_t> dim, bool keepdim,
+                              std::optional<c10::ScalarType> dtype) {
+    check_reduce_dtype(dtype, "sum");
+    check_reduce_dims(self, dim, "sum");
+    auto out = torch::empty(reduced_shape(self, dim, keepdim), self.options());
+    return reduce_into(self, out, dim, TORCH_REDUCE_SUM, "sum");
+}
+static torch::Tensor& sum_out_impl(const torch::Tensor& self,
+                                   c10::OptionalArrayRef<int64_t> dim,
+                                   bool keepdim,
+                                   std::optional<c10::ScalarType> dtype,
+                                   torch::Tensor& out) {
+    check_reduce_dtype(dtype, "sum");
+    return reduce_into(self, out, dim, TORCH_REDUCE_SUM, "sum");
+}
+
+static torch::Tensor mean_impl(const torch::Tensor& self,
+                               c10::OptionalArrayRef<int64_t> dim, bool keepdim,
+                               std::optional<c10::ScalarType> dtype) {
+    check_reduce_dtype(dtype, "mean");
+    check_reduce_dims(self, dim, "mean");
+    auto out = torch::empty(reduced_shape(self, dim, keepdim), self.options());
+    return reduce_into(self, out, dim, TORCH_REDUCE_MEAN, "mean");
+}
+static torch::Tensor& mean_out_impl(const torch::Tensor& self,
+                                    c10::OptionalArrayRef<int64_t> dim,
+                                    bool keepdim,
+                                    std::optional<c10::ScalarType> dtype,
+                                    torch::Tensor& out) {
+    check_reduce_dtype(dtype, "mean");
+    return reduce_into(self, out, dim, TORCH_REDUCE_MEAN, "mean");
+}
+
+// amax's dim is an int[1] (empty means every dimension), not an optional.
+static torch::Tensor amax_impl(const torch::Tensor& self, c10::IntArrayRef dim,
+                               bool keepdim) {
+    c10::OptionalArrayRef<int64_t> d =
+        dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    auto out = torch::empty(reduced_shape(self, d, keepdim), self.options());
+    return reduce_into(self, out, d, TORCH_REDUCE_MAX, "amax");
+}
+static torch::Tensor& amax_out_impl(const torch::Tensor& self,
+                                    c10::IntArrayRef dim, bool keepdim,
+                                    torch::Tensor& out) {
+    c10::OptionalArrayRef<int64_t> d =
+        dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    return reduce_into(self, out, d, TORCH_REDUCE_MAX, "amax");
+}
+
+// aten::max with no dim is a full reduction. max(dim=...) also returns
+// indices, which needs an argmax kernel and is refused by name.
+static torch::Tensor max_impl(const torch::Tensor& self) {
+    auto out = torch::empty({}, self.options());
+    return reduce_into(self, out, std::nullopt, TORCH_REDUCE_MAX, "max");
+}
+
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
@@ -1637,6 +1820,13 @@ void register_vortex_ops() {
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
     VX_IMPL("as_strided", &as_strided_impl);
+    VX_IMPL("sum.dim_IntList", &sum_impl);
+    VX_IMPL("sum.IntList_out", &sum_out_impl);
+    VX_IMPL("mean.dim", &mean_impl);
+    VX_IMPL("mean.out", &mean_out_impl);
+    VX_IMPL("amax", &amax_impl);
+    VX_IMPL("amax.out", &amax_out_impl);
+    VX_IMPL("max", &max_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);

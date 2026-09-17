@@ -155,3 +155,25 @@ __global__ void broadcast_op_kernel(broadcast_op_args_t* arg) {
                                ((const float*)(uintptr_t)arg->b)[b_off], arg->op);
     }
 }
+
+// One thread per row over `cols` contiguous values. sum, mean and max.
+//
+// The accumulator starts at -INFINITY for max, not a finite sentinel, and NaN
+// wins: torch.amax propagates NaN, and `-3.4e38f` (as the pool kernel used to
+// seed with) drops -inf inputs and erases NaN.
+__global__ void reduce_rows_kernel(reduce_args_t* arg) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= arg->rows) return;
+    const float* in = (const float*)(uintptr_t)arg->in + (size_t)row * arg->cols;
+    float acc = (arg->op == 2) ? -INFINITY : 0.0f;
+    for (uint32_t i = 0; i < arg->cols; ++i) {
+        const float v = in[i];
+        if (arg->op == 2) {
+            if (v > acc || isnan(v)) acc = v;
+        } else {
+            acc += v;
+        }
+    }
+    if (arg->op == 1) acc /= (float)arg->cols;
+    ((float*)(uintptr_t)arg->out)[row] = acc;
+}
