@@ -137,12 +137,25 @@ F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条�
   (声明小于实际):`quant_gemm_w8a8` 48→56、`llm_embedding`/`llm_kv_append` 24→32;另加此前
   已修的 dnn 三个。新增测试对每个可测镜像重测并比对,把值改回去即失败。
 
-### 5.6 仍未完成
+### 5.6 init 检查已覆盖全部 11 个模块
 
-- 其余 9 个 DL 模块(attn/llm/mamba/mxfp8/nvfp4/prim/quant/rng/sparse24)的 init 参数检查。
-- `mxfp8_args.h` 的尺寸未纳入测试:它的头文件在 host 侧编不过(声明了设备侧辅助函数)。
+`blas`/`dnn` 之后把其余 9 个也补上了。脚本化做这件事本身暴露了两点:
+
+- **三个模块持有公开状态枚举的第二份副本**(`mxfp8` 在 `mxfp8_args.h`,`nvfp4`/`rng` 在自己的
+  host 文件里),其中两个还重复声明了公开函数。只改公共头**够不到它们**——第一次尝试把头文件
+  改对了,却在 .cpp 里报「新枚举未声明」。这与手填 `args_size` 是同一类缺陷:一个事实、多份手工
+  维护的副本,副本之间会漂移。现在是自洽的,但没有任何机制维持它。
+- **脚本改写必须逐文件改、编译、失败即回退**:把「按原文算出的下标」拼进「已被前一步改动的
+  字符串」会写坏文件——第一次尝试就是这么让 9 个文件全部报 `expected unqualified-id` 的。
+  逐文件的代价是一个模块而不是整库;`mxfp8` 的 init 与 `rng` 的两处枚举最后仍需手工处理。
+
+### 5.7 仍未完成
+
 - `prim`:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce`
   的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。
 - `linear` 每次调用物化 `w.t().contiguous()`——DL gemm 没有 `transb`,这次拷贝是「一个 GEMM
   而不是两个」的代价。给 `vx_blas_gemm` 加 `transb` 是后续项。
+- `mxfp8_args.h` 的尺寸未纳入漂移测试:它的头文件在 host 侧编不过(声明了设备侧辅助函数),
+  探针无法包含它。
+- 三处重复的状态枚举(见 §5.6)没有机制保证一致。
 - `avg_pool2d` 未注册(`count_include_pad` 默认语义与 DL 的 in-bounds count 不同,属 W3.3)。
