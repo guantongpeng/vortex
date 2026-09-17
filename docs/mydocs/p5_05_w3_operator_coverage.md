@@ -112,9 +112,37 @@ DL 库说的是 vortex2.h,需要**本进程的** device 和 queue——自己开
 
 分工由此明确:**ATen 校验,DL 计算**。边界检查(`window_out`、范围检查)留在扩展——它们会指名被拒的参数,而且是这条路径上唯一的带符号算术;DL 的形状算术是无符号无检查的。
 
-### 5.4 尚未完成
+### 5.4 已完成的四个算子
 
-- **`batch norm`**:DL 的 BN 要求 weight/bias 指针都非空,而 ATen 侧支持 affine 可选。要么给 DL 加 `has_affine`(torch-vortex 的 kernel 已经有),要么在缺省时传 1/0 缓冲。
-- **`mm`**:DL 的 gemm **保留了内联的 alpha/beta epilogue 分支**——正是我在 `tv_mm_kernel` 里因为 VOLT 误编译而移出的那种形状。迁移前必须先用 `test_mm_partial_tiles` 那套形状测它,否则可能把误编译带回来。审计明确建议先测。
-- **`prim`**:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce` 的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。
-- **`sw/dl` 的 init 与 metadata**(审计发现,未修):init 第二次调用是**静默 no-op**,不看 device 也不看路径;部分初始化失败会留下 `module` 已设而某个 kernel 槽为 nullptr 的状态,而 runtime 把 nullptr kernel 当「legacy escape hatch」——于是会**以 PC 0 成功入队**。`args_size` 也仍是手填且漂移(conv 声明 96 实际 88)。这些是 `sw/dl` 自身的账,不是迁移引入的,但会随迁移一起被继承。
+`conv2d`、`pooling`、`matmul`(mm/linear/addmm)、`batch norm` 全部走 DL kernel,扩展里对应的
+kernel、参数结构体与 launch 助手已删除。`batch norm` 是最后也是最关键的一个:审计发现的
+F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条同时证明了用的是**修好的那份**,
+而不是它的副本。
+
+障碍是可选 affine:ATen 允许 weight/bias 缺失,而 DL 入口要求两者都非空。解法不是传 1/0 缓冲
+(那能work,但是对参数含义的谎),而是给 kernel 加 `has_affine`、host 从指针推导;只给其一按
+调用方错误拒绝。
+
+### 5.5 迁移带出的 `sw/dl` 自身欠账(已修)
+
+- **init 参数检查**:每个模块的 init 第二次调用都直接返回 OK,**不看 device 也不看路径**。第二个
+  调用方拿着不同镜像会静默拿到第一个调用方的 kernel。现在同参数才幂等,不同则返回
+  `ERR_ALREADY_INITIALIZED`(已修 `blas`、`dnn`;其余 9 个模块同样的问题仍在)。
+- **部分初始化失败**:kernel 查找失败会留下 `module` 已设的状态,之后每次 init 都返回 OK 而某个
+  slot 是 nullptr——而 nullptr kernel 是 runtime 的 escape hatch,于是 launch 会**以 PC 0 成功入队**。
+  现在失败即 finalize。
+- **`args_size` 手填且漂移**:用 kern 源码里的单参数类型取出 kernel→struct 映射,用 host 编译器
+  实测两套 XLEN(host 与 rv64 同为 LP64;`-DVX_CFG_XLEN=32` 且不定义 `__VORTEX__` 走头文件的
+  `uint32_t` 指针分支,即 rv32 布局),**改掉 13 个数字**。其中 rv64 分支 3 个且都是危险方向
+  (声明小于实际):`quant_gemm_w8a8` 48→56、`llm_embedding`/`llm_kv_append` 24→32;另加此前
+  已修的 dnn 三个。新增测试对每个可测镜像重测并比对,把值改回去即失败。
+
+### 5.6 仍未完成
+
+- 其余 9 个 DL 模块(attn/llm/mamba/mxfp8/nvfp4/prim/quant/rng/sparse24)的 init 参数检查。
+- `mxfp8_args.h` 的尺寸未纳入测试:它的头文件在 host 侧编不过(声明了设备侧辅助函数)。
+- `prim`:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce`
+  的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。
+- `linear` 每次调用物化 `w.t().contiguous()`——DL gemm 没有 `transb`,这次拷贝是「一个 GEMM
+  而不是两个」的代价。给 `vx_blas_gemm` 加 `transb` 是后续项。
+- `avg_pool2d` 未注册(`count_include_pad` 默认语义与 DL 的 in-bounds count 不同,属 W3.3)。

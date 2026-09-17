@@ -49,11 +49,11 @@ PRIM_ROWARGS_SIZE := 24
 PRIM_NORM_SIZE := 48
 PRIM_RMSNORM_SIZE := 40
 else
-PRIM_UNARY_SIZE := 12
-PRIM_REDUCE_SIZE := 12
-PRIM_ROWARGS_SIZE := 12
-PRIM_NORM_SIZE := 24
-PRIM_RMSNORM_SIZE := 20
+PRIM_UNARY_SIZE := 16
+PRIM_REDUCE_SIZE := 16
+PRIM_ROWARGS_SIZE := 16
+PRIM_NORM_SIZE := 32
+PRIM_RMSNORM_SIZE := 28
 endif
 PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
@@ -101,11 +101,11 @@ prim_host.o: $(SRC_DIR)/prim_host.cpp $(SRC_DIR)/prim_args.h
 ifeq ($(XLEN),64)
 Q_PACK_SIZE := 40
 Q_GEMM4_SIZE := 48
-Q_GEMM8_SIZE := 48
+Q_GEMM8_SIZE := 56
 else
 Q_PACK_SIZE := 24
 Q_GEMM4_SIZE := 32
-Q_GEMM8_SIZE := 32
+Q_GEMM8_SIZE := 36
 endif
 # gemm fp8: 3 ptr + 4 u32 -> rv64 40, rv32 28
 ifeq ($(XLEN),64)
@@ -181,24 +181,24 @@ SP_GEMM := 48
 ATTN_SZ := 56
 LLM_ROPE := 16
 LLM_SWI := 32
-LLM_EMB := 24
-LLM_KV := 24
+LLM_EMB := 32
+LLM_KV := 32
 MAMBA_SZ := 64
 RNG_SZ := 32
 else
 MX_PACK := 24
 MX_GEMM := 36
 N4_PACK := 28
-N4_GEMM := 44
+N4_GEMM := 36
 SP_PRUNE := 20
-SP_GEMM := 32
+SP_GEMM := 28
 ATTN_SZ := 40
 LLM_ROPE := 12
 LLM_SWI := 16
-LLM_EMB := 12
+LLM_EMB := 20
 LLM_KV := 20
 MAMBA_SZ := 40
-RNG_SZ := 20
+RNG_SZ := 28
 endif
 VXBIN_RULE = echo '$(2)' > $(1)_meta.json && \
 	VX_KERNEL_METADATA=$$PWD/$(1)_meta.json $(HIPCC) $(HIPCC_FLAGS) $(3) -o $@

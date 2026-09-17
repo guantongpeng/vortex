@@ -28,6 +28,8 @@ DL modules against them.
 """
 
 import ctypes
+import glob
+import json
 import os
 import re
 import struct
@@ -342,68 +344,115 @@ def test_aten_batch_norm_is_the_dl_kernel(backend, dl):
         % (direct - got).abs().max().item())
 
 
-@pytest.mark.parametrize("xlen,expected", [
-    # measured with the host compiler, which shares LP64 with rv64
-    (64, {"dnn_conv2d_kernel": 88, "dnn_pool2d_kernel": 72,
-          "dnn_bn_affine_kernel": 72}),
-    # measured with VX_CFG_XLEN=32 and no __VORTEX__, which selects the
-    # header's uint32_t pointer branch
-    (32, {"dnn_conv2d_kernel": 72, "dnn_pool2d_kernel": 60,
-          "dnn_bn_affine_kernel": 44}),
-])
-def test_dl_metadata_matches_measured_sizes(xlen, expected, tmp_path):
-    """sw/dl's args_size was hand-typed and had drifted -- the F07 class.
+# The kernel -> argument-struct mapping, read from the kernel sources rather
+# than restated here: each entry point takes exactly one argument block.
+_KERNEL_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(\s*(\w+)\s*\*\s*arg\s*\)")
 
-    conv declared 96 for an 88-byte struct, pool 88 for 72, and bn 56 for 72.
-    The last is the dangerous direction: the runtime copies exactly args_size
-    bytes, so a declared size that is too small means the kernel reads whatever
-    follows. It stays latent in the DL because the host passes its own sizeof()
-    at launch, which is why nothing caught it.
 
-    This measures the structs and compares against what the image metadata
-    actually says, so the numbers cannot drift again without a named failure.
+def _dl_kernel_structs(repo):
+    mapping = {}
+    for path in sorted(glob.glob(os.path.join(repo, "sw", "dl", "src", "*_kernels.hip"))):
+        for name, struct in _KERNEL_RE.findall(open(path).read()):
+            mapping[name] = struct
+    return mapping
+
+
+def _measure_dl_structs(repo, xlen, mapping, tmp_path):
+    """sizeof every argument block, using the host compiler.
+
+    For rv64 the host is already the right data model (LP64). For rv32,
+    defining VX_CFG_XLEN=32 without __VORTEX__ selects the header's uint32_t
+    pointer branch, which is the layout an rv32 build gets -- so one host
+    compiler measures both, and the result is a real measurement rather than
+    an arithmetic guess.
     """
-    repo = _paths.find_repo()
-    probe = tmp_path / "dl_sizes.cpp"
-    probe.write_text(textwrap.dedent("""
-        #include <stdio.h>
-        #include "dnn_args.h"
-        int main(void) {
-            printf("dnn_conv2d_kernel %zu\\n", sizeof(vx_dnn_conv_args_t));
-            printf("dnn_pool2d_kernel %zu\\n", sizeof(vx_dnn_pool_args_t));
-            printf("dnn_bn_affine_kernel %zu\\n", sizeof(vx_dnn_bn_affine_t_typo));
-            return 0;
-        }
-    """).replace("vx_dnn_bn_affine_t_typo", "vx_dnn_bn_args_t"))
-    exe = tmp_path / "dl_sizes"
+    names = [k for k in sorted(mapping) if not k.startswith("mxfp8")]
+    probe = tmp_path / ("dl_sizes_%d.cpp" % xlen)
+    probe.write_text(
+        "#include <stdio.h>\n"
+        + "".join('#include "%s"\n' % os.path.basename(h) for h in sorted(
+            glob.glob(os.path.join(repo, "sw", "dl", "src", "*_args.h")))
+            if os.path.basename(h) != "mxfp8_args.h")
+        + "int main(void){\n"
+        + "".join('  printf("%s %%zu\\n", sizeof(%s));\n' % (n, mapping[n]) for n in names)
+        + "  return 0;\n}\n")
+    exe = tmp_path / ("dl_sizes_%d" % xlen)
     cc = os.environ.get("CXX", "c++")
     build = subprocess.run(
         [cc, "-std=c++17", "-I", os.path.join(repo, "sw", "dl", "src"),
          "-I", os.path.join(repo, "sw", "dl", "include"),
          "-DVX_CFG_XLEN=%d" % xlen, str(probe), "-o", str(exe)],
-        capture_output=True, text=True, timeout=180)
+        capture_output=True, text=True, timeout=300)
     assert build.returncode == 0, build.stderr[-2000:]
     res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr[-2000:]
-    measured = {line.split()[0]: int(line.split()[1])
-                for line in res.stdout.strip().splitlines()}
-    assert measured == expected, (
-        "the measurement changed; update this test AND sw/dl/Makefile together")
+    return {line.split()[0]: int(line.split()[1])
+            for line in res.stdout.strip().splitlines()}
 
-    # The image metadata has to say the same thing -- but only when this tree
-    # is built for the XLEN being measured; the other branch is a prediction
-    # about a tree that is not here.
+
+def test_dl_metadata_matches_measured_sizes(tmp_path):
+    """sw/dl's args_size is hand-typed, and it had drifted -- the F07 class.
+
+    Measured against the image metadata for every image whose argument headers
+    compile outside the device context (all but mxfp8, whose header declares
+    device-side helpers). Thirteen numbers were wrong when this was first run:
+    conv declared 96 for 88, pool 88 for 72, bn 56 for 72, quant's w8a8 gemm 48
+    for 56, and the two llm entries 24 for 32. bn was the dangerous direction --
+    a declared size *smaller* than the struct -- and it appeared because adding
+    a field to bn_args_t did not make anyone look at this table.
+
+    The 32-bit column is a prediction about a tree that is not here, so it is
+    checked against the Makefile rather than against a built image.
+    """
+    repo = _paths.find_repo()
+    mapping = _dl_kernel_structs(repo)
+    assert mapping, "no kernels found under sw/dl/src"
+
     config = open(os.path.join(_paths.find_build(), "config.mk")).read()
     tree_xlen = int(re.search(r"^XLEN\s*\??=\s*(\d+)", config, re.M).group(1))
-    if tree_xlen != xlen:
-        return
-    meta_path = os.path.join(_paths.find_build(), "sw", "dl", "dnn_meta.json")
-    if not os.path.exists(meta_path):
-        pytest.skip("dnn.vxbin not built in this tree")
+    measured = _measure_dl_structs(repo, tree_xlen, mapping, tmp_path)
+
     declared = {}
-    for name, size in re.findall(r'"name":\s*"([a-z_0-9]+)",\s*"args_size":\s*(\d+)',
-                                 open(meta_path).read()):
-        declared[name] = int(size)
-    assert {k: declared.get(k) for k in measured} == measured, (
-        "sw/dl/Makefile's declared args_size disagrees with the structs: "
-        "%r vs %r" % ({k: declared.get(k) for k in measured}, measured))
+    for path in sorted(glob.glob(os.path.join(_paths.find_build(), "sw", "dl",
+                                              "*_meta.json"))):
+        for rec in json.load(open(path)):
+            declared[rec["name"]] = rec["args_size"]
+    if not declared:
+        pytest.skip("no sw/dl images built in this tree")
+
+    wrong = {k: (measured[k], declared[k]) for k in measured
+             if k in declared and declared[k] != measured[k]}
+    assert not wrong, (
+        "sw/dl's declared args_size disagrees with the structs "
+        "(kernel: measured vs declared): %r" % wrong)
+
+
+def test_dl_metadata_32_bit_column(tmp_path):
+    """The rv32 half of the same table, checked against the Makefile."""
+    repo = _paths.find_repo()
+    mapping = _dl_kernel_structs(repo)
+    measured = _measure_dl_structs(repo, 32, mapping, tmp_path)
+    makefile = open(os.path.join(repo, "sw", "dl", "Makefile")).read()
+
+    # resolve the variables each image's metadata references, in the rv32 branch
+    tail = makefile[makefile.index("ifeq ($(XLEN),64)"):]
+    rv32 = dict(re.findall(r"^(\w+)\s*:=\s*(\d+)$", tail.split("else", 1)[1].split("endif")[0], re.M))
+    var_of = {}
+    for m in re.finditer(r"^(\w+)_META\s*:=\s*(\[.*\])$", makefile, re.M):
+        for name, var in re.findall(
+                r'"name":\s*"([a-z_0-9]+)",\s*"args_size":\s*\$\((\w+)\)', m.group(2)):
+            var_of.setdefault(name, var)
+    for name, var in re.findall(r'"name":\s*"([a-z_0-9]+)",\s*"args_size":\s*(\w+)\}',
+                                re.search(r"^LLM_META\s*:=\s*(\[.*\])$", makefile, re.M).group(1)):
+        var_of.setdefault(name, var)
+
+    wrong = {}
+    for name, size in measured.items():
+        var = var_of.get(name)
+        if var is None or var not in rv32:
+            continue
+        if int(rv32[var]) != size:
+            wrong[name] = (size, int(rv32[var]))
+    assert not wrong, (
+        "sw/dl's rv32 declared args_size disagrees with the structs "
+        "(kernel: measured vs declared): %r" % wrong)
