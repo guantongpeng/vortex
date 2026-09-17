@@ -108,3 +108,22 @@ __global__ void relu_kernel(fill_args_t* arg) {
         dst[i] = torch_unary_apply(dst[i], TORCH_UNARY_RELU);
     }
 }
+
+// Elementwise copy between two arbitrarily strided buffers. Handles the cases
+// hipMemcpy cannot: a transposed view on either side, a storage offset, and a
+// broadcast (stride 0). Dims are walked from the innermost out, so a
+// contiguous side costs a multiply per dimension rather than an address walk.
+__global__ void copy_strided_kernel(copy_strided_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i, dst_off = 0, src_off = 0;
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t c = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            dst_off += c * arg->dst_strides[d];
+            src_off += c * arg->src_strides[d];
+        }
+        ((float*)(uintptr_t)arg->dst)[dst_off] =
+            ((const float*)(uintptr_t)arg->src)[src_off];
+    }
+}

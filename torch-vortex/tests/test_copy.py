@@ -48,11 +48,9 @@ def test_transposed_source_is_materialised(backend):
     dst.copy_(non_contig)
     assert torch.equal(dst.cpu(), non_contig.contiguous())
 
-    # Refused rather than silently copying storage order. Not wrapped in
-    # assert_rejected: the refusal happens while _to_copy is already moving
-    # data, so bytes legitimately cross the bus before it is reached.
-    with pytest.raises(RuntimeError, match="non-contiguous vortex tensor"):
-        non_contig.to("vortex")
+    # The strided destination _to_copy asks for is served by the copy kernel
+    # now (it used to be refused).
+    assert torch.equal(non_contig.to("vortex").cpu(), non_contig.contiguous())
 
 
 def test_sliced_source(backend):
@@ -99,14 +97,17 @@ def test_rejects_shape_mismatch(backend):
         dst.copy_(src)
 
 
-def test_rejects_non_contiguous_destination(backend):
-    # empty_strided is the v1 way to make a strided vortex tensor: as_strided
-    # (which .t() goes through) is not registered.
+def test_strided_destination(backend):
+    """A strided destination is served by the copy kernel, not refused.
+
+    It used to be a TORCH_CHECK; the plan deferred strided destinations to
+    W3.2, which is where they landed.
+    """
+    x = torch.arange(12, dtype=torch.float32).reshape(3, 4)
     dst = torch.empty_strided((4, 3), (1, 4), device="vortex")
     assert not dst.is_contiguous()
-    src = torch.ones(4, 3, device="vortex")
-    with assert_rejected("non-contiguous vortex tensor", backend):
-        dst.copy_(src)
+    dst.copy_(x.t())
+    assert torch.equal(dst.cpu(), x.t().contiguous())
 
 
 def test_rejects_strided_factory_output(backend):

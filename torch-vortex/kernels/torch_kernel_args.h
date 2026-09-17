@@ -109,6 +109,23 @@ struct unary_args_t {
     uint32_t op;
 };
 
+// copy_strided_kernel: elementwise copy between two arbitrarily strided
+// buffers of the same shape, up to 4 dimensions. A stride of 0 broadcasts,
+// which is how `x.t().to("vortex")` and `contiguous()` on a transposed tensor
+// are served without a second kernel.
+//
+// Sizes are the destination's; the source shares them. Offsets are computed in
+// uint32 because the element count is checked to fit.
+struct copy_strided_args_t {
+    uint64_t dst;
+    uint64_t src;
+    uint32_t ndim;
+    uint32_t total;
+    uint32_t sizes[4];
+    uint32_t dst_strides[4];
+    uint32_t src_strides[4];
+};
+
 // ---- cnn ------------------------------------------------------------------
 
 // tv_conv2d_kernel (NCHW, dilation 1, groups 1)
@@ -197,6 +214,7 @@ struct bias_args_t {
     X(binary_op_kernel, binary_args_t, 0, 0)                                   \
     X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
     X(unary_op_kernel, unary_args_t, 0, 0)                                     \
+    X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
     X(tv_conv2d_kernel, conv_args_t, 16, 0)                                    \

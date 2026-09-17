@@ -79,15 +79,19 @@ the message. None of it falls back to the CPU.
 | arithmetic: `add`/`sub`/`mul`/`div`, `maximum`/`minimum`, with tensor, scalar and `alpha` forms | |
 | in-place: `add_`/`sub_`/`mul_`/`div_`/`relu_` and the unary ones | |
 | unary: `neg`, `abs`, `exp`, `log`, `sqrt`, `rsqrt`, `sigmoid`, `tanh`, `reciprocal`, `relu` | |
-| `copy_`/`to`, `view`/`reshape`, `conv2d`, batch norm (inference), pooling, `mm`/`linear`/`addmm` | |
+| `copy_`/`to`, `view`/`reshape`, `as_strided` → `t()`/`transpose`/`permute`/indexing | |
+| strided copies in both directions, including `t.t().to("vortex")` | |
+| `conv2d`, batch norm (inference), pooling, `mm`/`linear`/`addmm` | |
 | streams and events (`torch.Stream`, `torch.Event`, `torch.accelerator.*`) | |
 | several kernel images in one process (`sw/common/module_slots.mk`) | |
 
 | Not supported yet | Owner |
 |---|---|
 | dtypes other than float32 (allocation is fine, compute is not) | W3.2 / W4.1 |
-| broadcasting, `cat`/`slice`/`gather`, reductions (`sum`/`max`/`argmax`), `as_strided`/`.t()` | W3.2 |
-| strided destinations in `copy_`, dtype conversion in `copy_` | W3.2 |
+| broadcasting, `cat`/`gather`/`scatter`, reductions (`sum`/`mean`/`max`/`argmax`), `softmax`, `topk` | W3.2 |
+| `gelu`/`silu`, `layer_norm`, `avg_pool2d` | W3.2/W3.3 |
+| dtype conversion in `copy_` | W3.2 |
+| elementwise ops on strided inputs (`x.t() + 1`): the kernels index linearly | W3.2 |
 | `torch.randn(device="vortex")`, `torch.manual_seed` on the device | W3.5 |
 | grouped/dilated/transposed conv, `avg_pool2d`, ceil_mode | W3.3 |
 | training: batch-norm training mode, autograd | W8.1 |

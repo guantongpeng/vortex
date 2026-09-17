@@ -36,6 +36,7 @@
 #include <c10/core/Allocator.h>
 #include <c10/core/CachingDeviceAllocator.h>
 #include <ATen/EmptyTensor.h>
+#include <ATen/ops/as_strided_native.h>
 #include <ATen/ops/view_native.h>
 #include <c10/core/Device.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
@@ -724,6 +725,8 @@ static torch::Tensor empty_strided_impl(
 // a dtype change became a bit-pattern copy, a smaller source was over-read
 // (a host out-of-bounds read on H2D), and a non-contiguous tensor copied
 // storage order rather than its logical contents.
+static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src);
+
 static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
                                 bool non_blocking) {
     const bool self_dev = self.is_privateuseone();
@@ -754,21 +757,6 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
                 "); casting is W3.2/W4.1 in docs/mydocs/pytorch_plan.md");
     TORCH_CHECK(self.sizes() == src.sizes(), "torch_vortex: copy_ shape mismatch: ",
                 self.sizes(), " <- ", src.sizes());
-    TORCH_CHECK(self.is_contiguous(),
-                "torch_vortex: copy_ into a non-contiguous vortex tensor is "
-                "unsupported in v1 (strided destinations are W3.2)");
-    TORCH_CHECK(self.storage_offset() == 0,
-                "torch_vortex: copy_ into a vortex tensor at storage_offset ",
-                self.storage_offset(), " is unsupported in v1");
-
-    // A non-contiguous CPU source is cheap to fix on the host and is a
-    // reasonable thing to write (t.t().to("vortex")), so materialise it rather
-    // than either refusing or silently copying storage order.
-    torch::Tensor src_contig = src;
-    if (!src_dev && !src.is_contiguous()) {
-        src_contig = src.contiguous();
-        ++g_stats.host_numeric_ops;
-    }
 
     const int64_t bytes = self.numel() * self.element_size();
     if (bytes == 0) {
@@ -777,21 +765,70 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
     if (non_blocking) {
         // Honest rather than silent: hipMemcpy enqueues and then waits on its
         // own completion event, so this call blocks whatever the flag says.
-        // Counted so a model that depends on overlap is visible.
         ++g_stats.blocking_syncs;
     }
-    VX_CHECK(hipMemcpy(self.data_ptr(), src_contig.data_ptr(), (size_t)bytes, kind));
-    // hipMemcpy enqueues and then waits on its own completion event; the queue
-    // is FIFO, so everything enqueued before it has retired by the time it
-    // returns. The allocator's fast path relies on knowing that. It drains the
-    // *default* queue only, which is why the fast path also tracks whether
-    // anything was launched on an explicit stream.
-    note_default_queue_barrier();
-    switch (kind) {
-        case hipMemcpyHostToDevice: g_stats.h2d_bytes += (uint64_t)bytes; break;
-        case hipMemcpyDeviceToHost: g_stats.d2h_bytes += (uint64_t)bytes; break;
-        default: g_stats.d2d_bytes += (uint64_t)bytes; break;
+
+    // A non-contiguous CPU source is materialised on the host first: it is a
+    // pure ATen op, and it is what makes `t.t().to("vortex")` work rather than
+    // silently copying storage order.
+    torch::Tensor src_t = src;
+    if (!src_dev && !src.is_contiguous()) {
+        src_t = src.contiguous();
+        ++g_stats.host_numeric_ops;
     }
+
+    if (self.is_contiguous() && self.storage_offset() == 0 &&
+        src_t.is_contiguous() && src_t.storage_offset() == 0) {
+        VX_CHECK(hipMemcpy(self.data_ptr(), src_t.data_ptr(), (size_t)bytes, kind));
+        // hipMemcpy enqueues and then waits on its own completion event; the
+        // queue is FIFO, so everything enqueued before it has retired by the
+        // time it returns. The allocator's fast path relies on knowing that.
+        // It drains the *default* queue only, which is why the fast path also
+        // tracks whether anything was launched on an explicit stream.
+        note_default_queue_barrier();
+        switch (kind) {
+            case hipMemcpyHostToDevice: g_stats.h2d_bytes += (uint64_t)bytes; break;
+            case hipMemcpyDeviceToHost: g_stats.d2h_bytes += (uint64_t)bytes; break;
+            default: g_stats.d2d_bytes += (uint64_t)bytes; break;
+        }
+        return self;
+    }
+
+    // Strided on at least one side. The copy kernel runs on the device and
+    // addresses device memory, so *both* operands have to be there: a host
+    // source is staged up, and a host destination is gathered into a
+    // contiguous device buffer and copied down. Passing a CPU pointer to the
+    // kernel (as the first version of this did) writes zeros into the device
+    // and leaves the host buffer untouched.
+    torch::Tensor device_src = src_t;
+    if (!src_dev) {
+        device_src = torch::empty(src_t.sizes(), self.options());
+        VX_CHECK(hipMemcpy(device_src.data_ptr(), src_t.data_ptr(), (size_t)bytes,
+                           hipMemcpyHostToDevice));
+        g_stats.h2d_bytes += (uint64_t)bytes;
+        note_default_queue_barrier();
+    }
+
+    if (!self_dev) {
+        // Staged with the DESTINATION's layout, not a contiguous one: .cpu()
+        // on a transposed tensor asks for a transposed CPU tensor
+        // (empty_like preserves strides), and the hipMemcpy below is linear.
+        // Staging contiguous and memcpy-ing into a strided host buffer lands
+        // every element in the wrong place -- the values are all there, which
+        // is what made it look like a kernel bug.
+        auto staged = at::empty_strided(self.sizes(), self.strides(),
+                                        device_src.options());
+        launch_copy_strided(staged, device_src);
+        VX_CHECK(hipMemcpy(self.data_ptr(), staged.data_ptr(), (size_t)bytes,
+                           hipMemcpyDeviceToHost));
+        g_stats.d2h_bytes += (uint64_t)bytes;
+        note_default_queue_barrier();
+        return self;
+    }
+
+    launch_copy_strided(self, device_src);
+    g_stats.d2d_bytes += (uint64_t)bytes;
+    note_default_queue_barrier();
     return self;
 }
 
@@ -826,6 +863,35 @@ static torch::Tensor& zero__impl(torch::Tensor& self) {
 // from the storage base. `reshape` is deliberately not registered — ATen's
 // CompositeImplicitAutograd kernel already implements view-or-copy, which is
 // exactly the distinction that matters.
+// as_strided is a metadata operation: it reinterprets the same storage. Like
+// view, it delegates to ATen so the bounds and alias rules are ATen's rather
+// than ours. It is what transpose/permute/t and any indexing go through, so
+// without it those were all unreachable.
+static torch::Tensor as_strided_impl(const torch::Tensor& self,
+                                     c10::SymIntArrayRef sym_size,
+                                     c10::SymIntArrayRef sym_stride,
+                                     std::optional<c10::SymInt> storage_offset) {
+    TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: as_strided on non-vortex tensor");
+    // as_strided_tensorimpl is the int64 view implementation; the symint entry
+    // points ATen exports are the in-place and copy variants, neither of which
+    // is a view. Concretising is safe here in a way it is not during shape
+    // inference: this kernel is only reached for a real vortex tensor, and
+    // FakeTensor/Meta dispatch to ATen's own meta kernel instead.
+    std::vector<int64_t> sizes, strides;
+    sizes.reserve(sym_size.size());
+    for (const auto& s : sym_size) sizes.push_back(s.expect_int());
+    strides.reserve(sym_stride.size());
+    for (const auto& s : sym_stride) strides.push_back(s.expect_int());
+    std::optional<int64_t> offset;
+    if (storage_offset.has_value()) offset = storage_offset->expect_int();
+    auto out = at::native::as_strided_tensorimpl(self, c10::IntArrayRef(sizes),
+                                                 c10::IntArrayRef(strides), offset);
+    TORCH_CHECK(out.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: as_strided produced a tensor on ", out.device());
+    return out;
+}
+
 static torch::Tensor view_impl(const torch::Tensor& self,
                                c10::SymIntArrayRef sym_sizes) {
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
@@ -840,6 +906,30 @@ static torch::Tensor view_impl(const torch::Tensor& self,
 // `x > 0 ? x : 0` gets wrong: NaN propagates, and -0.0 stays -0.0. It also
 // must not touch its input — this used to run the in-place kernel on self and
 // return self, so a residual branch sharing the input was silently modified.
+// ---- strided copy ---------------------------------------------------------
+//
+// hipMemcpy moves a linear range. A transposed view, a storage offset or a
+// broadcast is not one, so those go through a kernel. This is what makes
+// as_strided usable and what `t.t().to("vortex")` needs: _to_copy asks for a
+// strided *destination*, which v1 used to refuse.
+
+static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src) {
+    TORCH_CHECK(dst.dim() == src.dim(), "torch_vortex: copy rank mismatch");
+    TORCH_CHECK(dst.dim() <= 4, "torch_vortex: copy supports at most 4 dims, got ",
+                dst.dim());
+    copy_strided_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)dst.data_ptr();
+    args.src = (uint64_t)(uintptr_t)src.data_ptr();
+    args.ndim = (uint32_t)dst.dim();
+    args.total = u32_numel(dst, "copy");
+    for (int64_t i = 0; i < dst.dim(); ++i) {
+        args.sizes[i] = u32_dim(dst.size(i), "copy size");
+        args.dst_strides[i] = u32_dim(dst.stride(i), "copy stride");
+        args.src_strides[i] = u32_dim(src.stride(i), "copy stride");
+    }
+    launch(h_copy_strided_kernel, args, (args.total + 3) / 4);
+}
+
 // ---- elementwise ----------------------------------------------------------
 //
 // Op-code driven: one kernel per arity, with the operation selected by a field
@@ -1464,6 +1554,7 @@ void register_vortex_ops() {
     VX_IMPL("fill_.Scalar", &fill__impl);
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
+    VX_IMPL("as_strided", &as_strided_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);

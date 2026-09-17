@@ -81,12 +81,10 @@ def test_reshape_parity_with_cpu(backend):
     x = torch.randn(4, 6)
     non_contig = x.t()
     # `.to("vortex")` on a transposed tensor asks for a strided destination,
-    # which v1 refuses; the copy+reshape path is exercised from a contiguous
-    # device tensor instead, and the refusal is pinned here.
-    got = non_contig.contiguous().to("vortex").reshape(24)
+    # which the copy kernel serves now.
+    strided = non_contig.to("vortex")
+    assert torch.equal(strided.cpu(), non_contig.contiguous())
+
+    got = strided.reshape(24)
     assert got.shape == (24,)
     assert torch.equal(got.cpu(), non_contig.reshape(24))
-
-    # Refused, not silently copied: _to_copy asks for a strided destination.
-    with pytest.raises(RuntimeError, match="non-contiguous vortex tensor"):
-        non_contig.to("vortex")
