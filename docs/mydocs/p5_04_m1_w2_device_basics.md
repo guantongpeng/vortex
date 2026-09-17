@@ -68,7 +68,13 @@ tests/hip_native/*  run-simx               → 全部 PASS
 - `hipDeviceSynchronize`/`hipStreamSynchronize`/`hipStreamDestroy` 原本都是 `vx_queue_flush`(只唤醒 worker,不等)。**陷阱**:`vx_queue_finish(q, 0)` 不是「永久等待」,`Event::wait_value` 对 0 走 `wait_for(0ns)` 立刻返回超时,必须传 `VX_TIMEOUT_INFINITE`。
 - `hipDeviceSynchronize` 只完成默认队列;现在登记所有分发的队列并全部完成(实测:显式流上的 launch 之后,设备级同步等 4.04s)。
 
-## 7. 已知边界
+## 7. 后续进展(本轮之后)
+
+W3.2 的 elementwise 与跨步支持在同一分支上继续推进(elementwise op code 化、标量算子、一元数学、`as_strided` 与跨步拷贝、broadcasting、silu/gelu)。其中 **W1 里点名推迟的「跨步目标」已关闭**:`t.t().to("vortex")` 现在可用,跨步拷贝 kernel 同时服务跨步源、跨步目标和 storage offset。
+
+一个未解释的偶发:`tests/test_factories.py::test_cpu_and_meta_factories_are_untouched` 在 3 次全量运行中失败 1 次,失败点是子进程返回码非 0(即子进程崩了)。隔离复现 45 次(25 次单测循环 + 20 次父子进程并发持设备)全部通过,已排除「父子进程同时打开 simx 设备」这一猜测。断言消息本身包含子进程 stderr,下次出现时是可诊断的。它测的是 W1.6 的工厂隔离,与 W2 无关。
+
+## 8. 已知边界
 
 - `queryStream`/`queryEvent` 不可用(需 `sw/runtime` 的非阻塞查询原语)。
 - `getNewStream` 建的流无销毁钩子(该 torch 版本没有 `destroyStream`),随进程存活。
