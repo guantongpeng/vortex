@@ -32,6 +32,10 @@ typedef enum vx_dnn_status {
     VX_DNN_ERR_BAD_ARGS = 2,
     VX_DNN_ERR_UNSUPPORTED = 3,
     VX_DNN_ERR_LAUNCH = 4,
+    // init is idempotent only for the same device and image; this is what a
+    // second caller with different arguments gets, instead of being handed
+    // the first caller's kernels.
+    VX_DNN_ERR_ALREADY_INITIALIZED = 5,
 } vx_dnn_status;
 
 vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path);

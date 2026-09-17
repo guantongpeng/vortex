@@ -18,6 +18,7 @@
 #include <vortex/blas.h>
 
 #include <cstring>
+#include <string>
 
 #include "blas_args.h"
 
@@ -27,6 +28,7 @@ struct BLASState {
     vx_device_h dev = nullptr;
     vx_module_h module = nullptr;
     vx_kernel_h kernels[3] = {nullptr, nullptr, nullptr};
+    std::string path;   // what init was called with
 };
 
 BLASState g_state;
@@ -47,17 +49,32 @@ const char* kVariantNames[3] = {
 
 vx_blas_status vx_blas_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_BLAS_ERR_BAD_ARGS;
-    if (g_state.module) return VX_BLAS_OK;  // already initialized
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_state.module) {
+        if (g_state.dev != dev || g_state.path != vxbin_path) {
+            return VX_BLAS_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_BLAS_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_state.module) != VX_SUCCESS) {
+        g_state.module = nullptr;
         return VX_BLAS_ERR_BAD_ARGS;
     }
     for (int i = 0; i < 3; ++i) {
         if (vx_module_get_kernel(g_state.module, kKernelNames[i],
                                  &g_state.kernels[i]) != VX_SUCCESS) {
+            // Fail closed. Leaving the module loaded would make every later
+            // init return OK while a kernel slot stays null, and a null kernel
+            // is the runtime's legacy escape hatch -- the launch would then
+            // succeed with PC 0 rather than failing.
+            vx_blas_finalize();
             return VX_BLAS_ERR_BAD_ARGS;
         }
     }
     g_state.dev = dev;
+    g_state.path = vxbin_path;
     return VX_BLAS_OK;
 }
 

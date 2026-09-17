@@ -39,6 +39,10 @@ typedef enum vx_blas_status {
     VX_BLAS_ERR_BAD_ARGS = 2,
     VX_BLAS_ERR_UNSUPPORTED = 3,
     VX_BLAS_ERR_LAUNCH = 4,
+    // init is idempotent only for the same device and image; this is what a
+    // second caller with different arguments gets, instead of being handed
+    // the first caller's kernels.
+    VX_BLAS_ERR_ALREADY_INITIALIZED = 5,
 } vx_blas_status;
 
 typedef enum vx_blas_dtype {

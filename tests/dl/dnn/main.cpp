@@ -64,6 +64,21 @@ int main(int argc, char** argv) {
 
     int failures = 0;
 
+    // ---- init argument checking ------------------------------------
+    // init is idempotent only for the same device and image. It used to
+    // return OK without looking at either, so a second caller with a
+    // different image silently got the first caller's kernels.
+    if (vx_dnn_init(dev, vxbin) != VX_DNN_OK) {
+        printf("init re-init:  not idempotent for the same arguments\n");
+        ++failures;
+    }
+    if (vx_dnn_init(dev, "/no/such/image.vxbin") !=
+        VX_DNN_ERR_ALREADY_INITIALIZED) {
+        printf("init other:    accepted a different image without complaint\n");
+        ++failures;
+    }
+    printf("init checks:   ok\n");
+
     // ---- conv2d: 1x8x9x9 -> 16x7x7, 3x3 pad 1 stride 1, with bias -----
     {
         const uint32_t N = 1, CI = 8, HI = 9, WI = 9, CO = 16;

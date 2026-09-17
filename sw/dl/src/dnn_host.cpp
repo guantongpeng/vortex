@@ -16,6 +16,7 @@
 // canonical dims.
 
 #include <vortex/dnn.h>
+#include <string>
 
 #include <initializer_list>
 
@@ -29,6 +30,7 @@ struct DnnState {
     vx_kernel_h conv2d = nullptr;
     vx_kernel_h pool2d = nullptr;
     vx_kernel_h bn = nullptr;
+    std::string path;   // what init was called with
 };
 
 DnnState g_dnn;
@@ -58,8 +60,17 @@ vx_dnn_status launch3(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_DNN_ERR_BAD_ARGS;
-    if (g_dnn.module) return VX_DNN_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_dnn.module) {
+        if (g_dnn.dev != dev || g_dnn.path != vxbin_path) {
+            return VX_DNN_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_DNN_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_dnn.module) != VX_SUCCESS) {
+        g_dnn.module = nullptr;
         return VX_DNN_ERR_BAD_ARGS;
     }
     struct {
@@ -72,10 +83,16 @@ vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_dnn.module, e.name, e.slot) != VX_SUCCESS) {
+            // Fail closed. Leaving the module loaded would make every later
+            // init return OK while a kernel slot stays null, and a null kernel
+            // is the runtime's legacy escape hatch -- the launch would then
+            // succeed with PC 0 rather than failing.
+            vx_dnn_finalize();
             return VX_DNN_ERR_BAD_ARGS;
         }
     }
     g_dnn.dev = dev;
+    g_dnn.path = vxbin_path;
     return VX_DNN_OK;
 }
 
