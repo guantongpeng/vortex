@@ -185,39 +185,6 @@ struct bn_args_t {
     uint32_t has_affine;
 };
 
-// tv_mm_kernel: 16x16 tile per CTA, K in chunks of 8
-//
-// transb: 0 = b is [k][n] row-major, 1 = b is [n][k] (i.e. use b^T)
-//
-// Plain out = a @ b, deliberately with no epilogue. The alpha/beta/self
-// scaling of torch.addmm lives in tv_mm_epilogue_kernel below, because
-// putting that branch inside this kernel's epilogue makes VOLT emit code that
-// accumulates wrongly (see docs/mydocs/pytorch_plan.md W5.4 and
-// tests/test_matmul.py::test_addmm_kernel_is_plain_matmul). Keep this kernel
-// shape-stable: it is the known-good form.
-struct mm_args_t {
-    uint64_t a, b, out;
-    uint32_t m, n, k;
-    uint32_t transb;
-};
-
-// tv_mm_epilogue_kernel: out = alpha*out + beta*self, applied in place.
-//
-// A separate elementwise pass rather than an epilogue in tv_mm_kernel (see
-// above). Simple elementwise kernels are unaffected by the codegen problem.
-//
-// self_kind: 0 = no addend, 1 = self is (n,) broadcast across rows,
-//            2 = self is the full (m, n) matrix.
-// The `beta != 0` test is not an optimisation: torch.addmm with beta == 0 is
-// defined to ignore self entirely, NaN and Inf included, and 0 * Inf is NaN.
-struct mm_epilogue_args_t {
-    uint64_t out, self;
-    uint32_t m, n;
-    float alpha, beta;
-    uint32_t self_kind;
-    uint32_t pad;
-};
-
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
 struct bias_args_t {
     uint64_t out, bias;
@@ -247,8 +214,6 @@ struct bias_args_t {
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \
-    X(tv_mm_kernel, mm_args_t, 16, 1024)                                       \
-    X(tv_mm_epilogue_kernel, mm_epilogue_args_t, 0, 0)                         \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 
 #endif  // TORCH_VORTEX_KERNEL_ARGS_H

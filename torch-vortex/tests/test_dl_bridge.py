@@ -74,7 +74,11 @@ def dl():
     pool = libdl.vx_dnn_pool2d
     pool.restype = ctypes.c_int
     pool.argtypes = POOL_SIG
-    return hip, conv, pool
+    gemm = libdl.vx_blas_gemm
+    gemm.restype = ctypes.c_int
+    gemm.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_uint32] * 3 + \
+                    [ctypes.c_float, ctypes.c_float] + [ctypes.c_uint64] * 3
+    return hip, conv, pool, gemm
 
 
 def _upload(hip, data):
@@ -187,7 +191,7 @@ def test_the_same_kernel_for_several_shapes(backend, dl, kwargs):
 
 def test_aten_max_pool_is_the_dl_kernel(backend, dl):
     """Same comparison for pooling: bit patterns, not tolerances."""
-    hip, _, pool = dl
+    hip, _, pool = dl[0], dl[1], dl[2]
     torch.manual_seed(3)
     x = torch.randn(2, 3, 9, 9)
     k, st, pad = 3, 2, 1
@@ -220,7 +224,7 @@ def test_aten_adaptive_avg_pool_is_the_dl_kernel(backend, dl):
     the DL kernel's `count` either -- that is W3.3. adaptive_avg_pool2d(1) has
     no padding, so both agree and the comparison is meaningful.
     """
-    hip, _, pool = dl
+    hip, _, pool = dl[0], dl[1], dl[2]
     torch.manual_seed(4)
     x = torch.randn(2, 3, 5, 7)
 
@@ -243,7 +247,7 @@ def test_aten_adaptive_avg_pool_is_the_dl_kernel(backend, dl):
 
 def test_pool_special_values_are_the_dl_kernels(backend, dl):
     """-inf and NaN survive the trip through the shared kernel."""
-    hip, _, pool = dl
+    hip, _, pool = dl[0], dl[1], dl[2]
     x = torch.tensor([[[[-float("inf"), -float("inf")],
                         [-float("inf"), -float("inf")]]],
                       [[[float("nan"), 0.0], [3.0, 4.0]]]])
@@ -252,3 +256,36 @@ def test_pool_special_values_are_the_dl_kernels(backend, dl):
     assert torch.isnan(got[1, 0, 0, 0])
     torch.testing.assert_close(got, F.max_pool2d(x, 2), rtol=0, atol=0,
                                equal_nan=True)
+
+
+@pytest.mark.parametrize("m,k,n", [(4, 4, 4), (16, 16, 4), (17, 17, 17), (2, 3, 5),
+                                   (1, 16, 4), (8, 8, 8), (48, 20, 13)])
+def test_aten_mm_is_the_dl_gemm(backend, dl, m, k, n):
+    """Including the shapes that a local kernel got wrong under VOLT.
+
+    torch.mm on vortex tensors now calls vx_blas_gemm, so the two must agree
+    bit-for-bit. The direct call mirrors what the ATen path does -- the same
+    pre-zeroed C and the same alpha/beta -- so a difference would be a real
+    difference rather than a difference in how the comparison was set up.
+    """
+    hip, _, _, gemm = dl
+    torch.manual_seed(m * 100 + k * 10 + n)
+    a = torch.randn(m, k)
+    b = torch.randn(k, n)
+
+    aten = torch.mm(a.to("vortex"), b.to("vortex")).cpu()
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    da = _upload(hip, a.detach().contiguous().numpy().tobytes())
+    db = _upload(hip, b.detach().contiguous().numpy().tobytes())
+    dc = _upload(hip, b"\0" * (m * n * 4))
+    rc = gemm(queue, 0, m, n, k, 1.0, 1.0, da.value, db.value, dc.value)
+    assert rc == 0, "vx_blas_gemm returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dc, m * n * 4)),
+                              dtype=torch.float32).reshape(m, n)
+
+    assert torch.equal(direct, aten), (
+        "the ATen matmul and a direct vx_blas_gemm call disagree; they are not "
+        "the same kernel.\n  max |diff| = %g" % (direct - aten).abs().max().item())

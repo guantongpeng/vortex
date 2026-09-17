@@ -1667,40 +1667,47 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
 // The single matmul launcher. mm, linear and addmm are thin wrappers with
 // different epilogues; having one implementation is what stops them from
 // disagreeing about which axis is contracted.
-static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b,
+static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b_in,
                                uint32_t transb, const torch::Tensor* self,
                                uint32_t self_kind, float alpha, float beta) {
-    check_cnn_f32(a, "mm.mat1", 2);
-    check_cnn_f32(b, "mm.mat2", 2);
-    const int64_t k = a.size(1);
-    const int64_t k_other = b.size(transb ? 1 : 0);
+    check_cnn_f32(a, "matmul.mat1", 2);
+    check_cnn_f32(b_in, "matmul.mat2", 2);
+    const int64_t m = a.size(0), k = a.size(1);
+    const int64_t k_other = b_in.size(transb ? 1 : 0);
+    const int64_t n = b_in.size(transb ? 0 : 1);
     TORCH_CHECK(k == k_other, "torch_vortex: matmul contraction mismatch: mat1 ",
-                "is (", a.size(0), ", ", k, ") and mat2 is (", b.size(0), ", ",
-                b.size(1), "), so the inner dimensions differ");
-    const int64_t m = a.size(0), n = b.size(transb ? 0 : 1);
-    auto out = torch::empty({m, n}, a.options());
-    mm_args_t args = {(uint64_t)(uintptr_t)a.data_ptr(),
-                      (uint64_t)(uintptr_t)b.data_ptr(),
-                      (uint64_t)(uintptr_t)out.data_ptr(),
-                      u32_dim(m, "matmul m"), u32_dim(n, "matmul n"),
-                      u32_dim(k, "matmul k"), transb};
-    // K == 0 is legal and needs no special case: the accumulation loop does
-    // not execute and the kernel writes zeros.
-    launch(h_tv_mm_kernel, args, (uint32_t)((n + 15) / 16),
-           (uint32_t)((m + 15) / 16), 1, 16, 1024);
+                "is (", m, ", ", k, ") and mat2 is (", b_in.size(0), ", ",
+                b_in.size(1), "), so the inner dimensions differ");
 
-    // torch.addmm's alpha/beta/self scaling is a separate in-place pass rather
-    // than an epilogue in tv_mm_kernel: that branch inside the matmul kernel
-    // makes VOLT accumulate wrongly for any n that is not a multiple of 16.
-    // See tv_mm_epilogue_kernel and W5.4 of docs/mydocs/pytorch_plan.md.
-    if ((self_kind != 0 || alpha != 1.0f) && out.numel() != 0) {
-        mm_epilogue_args_t ep = {
-            (uint64_t)(uintptr_t)out.data_ptr(),
-            self ? (uint64_t)(uintptr_t)self->data_ptr() : 0,
-            u32_dim(m, "epilogue m"), u32_dim(n, "epilogue n"), alpha, beta,
-            self_kind, 0};
-        launch(h_tv_mm_epilogue_kernel, ep, (uint32_t)((out.numel() + 3) / 4));
+    // C starts at beta*self (or zero) and the DL gemm's epilogue adds alpha*A@B
+    // to it, so the whole of torch.addmm is one gemm plus this fill. beta == 0
+    // must not read self at all: torch.addmm ignores it then, and 0 * Inf is
+    // NaN. A (n,) self is broadcast here rather than in the kernel.
+    torch::Tensor out = torch::zeros({m, n}, a.options());
+    if (self_kind != 0 && beta != 0.0f) {
+        torch::Tensor self_full = (self_kind == 1)
+                                      ? self->expand({m, n}).contiguous()
+                                      : *self;
+        out.add_(self_full, beta);
     }
+
+    // The DL gemm is C = alpha*A*B + beta*C with no transpose option, so a
+    // transposed operand is materialised. That copy is what having one GEMM
+    // instead of two costs; adding transb to vx_blas_gemm is the follow-up.
+    torch::Tensor b = transb ? b_in.t().contiguous() : b_in;
+
+    // A zero-sized dimension is not a launch: the DL rejects it (the KMU
+    // derives the CTA shape from the grid and a zero collapses it), and the
+    // answer is the epilogue already sitting in `out`.
+    if (m == 0 || n == 0 || k == 0) {
+        return out;
+    }
+    DL_CHECK(vx_blas_gemm(current_queue(), VX_BLAS_F32, u32_dim(m, "matmul m"),
+                          u32_dim(n, "matmul n"), u32_dim(k, "matmul k"), alpha,
+                          1.0f, (uint64_t)(uintptr_t)a.data_ptr(),
+                          (uint64_t)(uintptr_t)b.data_ptr(),
+                          (uint64_t)(uintptr_t)out.data_ptr()));
+    ++g_stats.launches;
     return out;
 }
 

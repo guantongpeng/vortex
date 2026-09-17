@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""mm / linear / addmm semantics (W1.2).
+"""mm / linear / addmm semantics (W1.2, W3.1).
 
 addmm used to be implemented as linear_impl(mat1, mat2, self), i.e. it computed
 mat1 @ mat2.T. A non-square system was rejected for the wrong reason and a
@@ -48,18 +48,29 @@ def test_mm_partial_tiles(backend, m, k, n):
     assert_matches_cpu(torch.mm(v(a), v(b)), a @ b, rtol=1e-5, atol=1e-6)
 
 
-def test_matmul_kernel_carries_no_epilogue(backend):
-    """The alpha/beta/self scaling must stay out of the matmul kernel.
+def test_the_local_matmul_kernel_is_gone(backend):
+    """The extension no longer has one: matmul is the DL library's gemm.
 
-    It lives in tv_mm_epilogue_kernel because the same branch inside
-    tv_mm_kernel miscompiles. The argument sizes encode that split, so pin
-    them: growing tv_mm_kernel is the change that reintroduces the bug.
+    It used to carry a workaround. Folding torch.addmm's alpha/beta/self branch
+    into this backend's own tv_mm_kernel made VOLT accumulate wrongly for any n
+    that is not a multiple of 16, so the branch was moved into a separate
+    epilogue kernel and this test pinned that split by argument size.
+
+    Both kernels are gone now (W3.1): the DL gemm carries the same branch
+    inline, and it was measured clean on exactly the shapes that broke the
+    local one -- (4,4,4), (16,16,4), (17,17,17), (1,16,4), (2,3,5), (8,8,8) --
+    with the epilogue active (alpha=2, beta=0.5), maxdiff 0.0. So the workaround
+    is not needed where the kernel now lives, and test_mm_partial_tiles keeps
+    those shapes as the regression set.
     """
     sizes = backend._ext.arg_sizes()
-    assert sizes["tv_mm_kernel"] == 40, (
-        "tv_mm_kernel's argument block changed; if an epilogue was folded back "
-        "in, see tests/test_matmul.py::test_mm_partial_tiles")
-    assert sizes["tv_mm_epilogue_kernel"] == 40
+    assert "tv_mm_kernel" not in sizes
+    assert "tv_mm_epilogue_kernel" not in sizes
+    # and the op still works, so the assertion above is not hiding a break
+    a = torch.randn(4, 4)
+    assert torch.equal(
+        torch.mm(v(a), v(a)).cpu(),
+        torch.mm(v(a).cpu(), v(a).cpu()))
 
 
 def test_mm_non_symmetric_square(backend):
