@@ -20,6 +20,12 @@ software: third_party
 hip: software
 	$(MAKE) -C sw/hip
 
+# torch-vortex kernel image (on demand, like hip:). The C++ extension itself
+# is built by torch.utils.cpp_extension at import time into
+# torch-vortex/_ext, so only the device image needs a make rule here.
+torch: hip
+	$(MAKE) -C torch-vortex/kernels
+
 tests: software hardware
 	$(MAKE) -C tests
 

@@ -190,7 +190,13 @@ if [ "$OSVERSION" == "unsupported" ]; then
 fi
 
 # project subdirectories to build
-SUBDIRS=("." "!ci" "!perf" "hw*" "sw*" "sim*" "tests*")
+#
+# `!` means "recurse and copy the whole subtree"; a bare name copies only
+# Makefile/*.mk/*.in. torch-vortex is a full copy so that the build tree has
+# the Python package, the C++ extension source and the kernel Makefile without
+# anyone hand-copying them (the build tree used to accumulate them by hand,
+# which meant a fresh configure produced a tree where the tests could not run).
+SUBDIRS=("." "!ci" "!perf" "!torch-vortex*" "hw*" "sw*" "sim*" "tests*")
 
 # Get the directory of the script
 SOURCE_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"

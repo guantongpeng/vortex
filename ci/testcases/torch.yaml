@@ -1,0 +1,47 @@
+# torch-vortex PyTorch backend tests (docs/mydocs/pytorch_plan.md, M0+W1).
+#
+# Run from a configured build tree: configure now copies torch-vortex/ into it,
+# so the cases need no source-tree paths beyond VORTEX_HOME. The interpreter is
+# the one place a machine-specific path is allowed to appear (same convention as
+# triton.yaml); everything under torch-vortex/ resolves the build tree itself
+# from VORTEX_BUILD.
+#
+# `via: script` rather than `make-run`: these are pytest suites, and the runner
+# already shells out for script cases.
+category: torch
+defaults:
+  # The argument blocks are LP64, so there is exactly one host cell; xlen 32 is
+  # refused at configure time.
+  xlen: [64]
+  tier: smoke
+tests:
+  # Environment manifest + supported-version check (W0.1). Cheap and runs
+  # before anything touches the device: if this fails, the other cells'
+  # results are not attributable to a dependency set.
+  - id: env
+    via: script
+    run: >-
+      export TORCH_VORTEX_PYTHON="${TORCH_VORTEX_PYTHON:-$HOME/miniconda3/envs/vortex/bin/python}";
+      "$TORCH_VORTEX_PYTHON" -m torch_vortex.env.check
+    env:
+      VORTEX_BUILD: ""
+      PYTHONPATH: "torch-vortex"
+
+  # Per-operator semantics and ABI. The default tier excludes the model tests,
+  # which dominate the runtime.
+  - id: eager
+    via: script
+    run: >-
+      export TORCH_VORTEX_PYTHON="${TORCH_VORTEX_PYTHON:-$HOME/miniconda3/envs/vortex/bin/python}";
+      export VORTEX_BUILD="$PWD" VORTEX_DRIVER=simx PYTHONPATH="$PWD/torch-vortex";
+      "$TORCH_VORTEX_PYTHON" -m pytest torch-vortex/tests -q
+
+  # The model-level milestone gate: MiniResNet with batch > 1 and randomised
+  # batch-norm buffers, compared layer by layer against the CPU run.
+  - id: model
+    via: script
+    tier: full
+    run: >-
+      export TORCH_VORTEX_PYTHON="${TORCH_VORTEX_PYTHON:-$HOME/miniconda3/envs/vortex/bin/python}";
+      export VORTEX_BUILD="$PWD" VORTEX_DRIVER=simx PYTHONPATH="$PWD/torch-vortex";
+      "$TORCH_VORTEX_PYTHON" -m pytest torch-vortex/tests -q --tier=full
