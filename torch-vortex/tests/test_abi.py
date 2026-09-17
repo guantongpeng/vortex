@@ -35,16 +35,21 @@ import pytest
 
 from torch_vortex import _paths
 
-# The struct whose hand-typed size was wrong (88 declared for a 72-byte struct).
-# Pinned so a silent ABI change fails by name with both numbers visible.
+# Regression pins on the argument blocks that are still built here. The two
+# this list originally existed for are gone: conv2d and pooling are served by
+# the DL library's kernels now (W3.1), so their argument blocks are sw/dl's to
+# get right.
 #
-# tv_conv2d_kernel used to be pinned here too (104 declared for 88). It is gone:
-# conv2d is served by the DL library's kernel now, so its argument block is
-# sw/dl's to get right -- and it does not: sw/dl/Makefile declares 96 for the
-# same 88-byte shape and 88 for the 72-byte pool struct. That layer passes its
-# own sizeof() at launch rather than reading the metadata, so it is latent
-# rather than active, and it is recorded in p5_05.
-PINNED_SIZES = {"tv_pool2d_kernel": 72}
+# sw/dl has not: its Makefile declares 96 bytes for the 88-byte conv shape and
+# 88 for the 72-byte pool shape, and gets the prim shapes wrong at XLEN=32.
+# That layer passes its own sizeof() at launch rather than reading the
+# metadata, so the drift is latent rather than an active over-read -- recorded
+# in p5_05 as outstanding, not fixed here.
+#
+# The real guard is not this list: test_sidecar_matches_fresh_compiler_run
+# compares the image metadata against a fresh sizeof() from the host compiler
+# for every kernel, and that covers a struct nobody thought to pin.
+PINNED_SIZES = {"tv_bn_affine_kernel": 72, "tv_mm_kernel": 40}
 
 
 @pytest.fixture(scope="module")

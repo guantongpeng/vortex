@@ -28,43 +28,7 @@
 // conv2d lives in the DL library now (vx_dnn_conv2d). Keeping a second
 // copy here is what W3.1 exists to remove.
 
-// ---- pooling (op 0 = max, 1 = avg) ----------------------------------------
-__global__ void tv_pool2d_kernel(pool_args_t* arg) {
-    const uint32_t n = blockIdx.z;
-    const uint32_t c = blockIdx.y;
-    const uint32_t oy = blockIdx.x;
-    const float* in_ch = (const float*)(uintptr_t)arg->in +
-                         (((size_t)n * arg->c) + c) * arg->hi * arg->wi;
-    float* out_row = (float*)(uintptr_t)arg->out +
-                     (((size_t)n * arg->c + c) * arg->ho + oy) * arg->wo;
-    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        // -INFINITY, not a finite sentinel: -3.4e38f dropped -inf inputs and
-        // turned an all-NaN window into that sentinel instead of propagating
-        // NaN. Out-of-range taps are skipped below, which is equivalent to
-        // -inf padding for finite inputs.
-        float acc = (arg->op == 0) ? -INFINITY : 0.0f;
-        uint32_t count = 0;
-        for (uint32_t kh = 0; kh < arg->kh; ++kh) {
-            const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
-            if (iy < 0 || iy >= (int32_t)arg->hi) continue;
-            for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                const int32_t ix = (int32_t)(ox * arg->sw + kw) - (int32_t)arg->pw;
-                if (ix < 0 || ix >= (int32_t)arg->wi) continue;
-                float v = in_ch[(size_t)iy * arg->wi + ix];
-                if (arg->op == 0) {
-                    // NaN must win: plain `v > acc` (and fmaxf, which ignores
-                    // NaN) would leave the accumulator at the sentinel and
-                    // silently erase the NaN.
-                    if (v > acc || isnan(v)) acc = v;
-                } else {
-                    acc += v;
-                }
-                ++count;
-            }
-        }
-        out_row[ox] = (arg->op == 0) ? acc : (count ? acc / (float)count : 0.0f);
-    }
-}
+// pooling lives in the DL library now (vx_dnn_pool2d).
 
 // ---- batch-norm affine -----------------------------------------------------
 __global__ void tv_bn_affine_kernel(bn_args_t* arg) {

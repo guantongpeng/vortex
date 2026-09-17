@@ -1555,22 +1555,27 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     const int64_t ho = window_out(s[2], kh, ph, sh, "pool height");
     const int64_t wo = window_out(s[3], kw, pw, sw, "pool width");
     auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
-    pool_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
-                        (uint64_t)(uintptr_t)out.data_ptr(),
-                        u32_dim(s[0], "pool batch"),
-                        u32_dim(s[1], "pool channels"),
-                        u32_dim(s[2], "pool input height"),
-                        u32_dim(s[3], "pool input width"),
-                        u32_dim(ho, "pool output height"),
-                        u32_dim(wo, "pool output width"),
-                        u32_dim(kh, "pool kernel height"),
-                        u32_dim(kw, "pool kernel width"),
-                        u32_dim(ph, "pool padding height"),
-                        u32_dim(pw, "pool padding width"),
-                        u32_dim(sh, "pool stride height"),
-                        u32_dim(sw, "pool stride width"), op};
-    // one CTA per (output row, channel, sample)
-    launch(h_tv_pool2d_kernel, args, args.ho, args.c, args.n, 16);
+    // An all-empty result is not a launch: the DL kernel refuses n == 0 or a
+    // zero-sized dimension, and there is nothing to compute anyway.
+    if (out.numel() == 0) {
+        return out;
+    }
+    // The shape arithmetic stays here: window_out is bounds-checked and names
+    // the argument it rejects, while the DL's is plain unsigned arithmetic.
+    // ATen validates, the DL computes.
+    DL_CHECK(vx_dnn_pool2d(current_queue(),
+                           (uint64_t)(uintptr_t)self.data_ptr(),
+                           (uint64_t)(uintptr_t)out.data_ptr(),
+                           u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
+                           u32_dim(s[2], "pool input height"),
+                           u32_dim(s[3], "pool input width"),
+                           u32_dim(kh, "pool kernel height"),
+                           u32_dim(kw, "pool kernel width"),
+                           u32_dim(ph, "pool padding height"),
+                           u32_dim(pw, "pool padding width"),
+                           u32_dim(sh, "pool stride height"),
+                           u32_dim(sw, "pool stride width"), op));
+    ++g_stats.launches;
     return out;
 }
 

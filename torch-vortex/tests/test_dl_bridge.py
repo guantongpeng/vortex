@@ -38,6 +38,7 @@ import torch.nn.functional as F
 from torch_vortex import _paths
 
 CONV_SIG = [ctypes.c_void_p] + [ctypes.c_uint64] * 4 + [ctypes.c_uint32] * 11
+POOL_SIG = [ctypes.c_void_p] + [ctypes.c_uint64] * 2 + [ctypes.c_uint32] * 11
 
 
 def _hip():
@@ -70,7 +71,10 @@ def dl():
     conv = libdl.vx_dnn_conv2d
     conv.restype = ctypes.c_int
     conv.argtypes = CONV_SIG
-    return hip, conv
+    pool = libdl.vx_dnn_pool2d
+    pool.restype = ctypes.c_int
+    pool.argtypes = POOL_SIG
+    return hip, conv, pool
 
 
 def _upload(hip, data):
@@ -92,7 +96,7 @@ def test_the_handles_come_from_this_process(dl):
     Opening a second device would be a second context, which is what W3.1
     forbids: DL work would stop being ordered with everything else.
     """
-    hip, _ = dl
+    hip = dl[0]
     dev, queue = ctypes.c_void_p(), ctypes.c_void_p()
     assert hip.hipGetVxDevice(ctypes.byref(dev)) == 0
     assert dev.value, "no device handle"
@@ -102,7 +106,7 @@ def test_the_handles_come_from_this_process(dl):
 
 def test_aten_conv_is_the_dl_kernel(backend, dl):
     """Same operands, bit-identical results: one kernel, two entry points."""
-    hip, conv = dl
+    hip, conv = dl[0], dl[1]
     torch.manual_seed(11)
     x = torch.randn(1, 3, 8, 8)
     w = torch.randn(4, 3, 3, 3)
@@ -141,7 +145,7 @@ def test_aten_conv_is_the_dl_kernel(backend, dl):
 ])
 def test_the_same_kernel_for_several_shapes(backend, dl, kwargs):
     """The agreement is not a coincidence of one argument combination."""
-    hip, conv = dl
+    hip, conv = dl[0], dl[1]
     torch.manual_seed(5)
     x = torch.randn(2, 3, 9, 7)
     w = torch.randn(4, 3, 3, 3)
@@ -179,3 +183,72 @@ def test_the_same_kernel_for_several_shapes(backend, dl, kwargs):
     direct = torch.frombuffer(bytearray(_download(hip, dout, n * co * ho * wo * 4)),
                               dtype=torch.float32).reshape(n, co, ho, wo)
     assert torch.equal(direct, got)
+
+
+def test_aten_max_pool_is_the_dl_kernel(backend, dl):
+    """Same comparison for pooling: bit patterns, not tolerances."""
+    hip, _, pool = dl
+    torch.manual_seed(3)
+    x = torch.randn(2, 3, 9, 9)
+    k, st, pad = 3, 2, 1
+
+    want = F.max_pool2d(x, k, st, pad)
+    got = F.max_pool2d(x.to("vortex"), k, st, pad).cpu()
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    n, c, hi, wi = x.shape
+    ho = (hi + 2 * pad - k) // st + 1
+    wo = (wi + 2 * pad - k) // st + 1
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (n * c * ho * wo * 4))
+    rc = pool(queue, dx.value, dout.value, n, c, hi, wi, k, k, pad, pad, st, st, 0)
+    assert rc == 0, "vx_dnn_pool2d returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, n * c * ho * wo * 4)),
+                              dtype=torch.float32).reshape(n, c, ho, wo)
+    assert torch.equal(direct, got), (
+        "the ATen pooling path and a direct vx_dnn_pool2d call disagree")
+
+
+def test_aten_adaptive_avg_pool_is_the_dl_kernel(backend, dl):
+    """The avg path, through the op that is registered.
+
+    avg_pool2d itself is not registered yet, and its count_include_pad default
+    (divide by the full kernel area, padding included) is not the same thing as
+    the DL kernel's `count` either -- that is W3.3. adaptive_avg_pool2d(1) has
+    no padding, so both agree and the comparison is meaningful.
+    """
+    hip, _, pool = dl
+    torch.manual_seed(4)
+    x = torch.randn(2, 3, 5, 7)
+
+    want = F.adaptive_avg_pool2d(x, 1)
+    got = F.adaptive_avg_pool2d(x.to("vortex"), 1).cpu()
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    n, c, hi, wi = x.shape
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (n * c * 4))
+    rc = pool(queue, dx.value, dout.value, n, c, hi, wi, hi, wi, 0, 0, hi, wi, 1)
+    assert rc == 0, "vx_dnn_pool2d returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, n * c * 4)),
+                              dtype=torch.float32).reshape(n, c, 1, 1)
+    assert torch.equal(direct, got)
+
+
+def test_pool_special_values_are_the_dl_kernels(backend, dl):
+    """-inf and NaN survive the trip through the shared kernel."""
+    hip, _, pool = dl
+    x = torch.tensor([[[[-float("inf"), -float("inf")],
+                        [-float("inf"), -float("inf")]]],
+                      [[[float("nan"), 0.0], [3.0, 4.0]]]])
+    got = F.max_pool2d(x.to("vortex"), 2).cpu()
+    assert got[0, 0, 0, 0] == float("-inf")
+    assert torch.isnan(got[1, 0, 0, 0])
+    torch.testing.assert_close(got, F.max_pool2d(x, 2), rtol=0, atol=0,
+                               equal_nan=True)

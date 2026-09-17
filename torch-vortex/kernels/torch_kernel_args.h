@@ -169,13 +169,6 @@ struct copy_strided_args_t {
 
 // ---- cnn ------------------------------------------------------------------
 
-// tv_pool2d_kernel (op 0 = max, 1 = avg)
-struct pool_args_t {
-    uint64_t in, out;
-    uint32_t n, c, hi, wi, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, op;
-};
-
 // tv_bn_affine_kernel: inference batch norm over NCHW.
 //
 // `hw` is the spatial span H*W and is passed explicitly rather than derived:
@@ -253,7 +246,6 @@ struct bias_args_t {
     X(reduce_rows_kernel, reduce_args_t, 0, 0)                                \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
-    X(tv_pool2d_kernel, pool_args_t, 16, 0)                                    \
     X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \
     X(tv_mm_kernel, mm_args_t, 16, 1024)                                       \
     X(tv_mm_epilogue_kernel, mm_epilogue_args_t, 0, 0)                         \
