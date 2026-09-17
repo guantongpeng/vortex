@@ -211,6 +211,7 @@ typedef enum vx_mxfp8_status {
     VX_MXFP8_ERR_NOT_INITIALIZED = 1,
     VX_MXFP8_ERR_BAD_ARGS = 2,
     VX_MXFP8_ERR_LAUNCH = 3,
+    VX_MXFP8_ERR_ALREADY_INITIALIZED = 4,
 } vx_mxfp8_status;
 
 vx_mxfp8_status vx_mxfp8_init(vx_device_h dev, const char* vxbin_path);

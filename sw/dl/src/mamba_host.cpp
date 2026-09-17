@@ -18,6 +18,7 @@
 // mamba_host.cpp with the API in include/vortex/mamba.h.
 
 #include <vortex/mamba.h>
+#include <string>
 
 #include "mamba_args.h"
 
@@ -27,6 +28,7 @@ struct MambaState {
     vx_device_h dev = nullptr;
     vx_module_h module = nullptr;
     vx_kernel_h scan = nullptr;
+    std::string path;   // what init was called with
 };
 
 MambaState g_m;
@@ -56,15 +58,26 @@ vx_mamba_status launch(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_mamba_status vx_mamba_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_MAMBA_ERR_BAD_ARGS;
-    if (g_m.module) return VX_MAMBA_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_m.module) {
+        if (g_m.dev != dev || g_m.path != vxbin_path) {
+            return VX_MAMBA_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_MAMBA_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_m.module) != VX_SUCCESS) {
+        vx_mamba_finalize();
         return VX_MAMBA_ERR_BAD_ARGS;
     }
     if (vx_module_get_kernel(g_m.module, "mamba_scan_kernel", &g_m.scan) !=
         VX_SUCCESS) {
+        vx_mamba_finalize();
         return VX_MAMBA_ERR_BAD_ARGS;
     }
     g_m.dev = dev;
+    g_m.path = vxbin_path;
     return VX_MAMBA_OK;
 }
 

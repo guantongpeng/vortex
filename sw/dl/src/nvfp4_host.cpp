@@ -19,6 +19,7 @@
 // (see integration.md).
 
 #include <vortex2.h>
+#include <string>
 
 #include "nvfp4_args.h"
 
@@ -31,6 +32,7 @@ typedef enum {
     VX_NVFP4_ERR_BAD_ARGS = 1,
     VX_NVFP4_ERR_NOT_INITIALIZED = 2,
     VX_NVFP4_ERR_LAUNCH = 3,
+    VX_NVFP4_ERR_ALREADY_INITIALIZED = 4,
 } vx_nvfp4_status;
 
 vx_nvfp4_status vx_nvfp4_init(vx_device_h dev, const char* vxbin_path);
@@ -61,6 +63,7 @@ struct Nvfp4State {
     vx_kernel_h pack = nullptr;
     vx_kernel_h unpack = nullptr;
     vx_kernel_h gemm = nullptr;
+    std::string path;
 };
 
 Nvfp4State g_nv;
@@ -111,8 +114,15 @@ vx_nvfp4_status launch2d(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_nvfp4_status vx_nvfp4_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_NVFP4_ERR_BAD_ARGS;
-    if (g_nv.module) return VX_NVFP4_OK;
+    // Idempotent only for the same device and image.
+    if (g_nv.module) {
+        if (g_nv.dev != dev || g_nv.path != vxbin_path) {
+            return VX_NVFP4_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_NVFP4_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_nv.module) != VX_SUCCESS) {
+        vx_nvfp4_finalize();
         return VX_NVFP4_ERR_BAD_ARGS;
     }
     struct {
@@ -126,10 +136,12 @@ vx_nvfp4_status vx_nvfp4_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_nv.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_nvfp4_finalize();
             return VX_NVFP4_ERR_BAD_ARGS;
         }
     }
     g_nv.dev = dev;
+    g_nv.path = vxbin_path;
     return VX_NVFP4_OK;
 }
 

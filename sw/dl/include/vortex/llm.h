@@ -32,6 +32,8 @@ typedef enum vx_llm_status {
     VX_LLM_ERR_NOT_INITIALIZED = 1,
     VX_LLM_ERR_BAD_ARGS = 2,
     VX_LLM_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_LLM_ERR_ALREADY_INITIALIZED = 4,
 } vx_llm_status;
 
 vx_llm_status vx_llm_init(vx_device_h dev, const char* vxbin_path);

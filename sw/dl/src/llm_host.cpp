@@ -18,6 +18,7 @@
 // 4-thread CTAs and lmem_size 0 suffice.
 
 #include <vortex/llm.h>
+#include <string>
 
 #include "llm_args.h"
 
@@ -45,6 +46,7 @@ struct LlmState {
     vx_kernel_h swiglu = nullptr;
     vx_kernel_h embed = nullptr;
     vx_kernel_h kv_append = nullptr;
+    std::string path;   // what init was called with
 };
 
 LlmState g_l;
@@ -74,8 +76,17 @@ vx_llm_status launch(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_llm_status vx_llm_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_LLM_ERR_BAD_ARGS;
-    if (g_l.module) return VX_LLM_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_l.module) {
+        if (g_l.dev != dev || g_l.path != vxbin_path) {
+            return VX_LLM_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_LLM_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_l.module) != VX_SUCCESS) {
+        vx_llm_finalize();
         return VX_LLM_ERR_BAD_ARGS;
     }
     struct {
@@ -89,10 +100,12 @@ vx_llm_status vx_llm_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_l.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_llm_finalize();
             return VX_LLM_ERR_BAD_ARGS;
         }
     }
     g_l.dev = dev;
+    g_l.path = vxbin_path;
     return VX_LLM_OK;
 }
 

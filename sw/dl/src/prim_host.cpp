@@ -17,6 +17,7 @@
 // see the P3-01 finding).
 
 #include <vortex/prim.h>
+#include <string>
 
 #include <cstring>
 
@@ -32,6 +33,7 @@ struct PrimState {
     vx_kernel_h softmax = nullptr;
     vx_kernel_h layernorm = nullptr;
     vx_kernel_h rmsnorm = nullptr;
+    std::string path;   // what init was called with
 };
 
 PrimState g_prim;
@@ -62,8 +64,17 @@ vx_prim_status launch(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_PRIM_ERR_BAD_ARGS;
-    if (g_prim.module) return VX_PRIM_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_prim.module) {
+        if (g_prim.dev != dev || g_prim.path != vxbin_path) {
+            return VX_PRIM_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_PRIM_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_prim.module) != VX_SUCCESS) {
+        vx_prim_finalize();
         return VX_PRIM_ERR_BAD_ARGS;
     }
     struct {
@@ -78,10 +89,12 @@ vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_prim.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_prim_finalize();
             return VX_PRIM_ERR_BAD_ARGS;
         }
     }
     g_prim.dev = dev;
+    g_prim.path = vxbin_path;
     return VX_PRIM_OK;
 }
 

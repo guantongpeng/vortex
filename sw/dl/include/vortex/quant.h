@@ -34,6 +34,8 @@ typedef enum vx_quant_status {
     VX_QUANT_ERR_NOT_INITIALIZED = 1,
     VX_QUANT_ERR_BAD_ARGS = 2,
     VX_QUANT_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_QUANT_ERR_ALREADY_INITIALIZED = 4,
 } vx_quant_status;
 
 vx_quant_status vx_quant_init(vx_device_h dev, const char* vxbin_path);

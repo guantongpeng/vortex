@@ -19,6 +19,7 @@ typedef enum vx_rng_status {
     VX_RNG_ERR_NOT_INITIALIZED = 1,
     VX_RNG_ERR_BAD_ARGS = 2,
     VX_RNG_ERR_LAUNCH = 3,
+    VX_RNG_ERR_ALREADY_INITIALIZED = 4,
 } vx_rng_status;
 
 vx_rng_status vx_rng_init(vx_device_h dev, const char* vxbin_path);

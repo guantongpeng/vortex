@@ -32,6 +32,8 @@ typedef enum vx_mamba_status {
     VX_MAMBA_ERR_NOT_INITIALIZED = 1,
     VX_MAMBA_ERR_BAD_ARGS = 2,
     VX_MAMBA_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_MAMBA_ERR_ALREADY_INITIALIZED = 4,
 } vx_mamba_status;
 
 vx_mamba_status vx_mamba_init(vx_device_h dev, const char* vxbin_path);

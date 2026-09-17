@@ -31,6 +31,8 @@ typedef enum {
     VX_NVFP4_ERR_BAD_ARGS = 1,
     VX_NVFP4_ERR_NOT_INITIALIZED = 2,
     VX_NVFP4_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_NVFP4_ERR_ALREADY_INITIALIZED = 4,
 } vx_nvfp4_status;
 
 vx_nvfp4_status vx_nvfp4_init(vx_device_h dev, const char* vxbin_path);

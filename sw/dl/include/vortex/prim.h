@@ -31,6 +31,8 @@ typedef enum vx_prim_status {
     VX_PRIM_ERR_NOT_INITIALIZED = 1,
     VX_PRIM_ERR_BAD_ARGS = 2,
     VX_PRIM_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_PRIM_ERR_ALREADY_INITIALIZED = 4,
 } vx_prim_status;
 
 typedef enum vx_prim_op {

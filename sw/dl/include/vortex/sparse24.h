@@ -35,6 +35,8 @@ typedef enum vx_sparse24_status {
     VX_SPARSE24_ERR_NOT_INITIALIZED = 1,
     VX_SPARSE24_ERR_BAD_ARGS = 2,
     VX_SPARSE24_ERR_LAUNCH = 3,
+    // init is idempotent only for the same device and image.
+    VX_SPARSE24_ERR_ALREADY_INITIALIZED = 4,
 } vx_sparse24_status;
 
 vx_sparse24_status vx_sparse24_init(vx_device_h dev, const char* vxbin_path);

@@ -16,6 +16,7 @@
 // vx_enqueue_launch with canonical dims (unused = 1).
 
 #include <vortex/quant.h>
+#include <string>
 
 #include "quant_args.h"
 
@@ -30,6 +31,7 @@ struct QuantState {
     vx_kernel_h gemm_w4a16 = nullptr;
     vx_kernel_h gemm_w8a8 = nullptr;
     vx_kernel_h gemm_fp8 = nullptr;
+    std::string path;   // what init was called with
 };
 
 QuantState g_q;
@@ -59,8 +61,17 @@ vx_quant_status launch(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_quant_status vx_quant_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_QUANT_ERR_BAD_ARGS;
-    if (g_q.module) return VX_QUANT_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_q.module) {
+        if (g_q.dev != dev || g_q.path != vxbin_path) {
+            return VX_QUANT_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_QUANT_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_q.module) != VX_SUCCESS) {
+        vx_quant_finalize();
         return VX_QUANT_ERR_BAD_ARGS;
     }
     struct {
@@ -76,10 +87,12 @@ vx_quant_status vx_quant_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_q.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_quant_finalize();
             return VX_QUANT_ERR_BAD_ARGS;
         }
     }
     g_q.dev = dev;
+    g_q.path = vxbin_path;
     return VX_QUANT_OK;
 }
 

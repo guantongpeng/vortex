@@ -4,6 +4,7 @@
 // dims = 1). No libvortex_dl dependency.
 
 #include <vortex2.h>
+#include <string>
 
 #include "mxfp8_args.h"
 
@@ -16,6 +17,7 @@ struct Mxfp8State {
     vx_kernel_h pack = nullptr;
     vx_kernel_h dequant = nullptr;
     vx_kernel_h gemm = nullptr;
+    std::string path;
 };
 
 Mxfp8State g_mx;
@@ -45,8 +47,17 @@ vx_mxfp8_status launch1d(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_mxfp8_status vx_mxfp8_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_MXFP8_ERR_BAD_ARGS;
-    if (g_mx.module) return VX_MXFP8_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_mx.module) {
+        if (g_mx.dev != dev || g_mx.path != vxbin_path) {
+            return VX_MXFP8_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_MXFP8_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_mx.module) != VX_SUCCESS) {
+        vx_mxfp8_finalize();
         return VX_MXFP8_ERR_BAD_ARGS;
     }
     struct {
@@ -60,10 +71,12 @@ vx_mxfp8_status vx_mxfp8_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_mx.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_mxfp8_finalize();
             return VX_MXFP8_ERR_BAD_ARGS;
         }
     }
     g_mx.dev = dev;
+    g_mx.path = vxbin_path;
     return VX_MXFP8_OK;
 }
 

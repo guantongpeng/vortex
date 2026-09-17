@@ -18,6 +18,7 @@
 // runtime, no libvortex_dl dependency.
 
 #include <vortex/attn.h>
+#include <string>
 
 #include <math.h>
 
@@ -29,6 +30,7 @@ struct AttnState {
     vx_device_h dev = nullptr;
     vx_module_h module = nullptr;
     vx_kernel_h forward = nullptr;
+    std::string path;   // what init was called with
 };
 
 AttnState g_a;
@@ -84,15 +86,26 @@ vx_attn_status check_forward_args(uint64_t qmat, uint64_t kmat, uint64_t vmat,
 
 vx_attn_status vx_attn_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_ATTN_ERR_BAD_ARGS;
-    if (g_a.module) return VX_ATTN_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_a.module) {
+        if (g_a.dev != dev || g_a.path != vxbin_path) {
+            return VX_ATTN_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_ATTN_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_a.module) != VX_SUCCESS) {
+        vx_attn_finalize();
         return VX_ATTN_ERR_BAD_ARGS;
     }
     if (vx_module_get_kernel(g_a.module, "attn_forward_kernel",
                              &g_a.forward) != VX_SUCCESS) {
+        vx_attn_finalize();
         return VX_ATTN_ERR_BAD_ARGS;
     }
     g_a.dev = dev;
+    g_a.path = vxbin_path;
     return VX_ATTN_OK;
 }
 

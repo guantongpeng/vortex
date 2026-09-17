@@ -18,6 +18,7 @@
 // libvortex_dl.
 
 #include <vortex/sparse24.h>
+#include <string>
 
 #include "sparse24_args.h"
 
@@ -28,6 +29,7 @@ struct Sparse24State {
     vx_module_h module = nullptr;
     vx_kernel_h prune = nullptr;
     vx_kernel_h gemm = nullptr;
+    std::string path;   // what init was called with
 };
 
 Sparse24State g_s;
@@ -57,8 +59,17 @@ vx_sparse24_status launch(vx_queue_h q, vx_kernel_h k, const void* args,
 
 vx_sparse24_status vx_sparse24_init(vx_device_h dev, const char* vxbin_path) {
     if (!dev || !vxbin_path) return VX_SPARSE24_ERR_BAD_ARGS;
-    if (g_s.module) return VX_SPARSE24_OK;
+    // Idempotent only for the same device and image. It used to return OK
+    // without looking at either, so a second caller with a different image
+    // silently got the first caller's kernels.
+    if (g_s.module) {
+        if (g_s.dev != dev || g_s.path != vxbin_path) {
+            return VX_SPARSE24_ERR_ALREADY_INITIALIZED;
+        }
+        return VX_SPARSE24_OK;
+    }
     if (vx_module_load_file(dev, vxbin_path, &g_s.module) != VX_SUCCESS) {
+        vx_sparse24_finalize();
         return VX_SPARSE24_ERR_BAD_ARGS;
     }
     struct {
@@ -70,10 +81,12 @@ vx_sparse24_status vx_sparse24_init(vx_device_h dev, const char* vxbin_path) {
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_s.module, e.name, e.slot) != VX_SUCCESS) {
+            vx_sparse24_finalize();
             return VX_SPARSE24_ERR_BAD_ARGS;
         }
     }
     g_s.dev = dev;
+    g_s.path = vxbin_path;
     return VX_SPARSE24_OK;
 }
 
