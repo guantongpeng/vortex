@@ -29,7 +29,10 @@ DL modules against them.
 
 import ctypes
 import os
+import re
 import struct
+import subprocess
+import textwrap
 
 import pytest
 import torch
@@ -337,3 +340,70 @@ def test_aten_batch_norm_is_the_dl_kernel(backend, dl):
         "the ATen batch-norm path and a direct vx_dnn_bn_affine call disagree; "
         "they are not the same kernel.\n  max |diff| = %g"
         % (direct - got).abs().max().item())
+
+
+@pytest.mark.parametrize("xlen,expected", [
+    # measured with the host compiler, which shares LP64 with rv64
+    (64, {"dnn_conv2d_kernel": 88, "dnn_pool2d_kernel": 72,
+          "dnn_bn_affine_kernel": 72}),
+    # measured with VX_CFG_XLEN=32 and no __VORTEX__, which selects the
+    # header's uint32_t pointer branch
+    (32, {"dnn_conv2d_kernel": 72, "dnn_pool2d_kernel": 60,
+          "dnn_bn_affine_kernel": 44}),
+])
+def test_dl_metadata_matches_measured_sizes(xlen, expected, tmp_path):
+    """sw/dl's args_size was hand-typed and had drifted -- the F07 class.
+
+    conv declared 96 for an 88-byte struct, pool 88 for 72, and bn 56 for 72.
+    The last is the dangerous direction: the runtime copies exactly args_size
+    bytes, so a declared size that is too small means the kernel reads whatever
+    follows. It stays latent in the DL because the host passes its own sizeof()
+    at launch, which is why nothing caught it.
+
+    This measures the structs and compares against what the image metadata
+    actually says, so the numbers cannot drift again without a named failure.
+    """
+    repo = _paths.find_repo()
+    probe = tmp_path / "dl_sizes.cpp"
+    probe.write_text(textwrap.dedent("""
+        #include <stdio.h>
+        #include "dnn_args.h"
+        int main(void) {
+            printf("dnn_conv2d_kernel %zu\\n", sizeof(vx_dnn_conv_args_t));
+            printf("dnn_pool2d_kernel %zu\\n", sizeof(vx_dnn_pool_args_t));
+            printf("dnn_bn_affine_kernel %zu\\n", sizeof(vx_dnn_bn_affine_t_typo));
+            return 0;
+        }
+    """).replace("vx_dnn_bn_affine_t_typo", "vx_dnn_bn_args_t"))
+    exe = tmp_path / "dl_sizes"
+    cc = os.environ.get("CXX", "c++")
+    build = subprocess.run(
+        [cc, "-std=c++17", "-I", os.path.join(repo, "sw", "dl", "src"),
+         "-I", os.path.join(repo, "sw", "dl", "include"),
+         "-DVX_CFG_XLEN=%d" % xlen, str(probe), "-o", str(exe)],
+        capture_output=True, text=True, timeout=180)
+    assert build.returncode == 0, build.stderr[-2000:]
+    res = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr[-2000:]
+    measured = {line.split()[0]: int(line.split()[1])
+                for line in res.stdout.strip().splitlines()}
+    assert measured == expected, (
+        "the measurement changed; update this test AND sw/dl/Makefile together")
+
+    # The image metadata has to say the same thing -- but only when this tree
+    # is built for the XLEN being measured; the other branch is a prediction
+    # about a tree that is not here.
+    config = open(os.path.join(_paths.find_build(), "config.mk")).read()
+    tree_xlen = int(re.search(r"^XLEN\s*\??=\s*(\d+)", config, re.M).group(1))
+    if tree_xlen != xlen:
+        return
+    meta_path = os.path.join(_paths.find_build(), "sw", "dl", "dnn_meta.json")
+    if not os.path.exists(meta_path):
+        pytest.skip("dnn.vxbin not built in this tree")
+    declared = {}
+    for name, size in re.findall(r'"name":\s*"([a-z_0-9]+)",\s*"args_size":\s*(\d+)',
+                                 open(meta_path).read()):
+        declared[name] = int(size)
+    assert {k: declared.get(k) for k in measured} == measured, (
+        "sw/dl/Makefile's declared args_size disagrees with the structs: "
+        "%r vs %r" % ({k: declared.get(k) for k in measured}, measured))

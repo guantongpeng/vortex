@@ -124,18 +124,31 @@ quant.vxbin: $(SRC_DIR)/quant_kernels.hip $(SRC_DIR)/quant_args.h \
 quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# dnn arg-block sizes (device-width pointers).
-# conv: 4 ptr + 17 u32 -> rv64 96, rv32 84 (align 4/8 resp.)
-# pool: 2 ptr + 15 u32 -> rv64 88, rv32 68
-# bn:   6 ptr + 2 u32  -> rv64 56, rv32 32
+# dnn arg-block sizes, MEASURED from the structs rather than counted by hand.
+#
+# They were hand-written and had drifted: conv declared 96 for an 88-byte
+# struct, pool 88 for 72, and bn 56 for 72 -- the last one too small, which is
+# the dangerous direction, because the runtime copies exactly args_size bytes
+# and the kernel would read the rest as whatever was next in memory. (That one
+# appeared when bn_args_t gained has_affine and this table did not follow.)
+#
+# Measure with the host compiler, which shares LP64 with rv64; for rv32 define
+# VX_CFG_XLEN=32 and no __VORTEX__, which selects the header's uint32_t pointer
+# branch. torch-vortex/tests/test_dl_bridge.py re-measures both and fails if
+# these drift again.
+#
+# The DL host passes its own sizeof() at launch, so the metadata below is not
+# what these kernels are launched with -- it is what a caller using the
+# kernelParams path would get, which is why the drift was latent rather than
+# an active over-read.
 ifeq ($(XLEN),64)
-D_CONV_SIZE := 96
-D_POOL_SIZE := 88
-D_BN_SIZE := 56
+D_CONV_SIZE := 88
+D_POOL_SIZE := 72
+D_BN_SIZE := 72
 else
-D_CONV_SIZE := 84
-D_POOL_SIZE := 68
-D_BN_SIZE := 32
+D_CONV_SIZE := 72
+D_POOL_SIZE := 60
+D_BN_SIZE := 44
 endif
 DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE)}]
 
