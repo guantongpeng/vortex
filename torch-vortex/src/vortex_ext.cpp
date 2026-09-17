@@ -24,6 +24,7 @@
 #include <torch/extension.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -269,6 +270,7 @@ void launch(hipFunction_t f, const Args& args, uint32_t gx, uint32_t gy = 1,
 // Device-wide barrier. Defined with the other pybind entry points, below;
 // the guard's synchronizeDevice needs it, so it is declared at file scope.
 void device_synchronize_impl();
+void vortex_at_exit();
 
 // ---------------------------------------------------------------------------
 // Allocator: device memory via hipMalloc (vx_buffer_create under it)
@@ -432,7 +434,16 @@ void vortex_free(void* ctx) {
     hipFree(ctx);
 }
 
-VortexAllocator g_vortex_allocator;  // static lifetime (SetAllocator is non-owning)
+// Deliberately leaked, for the same reason as the registrations below.
+//
+// c10::SetAllocator is non-owning: torch holds this pointer for the life of
+// the process and can still call it while this .so's statics are being
+// destroyed. A static object here is destroyed first, which is a "pure virtual
+// method called" abort as soon as anything is freed during teardown.
+VortexAllocator& vortex_allocator() {
+    static VortexAllocator* a = new VortexAllocator();
+    return *a;
+}
 
 // ---------------------------------------------------------------------------
 // Device guard: one device, a real per-thread current stream
@@ -658,7 +669,7 @@ static torch::Tensor empty_impl(c10::SymIntArrayRef sym_size,
     auto dtype = dtype_opt.value_or(at::kFloat);
     auto sizes = sym_to_vec(sym_size);
     auto base = at::detail::empty_generic(
-        c10::IntArrayRef(sizes), &g_vortex_allocator, kVortexDispatchKeys,
+        c10::IntArrayRef(sizes), &vortex_allocator(), kVortexDispatchKeys,
         dtype, memory_format_opt);
     return torch::Tensor(std::move(base));
 }
@@ -677,7 +688,7 @@ static torch::Tensor empty_strided_impl(
     auto strides = sym_to_vec(sym_stride);
     auto base = at::detail::empty_strided_generic(
         c10::IntArrayRef(sizes), c10::IntArrayRef(strides),
-        &g_vortex_allocator, kVortexDispatchKeys, dtype);
+        &vortex_allocator(), kVortexDispatchKeys, dtype);
     return torch::Tensor(std::move(base));
 }
 
@@ -1194,25 +1205,55 @@ static torch::Tensor addmm_impl(const torch::Tensor& self,
                      beta.to<float>());
 }
 
-TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-    m.impl("empty.memory_format", &empty_impl);
-    m.impl("empty_strided", &empty_strided_impl);
-    m.impl("copy_", &copy_impl);
-    m.impl("_copy_from", &copy_from_impl);
-    m.impl("fill_.Scalar", &fill__impl);
-    m.impl("zero_", &zero__impl);
-    m.impl("view", &view_impl);
-    m.impl("relu", &relu_impl);
-    m.impl("relu_", &relu__impl);
-    m.impl("add.Tensor", &add_impl);
-    m.impl("mul.Tensor", &mul_impl);
-    m.impl("convolution", &convolution_impl);
-    m.impl("native_batch_norm", &native_batch_norm_impl);
-    m.impl("max_pool2d", &max_pool2d_impl);
-    m.impl("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
-    m.impl("mm", &mm_impl_wrap);
-    m.impl("linear", &linear_impl);
-    m.impl("addmm", &addmm_impl);
+// Every registration below goes through a heap-allocated torch::Library that
+// is deliberately never destroyed.
+//
+// The macros build static RegistrationHandleRAII objects, and their
+// destructors call back into the Dispatcher to deregister. At process exit
+// this .so's statics are destroyed *after* libtorch's own, so that call lands
+// in a torn-down Dispatcher and segfaults -- reproducible as soon as a process
+// exits with a kernel still queued. The registrations are process-lifetime by
+// design, and leaking the handle is how torch intends that (see the note about
+// heap construction in torch/library.h).
+// Defined with the fallbacks, below.
+static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
+
+void register_vortex_ops() {
+    auto* m = new torch::Library(torch::Library::IMPL, "aten",
+                                 c10::DispatchKey::PrivateUse1, __FILE__, __LINE__);
+#define VX_LIB (*m)
+#define VX_IMPL(name, fn) VX_LIB.impl(name, fn)
+    VX_IMPL("empty.memory_format", &empty_impl);
+    VX_IMPL("empty_strided", &empty_strided_impl);
+    VX_IMPL("copy_", &copy_impl);
+    VX_IMPL("_copy_from", &copy_from_impl);
+    VX_IMPL("fill_.Scalar", &fill__impl);
+    VX_IMPL("zero_", &zero__impl);
+    VX_IMPL("view", &view_impl);
+    VX_IMPL("relu", &relu_impl);
+    VX_IMPL("relu_", &relu__impl);
+    VX_IMPL("add.Tensor", &add_impl);
+    VX_IMPL("mul.Tensor", &mul_impl);
+    VX_IMPL("convolution", &convolution_impl);
+    VX_IMPL("native_batch_norm", &native_batch_norm_impl);
+    VX_IMPL("max_pool2d", &max_pool2d_impl);
+    VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
+    VX_IMPL("mm", &mm_impl_wrap);
+    VX_IMPL("linear", &linear_impl);
+    VX_IMPL("addmm", &addmm_impl);
+
+    auto* ag = new torch::Library(torch::Library::IMPL, "_",
+                                  c10::DispatchKey::AutogradPrivateUse1,
+                                  __FILE__, __LINE__);
+    ag->fallback(torch::CppFunction::makeFallthrough());
+
+    auto* fb = new torch::Library(torch::Library::IMPL, "_",
+                                  c10::DispatchKey::PrivateUse1,
+                                  __FILE__, __LINE__);
+    fb->fallback(torch::CppFunction::makeFromBoxedFunction<&vortex_no_fallback>());
+
+#undef VX_IMPL
+#undef VX_LIB
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,13 +1289,9 @@ static void vortex_no_fallback(const c10::OperatorHandle& op,
 // torch cannot distinguish from a correct zero gradient. Training is W8.1 of
 // docs/mydocs/pytorch_plan.md; until then this is the honest boundary.
 // Namespace-wide fallbacks must use the catch-all TORCH_LIBRARY_IMPL(_, ...).
-TORCH_LIBRARY_IMPL(_, AutogradPrivateUse1, m) {
-  m.fallback(torch::CppFunction::makeFallthrough());
-}
 
-TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
-    m.fallback(torch::CppFunction::makeFromBoxedFunction<&vortex_no_fallback>());
-}
+
+
 
 // ---------------------------------------------------------------------------
 // Module init
@@ -1286,11 +1323,12 @@ void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
         return;
     }
 
-    c10::SetAllocator(c10::DeviceType::PrivateUse1, &g_vortex_allocator);
+    c10::SetAllocator(c10::DeviceType::PrivateUse1, &vortex_allocator());
     VX_CHECK(hipInit(0));
     // From here on the allocator's deleter can release through the queue
     // instead of freeing immediately (see vortex_free).
     g_device_ready = true;
+    std::atexit(vortex_at_exit);
 
     // Cached once: conv's LMEM staging is checked against sharedMemPerBlock
     // before every launch, and the runtime's own error for an oversized block
@@ -1328,6 +1366,26 @@ void device_synchronize_impl() {
     note_device_barrier();
 }
 
+// Process-exit teardown, registered with atexit from load_ops.
+//
+// Without it the simx simulator's worker thread is still running
+// Processor::run() -> SimPlatform::tick() when the process tears down, and it
+// faults the moment anything it walks is freed -- which is why a process that
+// exited with a kernel still queued dumped core while one that read the result
+// back did not. Worker exit races are the plan's F23.
+//
+// Synchronising first matters: hipDeviceReset releases every buffer, and the
+// device must not still be reading them. atexit runs before static
+// destruction, so the runtime is still alive here (its own teardown waits on
+// the simulator future).
+void vortex_at_exit() {
+    if (!g_device_ready.exchange(false)) {
+        return;
+    }
+    device_synchronize_impl();
+    hipDeviceReset();
+}
+
 std::map<std::string, int64_t> device_properties_impl() {
     hipDeviceProp_t prop;
     VX_CHECK(hipGetDeviceProperties(&prop, 0));
@@ -1340,6 +1398,7 @@ std::map<std::string, int64_t> device_properties_impl() {
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    register_vortex_ops();
     m.def("load_ops", &load_ops,
           "initialize the vortex backend (allocator + kernel image)");
     m.def("stats", &stats_snapshot,

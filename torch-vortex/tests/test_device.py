@@ -19,6 +19,10 @@ something -- torch 2.14 calls is_available() during FakeTensor setup, so a
 @property returning True is a TypeError rather than a cosmetic wart.
 """
 
+import os
+import subprocess
+import sys
+import textwrap
 import time
 
 import pytest
@@ -119,6 +123,48 @@ def test_memory_stats_are_answerable(backend):
 def torch_vortex_live_bytes():
     import torch_vortex
     return torch_vortex.stats()["live_bytes"]
+
+
+def test_process_exits_cleanly_with_work_in_flight(backend):
+    """The exit crash (plan F23), run in a subprocess.
+
+    What is under test is what the process does as it exits, so it has to be
+    its own process. Before the teardown hook was registered this died with
+    SIGSEGV: the simx simulator thread was still in Processor::run() ->
+    SimPlatform::tick() while the main thread tore down what it walks. Reading
+    the result back first masked it, which is why the old suite only crashed
+    on the runs that did not.
+
+    Kept subprocess-based and narrow: a returncode of 0 is the assertion.
+    """
+    script = textwrap.dedent("""
+        import torch, torch_vortex
+        a = torch.ones(4096, device="vortex")
+        b = torch.ones(4096, device="vortex")
+        c = a + b            # enqueued, deliberately never read back
+    """)
+    res = subprocess.run([sys.executable, "-c", script],
+                         capture_output=True, text=True, timeout=600,
+                         env=dict(os.environ))
+    assert res.returncode == 0, (
+        "exiting with work in flight crashed (returncode %d)\n%s"
+        % (res.returncode, res.stderr[-2000:]))
+
+
+def test_process_exits_cleanly_after_reading_back(backend):
+    """The other half: a process that drained normally must also exit 0."""
+    script = textwrap.dedent("""
+        import torch, torch_vortex
+        a = torch.ones(4096, device="vortex")
+        b = torch.ones(4096, device="vortex")
+        assert bool(((a + b).cpu() == 2.0).all())
+    """)
+    res = subprocess.run([sys.executable, "-c", script],
+                         capture_output=True, text=True, timeout=600,
+                         env=dict(os.environ))
+    assert res.returncode == 0, (
+        "clean exit crashed (returncode %d)\n%s"
+        % (res.returncode, res.stderr[-2000:]))
 
 
 def test_repeated_import_is_idempotent(backend):
