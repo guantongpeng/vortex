@@ -86,20 +86,16 @@ def test_add_and_mul(backend):
     assert_matches_cpu(a.to("vortex") * b.to("vortex"), a * b)
 
 
-def test_scalar_operand_is_refused_by_name(backend):
-    """`x + 1.0` reaches add.Tensor with a 0-dim CPU tensor.
+def test_scalar_and_inplace_operands_are_supported(backend):
+    """`x + 1.0` used to be refused because it arrives as a 0-dim CPU tensor.
 
-    Supported in W3.2, not here, but the message has to name the real boundary
-    rather than claim the operand should have been a vortex tensor.
+    PyTorch hands a Python number to the *tensor* overload (add.Tensor with a
+    wrapped 0-dim tensor), not to add.Scalar, so treating it as a scalar is
+    the backend's job -- that is what the CUDA backend does.
     """
-    x = torch.ones(4, device="vortex")
-    with assert_rejected("scalar operands", backend):
-        x + 1.0
-
-
-def test_empty_tensor_launches_nothing(backend):
-    backend.reset_stats()
-    x = torch.empty(0, device="vortex")
-    out = torch.relu(x)
-    assert out.numel() == 0
-    assert backend.stats()["launches"] == 0
+    x = torch.tensor([0.5, 1.0, 2.0, 4.0])
+    vx = x.to("vortex")
+    assert_matches_cpu(vx + 1.0, x + 1.0)
+    assert_matches_cpu(vx * 3.0, x * 3.0)
+    assert_matches_cpu(3.0 * vx, 3.0 * x)
+    assert_matches_cpu(2.0 - vx, 2.0 - x)

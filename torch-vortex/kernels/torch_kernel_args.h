@@ -40,13 +40,54 @@
 #include <stdint.h>
 
 // ---- elementwise ----------------------------------------------------------
+//
+// Elementwise kernels are op-code driven: one kernel per arity, with the
+// operation selected by a field, so adding an op is a row here rather than a
+// kernel. The enum lives in this header because the host and the device must
+// agree on the numbering, and a mismatch is silent wrong answers.
 
-// add_kernel, mul_kernel
+enum TorchUnaryOp {
+    TORCH_UNARY_RELU = 0,
+    TORCH_UNARY_NEG,
+    TORCH_UNARY_ABS,
+    TORCH_UNARY_EXP,
+    TORCH_UNARY_LOG,
+    TORCH_UNARY_SQRT,
+    TORCH_UNARY_RSQRT,
+    TORCH_UNARY_SIGMOID,
+    TORCH_UNARY_TANH,
+    TORCH_UNARY_RECIPROCAL,
+    TORCH_UNARY_COUNT
+};
+
+enum TorchBinaryOp {
+    TORCH_BINARY_ADD = 0,
+    TORCH_BINARY_SUB,
+    TORCH_BINARY_MUL,
+    TORCH_BINARY_DIV,
+    TORCH_BINARY_MAXIMUM,
+    TORCH_BINARY_MINIMUM,
+    TORCH_BINARY_COUNT
+};
+
+// binary_op_kernel: dst = a <TorchBinaryOp> b. `op` was previously padding,
+// so this costs nothing in size or ABI.
 struct binary_args_t {
     uint64_t dst;
     uint64_t a;
     uint64_t b;
     uint32_t n;
+    uint32_t op;
+};
+
+// scalar_op_kernel: dst = a <TorchBinaryOp> value, value first if reverse.
+struct scalar_args_t {
+    uint64_t dst;
+    uint64_t a;
+    float value;
+    uint32_t n;
+    uint32_t op;
+    uint32_t reverse;
     uint32_t pad;
 };
 
@@ -58,13 +99,14 @@ struct fill_args_t {
     uint32_t pad;
 };
 
-// unary op with a distinct source and destination: relu_out_kernel. Separate
-// from fill_args_t because relu must not run in place on its input.
+// unary_op_kernel: dst = f(a) with f selected by `op`. Separate source and
+// destination because aten::relu and friends must not run in place on their
+// input; the in-place forms go through fill_args_t (relu) or scalar_args_t.
 struct unary_args_t {
     uint64_t dst;
     uint64_t a;
     uint32_t n;
-    uint32_t pad;
+    uint32_t op;
 };
 
 // ---- cnn ------------------------------------------------------------------
@@ -152,11 +194,11 @@ struct bias_args_t {
 // adding one row.
 
 #define TORCH_KERNEL_TABLE(X)                                                  \
-    X(add_kernel, binary_args_t, 0, 0)                                         \
-    X(mul_kernel, binary_args_t, 0, 0)                                         \
+    X(binary_op_kernel, binary_args_t, 0, 0)                                   \
+    X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
+    X(unary_op_kernel, unary_args_t, 0, 0)                                     \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(relu_kernel, fill_args_t, 0, 0)                                          \
-    X(relu_out_kernel, unary_args_t, 0, 0)                                     \
     X(tv_conv2d_kernel, conv_args_t, 16, 0)                                    \
     X(tv_pool2d_kernel, pool_args_t, 16, 0)                                    \
     X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \

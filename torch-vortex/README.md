@@ -74,13 +74,22 @@ not have been asked for a different PrivateUse1 device first.
 Everything below is refused loudly, with the work item that owns it named in
 the message. None of it falls back to the CPU.
 
+| Supported | |
+|---|---|
+| arithmetic: `add`/`sub`/`mul`/`div`, `maximum`/`minimum`, with tensor, scalar and `alpha` forms | |
+| in-place: `add_`/`sub_`/`mul_`/`div_`/`relu_` and the unary ones | |
+| unary: `neg`, `abs`, `exp`, `log`, `sqrt`, `rsqrt`, `sigmoid`, `tanh`, `reciprocal`, `relu` | |
+| `copy_`/`to`, `view`/`reshape`, `conv2d`, batch norm (inference), pooling, `mm`/`linear`/`addmm` | |
+| streams and events (`torch.Stream`, `torch.Event`, `torch.accelerator.*`) | |
+| several kernel images in one process (`sw/common/module_slots.mk`) | |
+
 | Not supported yet | Owner |
 |---|---|
 | dtypes other than float32 (allocation is fine, compute is not) | W3.2 / W4.1 |
-| scalar operands (`x + 1.0`), in-place `add_`/`mul_`, `as_strided`/`.t()` | W3.2 |
+| broadcasting, `cat`/`slice`/`gather`, reductions (`sum`/`max`/`argmax`), `as_strided`/`.t()` | W3.2 |
 | strided destinations in `copy_`, dtype conversion in `copy_` | W3.2 |
 | `torch.randn(device="vortex")`, `torch.manual_seed` on the device | W3.5 |
 | grouped/dilated/transposed conv, `avg_pool2d`, ceil_mode | W3.3 |
 | training: batch-norm training mode, autograd | W8.1 |
-| multiple streams, `non_blocking` actually overlapping | W2.2 |
-| warm restart / multiple kernel images in one process | W2.4 |
+| `non_blocking` actually overlapping (the runtime has one in-order ring) | W2.2 |
+| `Stream.query()`/`Event.query()` (no non-blocking query in the runtime) | W2.2 |

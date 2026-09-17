@@ -163,6 +163,20 @@ void stats_reset() {
     g_stats.host_numeric_ops = 0;
 }
 
+// Dimensions and element counts travel through uint32_t fields in the argument
+// blocks; refuse anything that would be silently truncated.
+static uint32_t u32_dim(int64_t v, const char* what) {
+    TORCH_CHECK(v >= 0 && v <= (int64_t)UINT32_MAX,
+                "torch_vortex: ", what, " = ", v, " does not fit in uint32");
+    return (uint32_t)v;
+}
+
+static uint32_t u32_numel(const torch::Tensor& t, const char* what) {
+    TORCH_CHECK(t.numel() <= (int64_t)UINT32_MAX, "torch_vortex: ", what,
+                " has ", t.numel(), " elements, which does not fit in uint32");
+    return (uint32_t)t.numel();
+}
+
 // ---------------------------------------------------------------------------
 // Streams
 // ---------------------------------------------------------------------------
@@ -601,10 +615,21 @@ TORCH_KERNEL_TABLE(TORCH_KERNEL_DECLARE)
 // so this is the ceiling on ci*kh*kw*4.
 int64_t g_shared_mem_per_block = 0;
 
-void launch_binary(hipFunction_t f, uint64_t dst, uint64_t a, uint64_t b,
-                   uint32_t n) {
-    binary_args_t args = {dst, a, b, n, 0};
-    launch(f, args, (n + 3) / 4);
+void launch_binary_op(uint64_t dst, uint64_t a, uint64_t b, uint32_t n,
+                      uint32_t op) {
+    binary_args_t args = {dst, a, b, n, op};
+    launch(h_binary_op_kernel, args, (n + 3) / 4);
+}
+
+void launch_unary_op(uint64_t dst, uint64_t a, uint32_t n, uint32_t op) {
+    unary_args_t args = {dst, a, n, op};
+    launch(h_unary_op_kernel, args, (n + 3) / 4);
+}
+
+void launch_scalar_op(uint64_t dst, uint64_t a, float value, uint32_t n,
+                      uint32_t op, uint32_t reverse) {
+    scalar_args_t args = {dst, a, value, n, op, reverse, 0};
+    launch(h_scalar_op_kernel, args, (n + 3) / 4);
 }
 
 void check_vortex_f32(const torch::Tensor& t, const char* what) {
@@ -815,49 +840,271 @@ static torch::Tensor view_impl(const torch::Tensor& self,
 // `x > 0 ? x : 0` gets wrong: NaN propagates, and -0.0 stays -0.0. It also
 // must not touch its input — this used to run the in-place kernel on self and
 // return self, so a residual branch sharing the input was silently modified.
-static torch::Tensor relu_impl(const torch::Tensor& self) {
-    check_vortex_f32(self, "relu");
-    auto out = torch::empty_like(self);
-    unary_args_t args = {(uint64_t)(uintptr_t)out.data_ptr(),
-                         (uint64_t)(uintptr_t)self.data_ptr(),
-                         (uint32_t)self.numel(), 0};
-    launch(h_relu_out_kernel, args, (uint32_t)((self.numel() + 3) / 4));
+// ---- elementwise ----------------------------------------------------------
+//
+// Op-code driven: one kernel per arity, with the operation selected by a field
+// in kernels/torch_kernel_args.h. Elementwise kernels keep the simple
+// grid-stride shape VOLT compiles correctly -- the note on tv_mm_kernel
+// records what happens when one stops being simple.
+
+// PyTorch hands a Python number to the *tensor* overloads: `x * 3.0` arrives
+// at mul.Tensor with a 0-dim CPU tensor, not at mul.Scalar. Treating that as a
+// scalar is what the CUDA backend does; before this, `x * 3.0` failed with
+// "mul.b is on cpu rather than the vortex device".
+static bool is_host_scalar(const torch::Tensor& t) {
+    return t.device().type() == c10::DeviceType::CPU && t.dim() == 0;
+}
+
+static void launch_elementwise(const torch::Tensor& a, const torch::Tensor& b,
+                               torch::Tensor& out, uint32_t op) {
+    const uint64_t dst = (uint64_t)(uintptr_t)out.data_ptr();
+    const uint32_t n = u32_numel(out, "elementwise output");
+    if (is_host_scalar(b)) {
+        launch_scalar_op(dst, (uint64_t)(uintptr_t)a.data_ptr(),
+                         b.item<float>(), n, op, 0);
+    } else if (is_host_scalar(a)) {
+        launch_scalar_op(dst, (uint64_t)(uintptr_t)b.data_ptr(),
+                         a.item<float>(), n, op, 1);
+    } else {
+        launch_binary_op(dst, (uint64_t)(uintptr_t)a.data_ptr(),
+                         (uint64_t)(uintptr_t)b.data_ptr(), n, op);
+    }
+}
+
+static void check_elementwise(const torch::Tensor& a, const torch::Tensor& b,
+                              const char* name) {
+    const bool a_scalar = is_host_scalar(a);
+    const bool b_scalar = is_host_scalar(b);
+    TORCH_CHECK(!(a_scalar && b_scalar), "torch_vortex: ", name,
+                " with two host scalars should have been folded by torch");
+    check_vortex_f32(a_scalar ? b : a, name);
+    if (!a_scalar && !b_scalar) {
+        TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: ", name,
+                    " needs equal shapes in v1; broadcasting is W3.2 in "
+                    "docs/mydocs/pytorch_plan.md");
+    }
+}
+
+static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
+                               uint32_t op, const char* name) {
+    check_elementwise(a, b, name);
+    auto out = torch::empty_like(is_host_scalar(a) ? b : a);
+    launch_elementwise(a, b, out, op);
     return out;
 }
 
-static torch::Tensor& relu__impl(torch::Tensor& self) {
-    check_vortex_f32(self, "relu_");
-    fill_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
-                        (uint32_t)self.numel(), 0.0f, 0};
-    launch(h_relu_kernel, args, (uint32_t)((self.numel() + 3) / 4));
+static torch::Tensor& binary_op_(torch::Tensor& self, const torch::Tensor& other,
+                                 uint32_t op, const char* name) {
+    check_vortex_f32(self, name);
+    if (!is_host_scalar(other)) {
+        check_vortex_f32(other, name);
+        TORCH_CHECK(self.sizes() == other.sizes(), "torch_vortex: ", name,
+                    " needs equal shapes in v1; broadcasting is W3.2");
+    }
+    launch_elementwise(self, other, self, op);
     return self;
 }
 
+// Scale a tensor by a host constant, one kernel, used only for alpha != 1.
+static torch::Tensor scaled_by(const torch::Tensor& t, double k) {
+    auto out = torch::empty_like(t);
+    launch_scalar_op((uint64_t)(uintptr_t)out.data_ptr(),
+                     (uint64_t)(uintptr_t)t.data_ptr(), (float)k,
+                     u32_numel(out, "scaled"), TORCH_BINARY_MUL, 0);
+    return out;
+}
+
+// torch.add/sub take an `alpha` scaling the second operand, so these compute
+// `a <op> b*alpha`. Implemented as a scale followed by the plain op rather
+// than by growing the argument block: two launches on a path that already
+// costs one is cheaper than a wider ABI every kernel has to agree on.
+//
+// `op` is threaded through every branch. Hardcoding ADD in the tensor-tensor
+// branch (as this first did) makes torch.sub(a, b, alpha) silently add.
+static void check_alpha(const c10::Scalar& alpha) {
+    TORCH_CHECK(std::isfinite(alpha.to<double>()),
+                "torch_vortex: alpha must be finite");
+}
+
+static torch::Tensor alpha_scaled_op(const torch::Tensor& a, const torch::Tensor& b,
+                              uint32_t op, const c10::Scalar& alpha,
+                              const char* name) {
+    check_alpha(alpha);
+    const double k = alpha.to<double>();
+    if (k == 1.0) {
+        return binary_op(a, b, op, name);
+    }
+    check_elementwise(a, b, name);
+    const torch::Tensor scaled = is_host_scalar(b)
+                                     ? b
+                                     : scaled_by(b, k);
+    const float value = is_host_scalar(b)
+                            ? (float)(b.item<double>() * k)
+                            : (float)k;
+    auto out = torch::empty_like(is_host_scalar(a) ? scaled : a);
+    if (is_host_scalar(b)) {
+        launch_scalar_op((uint64_t)(uintptr_t)out.data_ptr(),
+                         (uint64_t)(uintptr_t)a.data_ptr(), value,
+                         u32_numel(out, name), op, 0);
+    } else if (is_host_scalar(a)) {
+        // reverse: the scalar is the left operand, so `a - b*alpha` is not
+        // `b*alpha - a`
+        launch_scalar_op((uint64_t)(uintptr_t)out.data_ptr(),
+                         (uint64_t)(uintptr_t)scaled.data_ptr(),
+                         a.item<float>(), u32_numel(out, name), op, 1);
+    } else {
+        launch_binary_op((uint64_t)(uintptr_t)out.data_ptr(),
+                         (uint64_t)(uintptr_t)a.data_ptr(),
+                         (uint64_t)(uintptr_t)scaled.data_ptr(),
+                         u32_numel(out, name), op);
+    }
+    return out;
+}
+
+static torch::Tensor& alpha_scaled_op_(torch::Tensor& self, const torch::Tensor& other,
+                                uint32_t op, const c10::Scalar& alpha,
+                                const char* name) {
+    check_alpha(alpha);
+    const double k = alpha.to<double>();
+    if (k == 1.0) {
+        return binary_op_(self, other, op, name);
+    }
+    if (is_host_scalar(other)) {
+        check_vortex_f32(self, name);
+        launch_scalar_op((uint64_t)(uintptr_t)self.data_ptr(),
+                         (uint64_t)(uintptr_t)self.data_ptr(),
+                         (float)(other.item<double>() * k),
+                         u32_numel(self, name), op, 0);
+        return self;
+    }
+    auto scaled = scaled_by(other, k);
+    return binary_op_(self, scaled, op, name);
+}
+
+#define VX_BINARY_OP(NAME, OP, LABEL)                                          \
+    static torch::Tensor NAME##_impl(const torch::Tensor& a,                   \
+                                     const torch::Tensor& b) {                 \
+        return binary_op(a, b, OP, LABEL);                                     \
+    }                                                                          \
+    static torch::Tensor& NAME##__impl(torch::Tensor& self,                    \
+                                       const torch::Tensor& other) {           \
+        return binary_op_(self, other, OP, LABEL);                             \
+    }
+
+VX_BINARY_OP(mul, TORCH_BINARY_MUL, "mul")
+VX_BINARY_OP(div, TORCH_BINARY_DIV, "div")
+VX_BINARY_OP(maximum, TORCH_BINARY_MAXIMUM, "maximum")
+VX_BINARY_OP(minimum, TORCH_BINARY_MINIMUM, "minimum")
+#undef VX_BINARY_OP
+
 static torch::Tensor add_impl(const torch::Tensor& a, const torch::Tensor& b,
                               const c10::Scalar& alpha) {
-    check_vortex_f32(a, "add.a");
-    check_vortex_f32(b, "add.b");
-    TORCH_CHECK(alpha.to<double>() == 1.0,
-                "torch_vortex: add alpha != 1 unsupported in v1");
-    TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: add needs equal shapes");
-    auto out = torch::empty_like(a);
-    launch_binary(h_add_kernel, (uint64_t)(uintptr_t)out.data_ptr(),
-                  (uint64_t)(uintptr_t)a.data_ptr(),
-                  (uint64_t)(uintptr_t)b.data_ptr(), (uint32_t)a.numel());
+    return alpha_scaled_op(a, b, TORCH_BINARY_ADD, alpha, "add");
+}
+static torch::Tensor sub_impl(const torch::Tensor& a, const torch::Tensor& b,
+                              const c10::Scalar& alpha) {
+    // torch.sub(a, b, alpha) is a - alpha*b
+    return alpha_scaled_op(a, b, TORCH_BINARY_SUB, alpha, "sub");
+}
+static torch::Tensor& add__impl(torch::Tensor& self, const torch::Tensor& other,
+                                const c10::Scalar& alpha) {
+    return alpha_scaled_op_(self, other, TORCH_BINARY_ADD, alpha, "add_");
+}
+static torch::Tensor& sub__impl(torch::Tensor& self, const torch::Tensor& other,
+                                const c10::Scalar& alpha) {
+    return alpha_scaled_op_(self, other, TORCH_BINARY_SUB, alpha, "sub_");
+}
+
+// The .Scalar overloads. `x + 1.0` reaches add.Tensor with a wrapped 0-dim
+// tensor (handled above), but torch.add(x, 1.0, alpha=2) is genuinely
+// add.Scalar, and models use it.
+#define VX_SCALAR_OP(SCHEMA, NAME, OP, LABEL)                                   \
+    static torch::Tensor NAME##_scalar_impl(const torch::Tensor& self,          \
+                                            const c10::Scalar& other) {         \
+        return binary_op(self, at::scalar_to_tensor(other), OP, LABEL);         \
+    }                                                                           \
+    static torch::Tensor& NAME##_scalar__impl(torch::Tensor& self,               \
+                                              const c10::Scalar& other) {        \
+        return binary_op_(self, at::scalar_to_tensor(other), OP, LABEL);        \
+    }
+
+VX_SCALAR_OP("mul.Scalar", mul, TORCH_BINARY_MUL, "mul")
+VX_SCALAR_OP("div.Scalar", div, TORCH_BINARY_DIV, "div")
+#undef VX_SCALAR_OP
+
+static torch::Tensor add_scalar_impl(const torch::Tensor& self,
+                                     const c10::Scalar& other,
+                                     const c10::Scalar& alpha) {
+    return alpha_scaled_op(self, at::scalar_to_tensor(other), TORCH_BINARY_ADD, alpha,
+                    "add");
+}
+static torch::Tensor sub_scalar_impl(const torch::Tensor& self,
+                                     const c10::Scalar& other,
+                                     const c10::Scalar& alpha) {
+    return alpha_scaled_op(self, at::scalar_to_tensor(other), TORCH_BINARY_SUB, alpha,
+                    "sub");
+}
+static torch::Tensor& add_scalar__impl(torch::Tensor& self,
+                                       const c10::Scalar& other,
+                                       const c10::Scalar& alpha) {
+    return alpha_scaled_op_(self, at::scalar_to_tensor(other), TORCH_BINARY_ADD, alpha,
+                     "add_");
+}
+static torch::Tensor& sub_scalar__impl(torch::Tensor& self,
+                                       const c10::Scalar& other,
+                                       const c10::Scalar& alpha) {
+    return alpha_scaled_op_(self, at::scalar_to_tensor(other), TORCH_BINARY_SUB, alpha,
+                     "sub_");
+}
+
+// ---- unary ----------------------------------------------------------------
+
+static torch::Tensor unary_op(const torch::Tensor& self, uint32_t op,
+                              const char* name) {
+    check_vortex_f32(self, name);
+    auto out = torch::empty_like(self);
+    launch_unary_op((uint64_t)(uintptr_t)out.data_ptr(),
+                    (uint64_t)(uintptr_t)self.data_ptr(),
+                    u32_numel(out, name), op);
     return out;
 }
 
-static torch::Tensor mul_impl(const torch::Tensor& a, const torch::Tensor& b) {
-    check_vortex_f32(a, "mul.a");
-    check_vortex_f32(b, "mul.b");
-    TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: mul needs equal shapes");
-    auto out = torch::empty_like(a);
-    launch_binary(h_mul_kernel, (uint64_t)(uintptr_t)out.data_ptr(),
-                  (uint64_t)(uintptr_t)a.data_ptr(),
-                  (uint64_t)(uintptr_t)b.data_ptr(), (uint32_t)a.numel());
-    return out;
+// In place: source and destination are the same buffer, which is safe here
+// because each thread reads and writes the same index.
+static torch::Tensor& unary_op_(torch::Tensor& self, uint32_t op,
+                                const char* name) {
+    check_vortex_f32(self, name);
+    launch_unary_op((uint64_t)(uintptr_t)self.data_ptr(),
+                    (uint64_t)(uintptr_t)self.data_ptr(),
+                    u32_numel(self, name), op);
+    return self;
 }
 
+static torch::Tensor relu_impl(const torch::Tensor& self) {
+    return unary_op(self, TORCH_UNARY_RELU, "relu");
+}
+static torch::Tensor& relu__impl(torch::Tensor& self) {
+    return unary_op_(self, TORCH_UNARY_RELU, "relu_");
+}
+
+#define VX_UNARY_OP(NAME, OP, LABEL)                                           \
+    static torch::Tensor NAME##_impl(const torch::Tensor& self) {              \
+        return unary_op(self, OP, LABEL);                                      \
+    }                                                                          \
+    static torch::Tensor& NAME##__impl(torch::Tensor& self) {                  \
+        return unary_op_(self, OP, LABEL);                                     \
+    }
+
+VX_UNARY_OP(neg, TORCH_UNARY_NEG, "neg")
+VX_UNARY_OP(abs, TORCH_UNARY_ABS, "abs")
+VX_UNARY_OP(exp, TORCH_UNARY_EXP, "exp")
+VX_UNARY_OP(log, TORCH_UNARY_LOG, "log")
+VX_UNARY_OP(sqrt, TORCH_UNARY_SQRT, "sqrt")
+VX_UNARY_OP(rsqrt, TORCH_UNARY_RSQRT, "rsqrt")
+VX_UNARY_OP(sigmoid, TORCH_UNARY_SIGMOID, "sigmoid")
+VX_UNARY_OP(tanh, TORCH_UNARY_TANH, "tanh")
+VX_UNARY_OP(reciprocal, TORCH_UNARY_RECIPROCAL, "reciprocal")
+#undef VX_UNARY_OP
 
 // ---------------------------------------------------------------------------
 // dnn ops (plan P5-02): the ResNet op set on device. All constraints are
@@ -894,19 +1141,6 @@ static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
     return (in + 2 * pad - k) / stride + 1;
 }
 
-// Dimensions and element counts travel through uint32_t fields in the argument
-// blocks; refuse anything that would be silently truncated.
-static uint32_t u32_dim(int64_t v, const char* what) {
-    TORCH_CHECK(v >= 0 && v <= (int64_t)UINT32_MAX,
-                "torch_vortex: ", what, " = ", v, " does not fit in uint32");
-    return (uint32_t)v;
-}
-
-static uint32_t u32_numel(const torch::Tensor& t, const char* what) {
-    TORCH_CHECK(t.numel() <= (int64_t)UINT32_MAX, "torch_vortex: ", what,
-                " has ", t.numel(), " elements, which does not fit in uint32");
-    return (uint32_t)t.numel();
-}
 
 static void launch_conv(const conv_args_t& args) {
     // one CTA per (output row, output channel, sample); 16 threads per row;
@@ -1233,7 +1467,36 @@ void register_vortex_ops() {
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);
+    VX_IMPL("sub.Tensor", &sub_impl);
     VX_IMPL("mul.Tensor", &mul_impl);
+    VX_IMPL("div.Tensor", &div_impl);
+    VX_IMPL("maximum", &maximum_impl);
+    VX_IMPL("minimum", &minimum_impl);
+    VX_IMPL("add_.Tensor", &add__impl);
+    VX_IMPL("sub_.Tensor", &sub__impl);
+    VX_IMPL("mul_.Tensor", &mul__impl);
+    VX_IMPL("div_.Tensor", &div__impl);
+    VX_IMPL("add.Scalar", &add_scalar_impl);
+    VX_IMPL("sub.Scalar", &sub_scalar_impl);
+    VX_IMPL("mul.Scalar", &mul_scalar_impl);
+    VX_IMPL("div.Scalar", &div_scalar_impl);
+    VX_IMPL("add_.Scalar", &add_scalar__impl);
+    VX_IMPL("sub_.Scalar", &sub_scalar__impl);
+    VX_IMPL("mul_.Scalar", &mul_scalar__impl);
+    VX_IMPL("div_.Scalar", &div_scalar__impl);
+#define VX_REGISTER_UNARY(NAME)                                                \
+    VX_IMPL(#NAME, &NAME##_impl);                                              \
+    VX_IMPL(#NAME "_", &NAME##__impl)
+    VX_REGISTER_UNARY(neg);
+    VX_REGISTER_UNARY(abs);
+    VX_REGISTER_UNARY(exp);
+    VX_REGISTER_UNARY(log);
+    VX_REGISTER_UNARY(sqrt);
+    VX_REGISTER_UNARY(rsqrt);
+    VX_REGISTER_UNARY(sigmoid);
+    VX_REGISTER_UNARY(tanh);
+    VX_REGISTER_UNARY(reciprocal);
+#undef VX_REGISTER_UNARY
     VX_IMPL("convolution", &convolution_impl);
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
