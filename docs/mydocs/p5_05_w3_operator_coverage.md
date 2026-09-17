@@ -68,7 +68,7 @@ SUPPORTED                          UNSUPPORTED
 5. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
 6. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
 7. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
-8. **W3.1 与 `sw/dl` 统一** —— 本轮没有做。`sw/dl` 的 `prim_reduce`/`prim_unary`/`prim_softmax`/`prim_layernorm` 都是现成的,本轮的归约与一元 kernel 是**重复实现**;W3.1 要求的「kernel 算法只维护一份」仍未满足,需要把扩展链到 `libvortex_dl` 并统一 device/context 生命周期。
+8. **W3.1 与 `sw/dl` 统一** —— 已开始,见 §5。`conv2d` 与 pooling 已迁到 DL kernel 并删除重复实现;`batch norm` 与 `mm` 尚未。`sw/dl` 的 `prim_reduce`/`prim_unary` 与本轮的归约/一元 kernel 仍是**重复实现**。
 9. **`max(dim=)`/`argmax`/`topk`** —— 需要索引归约。
 
 ## 4. 本轮的一个实现教训
@@ -76,3 +76,45 @@ SUPPORTED                          UNSUPPORTED
 跨步拷贝的第一版把 **CPU 指针传给了 device kernel**,于是 `strided_vortex.cpu()` 往设备写零、host buffer 原样不动。拷贝 kernel 寻址的是设备内存,所以**两侧都必须在设备上**:host 源要抬上去,host 目标要先汇集到连续的设备缓冲再搬下来。测试同时覆盖两个方向才抓到它——跨步源是读模式,跨步目标是写模式,只测一边会掩盖另一边。
 
 `gelu` 的第一版只实现了 tanh 形式并把它当成默认值。实际上 torch 的默认是 erf 形式,`approximate="tanh"` 是**另一个函数**而不是同一个的另一种拼法。schema 不匹配(我们的 kernel 收一个参数,而 schema 有两个)会直接导致 import 失败,这才暴露出来。
+
+
+## 5. W3.1:与 `sw/dl` 统一(进行中)
+
+### 5.1 审计发现:直接迁移会倒退三个修复
+
+W3.1 原文警告「先对照测试再迁移 mm/conv/norm;同步修复共享 kernel 中的对应问题,避免将已知错误从一层搬到另一层」。**这条警告是准的**,审计在 `sw/dl` 里找到了三个 W1 已修、而 DL 一直没修的问题:
+
+| W1 的修复 | `sw/dl` 的状态(实测) |
+|---|---|
+| F03 BN 通道索引 `plane = total/c`(= N\*H\*W) | **未修**。N=2 时 16 个输出错 8 个 |
+| F10 pool 用有限哨兵 `-3.4e38f` | **未修**。`-inf` 与 NaN 都变成该哨兵 |
+| F01 relu `x > 0 ? x : 0` | **未修**。NaN 归零、`-0.0` 丢符号 |
+
+两个 DL 测试之所以测不出来,是因为**测试的参考实现自己就写了同一个缺陷**:BN 测试跑 `N = 1`(`total/c` 恰好等于 `H*W`),pool 测试的参考初值也用了 `-3.4e38f`。把缺陷写成 oracle 的测试永远通过。
+
+所以先修 DL 的 kernel(含新增的 N>1 与 `-inf`/NaN 用例,并确认这两条用例在旧 kernel 下会失败),再迁移。
+
+顺带修的:BN 原本收预计算的 `rstd`(迫使调用方做一次 host 往返算 sqrt,即 F11 的形状),现在收 `var`+`eps`,rstd 在 kernel 内算;`vx_dnn_bn_affine` 的 grid 按 4 线程算而共享 launch 助手硬编码 16 线程(过度 4 倍 CTA)。
+
+### 5.2 桥接
+
+DL 库说的是 vortex2.h,需要**本进程的** device 和 queue——自己开第二个 device 就是第二个 context,会让 DL 的 launch 失去与 HIP 侧的定序关系。所以 `sw/hip` 把两个句柄交出来(`hipGetVxDevice`、`hipStreamGetQueue`),扩展用它们初始化 DL 模块。两个镜像集现在同进程共存——这正是 W2.4 多模块工作解锁的;在此之前,这正是 ops 与 dnn kernel 被合并成单一镜像的原因。
+
+### 5.3 已迁移的算子与验收
+
+`conv2d`、`max_pool2d`/`adaptive_avg_pool2d` 已走 DL kernel,扩展里对应的 kernel、参数结构体与 launch 助手已删除。
+
+**验收按计划书的三条**:
+
+- **同源 kernel**:`torch.nn.functional.conv2d` 与直接调 `vx_dnn_conv2d` 的结果**逐位相同**。这里刻意不用容差——两个独立实现会在累加次序内一致,容差恰好会掩盖「其实是两份实现」;同一个 kernel 则不可能有差异。对比 CPU 参考时才用容差,因为那**确实是**另一个实现。
+- **stream 一致**:DL 的 launch 走调用方当前流的队列(`current_queue()`),与扩展自己的 launch 同队列定序。
+- **数值与 ABI**:DL 侧新增的 N>1/特殊值用例通过;扩展侧 ABI 三方比对(边车 / 扩展编译期 / 现场 `sizeof`)保持通过。
+
+分工由此明确:**ATen 校验,DL 计算**。边界检查(`window_out`、范围检查)留在扩展——它们会指名被拒的参数,而且是这条路径上唯一的带符号算术;DL 的形状算术是无符号无检查的。
+
+### 5.4 尚未完成
+
+- **`batch norm`**:DL 的 BN 要求 weight/bias 指针都非空,而 ATen 侧支持 affine 可选。要么给 DL 加 `has_affine`(torch-vortex 的 kernel 已经有),要么在缺省时传 1/0 缓冲。
+- **`mm`**:DL 的 gemm **保留了内联的 alpha/beta epilogue 分支**——正是我在 `tv_mm_kernel` 里因为 VOLT 误编译而移出的那种形状。迁移前必须先用 `test_mm_partial_tiles` 那套形状测它,否则可能把误编译带回来。审计明确建议先测。
+- **`prim`**:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce` 的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。
+- **`sw/dl` 的 init 与 metadata**(审计发现,未修):init 第二次调用是**静默 no-op**,不看 device 也不看路径;部分初始化失败会留下 `module` 已设而某个 kernel 槽为 nullptr 的状态,而 runtime 把 nullptr kernel 当「legacy escape hatch」——于是会**以 PC 0 成功入队**。`args_size` 也仍是手填且漂移(conv 声明 96 实际 88)。这些是 `sw/dl` 自身的账,不是迁移引入的,但会随迁移一起被继承。
