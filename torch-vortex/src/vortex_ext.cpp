@@ -27,7 +27,9 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <c10/core/Allocator.h>
@@ -97,14 +99,25 @@ std::atomic<bool> g_device_ready{false};
 // test suite went from 25s to 48s because no address was ever reused.
 std::atomic<uint64_t> g_launch_epoch{0};
 std::atomic<uint64_t> g_barrier_epoch{0};
+// Set when anything was launched on an explicit stream. hipMemcpy drains only
+// the default queue, so an epoch match cannot cover those launches; only a
+// device-wide barrier clears this.
+std::atomic<bool> g_nondefault_work{false};
 
-// Called after anything that drains the queue host-side.
-void note_barrier() {
+// After something that drains the default queue host-side (hipMemcpy).
+void note_default_queue_barrier() {
     g_barrier_epoch.store(g_launch_epoch.load());
 }
 
+// After a device-wide barrier (hipDeviceSynchronize).
+void note_device_barrier() {
+    g_barrier_epoch.store(g_launch_epoch.load());
+    g_nondefault_work = false;
+}
+
 bool work_since_last_barrier() {
-    return g_launch_epoch.load() != g_barrier_epoch.load();
+    return g_nondefault_work.load() ||
+           g_launch_epoch.load() != g_barrier_epoch.load();
 }
 
 std::map<std::string, int64_t> stats_snapshot() {
@@ -138,6 +151,66 @@ void stats_reset() {
 }
 
 // ---------------------------------------------------------------------------
+// Streams
+// ---------------------------------------------------------------------------
+//
+// c10 identifies a stream by (device, id). The id -> hipStream_t mapping is
+// process-wide by nature; the *current* stream is thread-local, which is what
+// the guard interface contract requires (DeviceGuardImplInterface.h documents
+// thread-local semantics, and the previous process-global pair meant two host
+// threads shared one "current stream" slot).
+//
+// id 0 is the device's default queue, i.e. a null hipStream_t.
+
+namespace {
+
+std::mutex g_stream_mu;
+std::unordered_map<c10::StreamId, hipStream_t> g_streams;
+std::atomic<c10::StreamId> g_next_stream_id{1};
+
+c10::Stream default_stream() {
+    return c10::Stream(c10::Stream::DEFAULT,
+                       c10::Device(c10::DeviceType::PrivateUse1, 0));
+}
+
+thread_local c10::Stream t_current_stream = default_stream();
+thread_local c10::DeviceIndex t_current_device = 0;
+
+hipStream_t hip_stream_of(c10::Stream s) {
+    if (s.device_type() != c10::DeviceType::PrivateUse1) {
+        TORCH_CHECK(false, "torch_vortex: stream ", s, " is not a vortex stream");
+    }
+    if (s.id() == default_stream().id()) {
+        return nullptr;   // the device's default queue
+    }
+    std::lock_guard<std::mutex> g(g_stream_mu);
+    auto it = g_streams.find(s.id());
+    TORCH_CHECK(it != g_streams.end(), "torch_vortex: unknown stream id ", s.id(),
+                " -- it was not created by this process, or it was destroyed");
+    return it->second;
+}
+
+c10::Stream create_stream() {
+    hipStream_t hs = nullptr;
+    VX_CHECK(hipStreamCreate(&hs));
+    const c10::StreamId id = g_next_stream_id++;
+    {
+        std::lock_guard<std::mutex> g(g_stream_mu);
+        g_streams.emplace(id, hs);
+    }
+    return c10::Stream(c10::Stream::UNSAFE,
+                       c10::Device(c10::DeviceType::PrivateUse1, 0), id);
+}
+
+// The stream ops launch on. Before this existed every launch passed nullptr
+// and the guard's stream was decorative.
+hipStream_t current_hip_stream() {
+    return hip_stream_of(t_current_stream);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 // Launch
 // ---------------------------------------------------------------------------
 
@@ -165,16 +238,25 @@ void launch(hipFunction_t f, const Args& args, uint32_t gx, uint32_t gy = 1,
         HIP_LAUNCH_PARAM_BUFFER_SIZE, (void*)(uintptr_t)sizeof(Args),
         (void*)0,
     };
-    VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem, nullptr,
+    const hipStream_t stream = current_hip_stream();
+    VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem, stream,
                                    nullptr, extra));
     ++g_stats.launches;
-    ++g_launch_epoch;
+    if (stream == nullptr) {
+        ++g_launch_epoch;
+    } else {
+        g_nondefault_work = true;
+    }
 }
 
 // The previous calling convention (a single pointer in kernelParams, with the
 // size read from image metadata) is deliberately not used anywhere any more.
 
 } // namespace
+
+// Device-wide barrier. Defined with the other pybind entry points, below;
+// the guard's synchronizeDevice needs it, so it is declared at file scope.
+void device_synchronize_impl();
 
 // ---------------------------------------------------------------------------
 // Allocator: device memory via hipMalloc (vx_buffer_create under it)
@@ -242,54 +324,123 @@ void vortex_free(void* ctx) {
 VortexAllocator g_vortex_allocator;  // static lifetime (SetAllocator is non-owning)
 
 // ---------------------------------------------------------------------------
-// Device guard: single device, single implicit stream
+// Device guard: one device, a real per-thread current stream
 // ---------------------------------------------------------------------------
+
+// A c10::Event is an opaque void* owned by the backend; this is what we put
+// behind it. It wraps the same hipEvent_t the HIP layer already implements, so
+// event semantics live in one place.
+namespace {
+
+struct VortexEvent {
+    hipEvent_t ev = nullptr;
+};
+
+void check_device_arg(c10::Device d) {
+    TORCH_CHECK(d.type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: expected a vortex device, got ", d);
+    // index() is -1 when the caller wrote device="vortex" with no index
+    TORCH_CHECK(d.index() == -1 || d.index() == 0,
+                "torch_vortex: only device 0 exists, got \"", d.str(), "\"");
+}
+
+} // namespace
 
 struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     c10::DeviceType type() const override {
         return c10::DeviceType::PrivateUse1;
     }
     c10::Device exchangeDevice(c10::Device d) const override {
-        auto old = current_;
-        if (d.index() >= 0) {
-            TORCH_CHECK(d.type() == c10::DeviceType::PrivateUse1 && d.index() == 0,
-                        "torch_vortex: only device 0 exists");
-        }
+        const c10::Device old(c10::DeviceType::PrivateUse1, t_current_device);
+        setDevice(d);
         return old;
     }
     void setDevice(c10::Device d) const override {
-        if (d.index() >= 0) {
-            TORCH_CHECK(d.type() == c10::DeviceType::PrivateUse1 && d.index() == 0,
-                        "torch_vortex: only device 0 exists");
-        }
+        check_device_arg(d);
+        t_current_device = 0;
     }
     c10::Device getDevice() const override {
-        return c10::Device(c10::DeviceType::PrivateUse1, 0);
+        return c10::Device(c10::DeviceType::PrivateUse1, t_current_device);
     }
     c10::DeviceIndex deviceCount() const noexcept override { return 1; }
     void uncheckedSetDevice(c10::Device d) const noexcept override {
-        (void)d;  // single device; nothing to switch
-    }
-    c10::Stream getStream(c10::Device) const noexcept override {
-        return getDefaultStream(c10::Device(c10::DeviceType::PrivateUse1, 0));
-    }
-    c10::Stream exchangeStream(c10::Stream s) const noexcept override {
-        auto old = stream_;
-        stream_ = s;
-        return old;
-    }
-    c10::Stream getDefaultStream(c10::Device) const override {
-        return c10::Stream(c10::Stream::DEFAULT,
-                           c10::Device(c10::DeviceType::PrivateUse1, 0));
-    }
-    c10::Stream getNewStream(c10::Device, int) const override {
-        return getDefaultStream(c10::Device(c10::DeviceType::PrivateUse1, 0));
+        t_current_device = (d.index() < 0) ? 0 : d.index();
     }
 
-   private:
-    static inline c10::Device current_ = c10::Device(c10::DeviceType::PrivateUse1, 0);
-    static inline c10::Stream stream_ =
-        c10::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0));
+    c10::Stream getStream(c10::Device) const noexcept override {
+        return t_current_stream;
+    }
+    c10::Stream getDefaultStream(c10::Device) const override {
+        return default_stream();
+    }
+    c10::Stream exchangeStream(c10::Stream s) const noexcept override {
+        auto old = t_current_stream;
+        t_current_stream = s;
+        return old;
+    }
+    // Creates a real HIP queue. There is no destroyStream hook in this torch
+    // version, so a stream lives until the process exits -- the same shape the
+    // CUDA guard has for non-pooled streams.
+    c10::Stream getNewStream(c10::Device, int = 0) const override {
+        return create_stream();
+    }
+
+    // ---- synchronisation ---------------------------------------------------
+    void synchronizeStream(const c10::Stream& s) const override {
+        VX_CHECK(hipStreamSynchronize(hip_stream_of(s)));
+        // A stream barrier drains that queue, so nothing enqueued on *it* is in
+        // flight any more. Work on other streams is covered separately by the
+        // non-default flag.
+        note_default_queue_barrier();
+    }
+    void synchronizeDevice(const c10::DeviceIndex) const override {
+        device_synchronize_impl();
+    }
+    // queryStream/queryEvent are deliberately not overridden: the runtime has
+    // no non-blocking queue/event query (vx_queue_finish always enqueues a
+    // barrier, so polling with it would grow the queue), and this increment
+    // may not change sw/runtime. The base class raises
+    // "Backend doesn't support querying streams." rather than answering
+    // wrongly. W2.2 of docs/mydocs/pytorch_plan.md records the gap.
+
+    // ---- events ------------------------------------------------------------
+    void record(void** event, const c10::Stream& s, const c10::DeviceIndex,
+                const c10::EventFlag) const override {
+        TORCH_CHECK(event != nullptr, "torch_vortex: record needs an event slot");
+        if (*event == nullptr) {
+            auto* e = new VortexEvent();
+            VX_CHECK(hipEventCreate(&e->ev));
+            *event = e;
+        }
+        VX_CHECK(hipEventRecord(static_cast<VortexEvent*>(*event)->ev,
+                                hip_stream_of(s)));
+    }
+    void block(void* event, const c10::Stream& s) const override {
+        TORCH_CHECK(event != nullptr, "torch_vortex: block needs an event");
+        VX_CHECK(hipStreamWaitEvent(hip_stream_of(s),
+                                    static_cast<VortexEvent*>(event)->ev));
+    }
+    void synchronizeEvent(void* event) const override {
+        TORCH_CHECK(event != nullptr, "torch_vortex: synchronizeEvent needs an event");
+        VX_CHECK(hipEventSynchronize(static_cast<VortexEvent*>(event)->ev));
+    }
+    void destroyEvent(void* event, const c10::DeviceIndex) const noexcept override {
+        if (event == nullptr) {
+            return;   // never recorded, so nothing was allocated
+        }
+        auto* e = static_cast<VortexEvent*>(event);
+        hipEventDestroy(e->ev);
+        delete e;
+    }
+    double elapsedTime(void* start, void* end,
+                       const c10::DeviceIndex) const override {
+        TORCH_CHECK(start != nullptr && end != nullptr,
+                    "torch_vortex: elapsedTime needs two recorded events");
+        float ms = 0.0f;
+        VX_CHECK(hipEventElapsedTime(&ms, static_cast<VortexEvent*>(start)->ev,
+                                     static_cast<VortexEvent*>(end)->ev));
+        return (double)ms;
+    }
 };
 
 } // namespace
@@ -476,8 +627,10 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
     VX_CHECK(hipMemcpy(self.data_ptr(), src_contig.data_ptr(), (size_t)bytes, kind));
     // hipMemcpy enqueues and then waits on its own completion event; the queue
     // is FIFO, so everything enqueued before it has retired by the time it
-    // returns. The allocator's fast path relies on knowing that.
-    note_barrier();
+    // returns. The allocator's fast path relies on knowing that. It drains the
+    // *default* queue only, which is why the fast path also tracks whether
+    // anything was launched on an explicit stream.
+    note_default_queue_barrier();
     switch (kind) {
         case hipMemcpyHostToDevice: g_stats.h2d_bytes += (uint64_t)bytes; break;
         case hipMemcpyDeviceToHost: g_stats.d2h_bytes += (uint64_t)bytes; break;
@@ -1052,7 +1205,7 @@ std::map<std::string, int64_t> arg_sizes_impl() {
 // had to agree about what synchronising means.
 void device_synchronize_impl() {
     VX_CHECK(hipDeviceSynchronize());
-    note_barrier();
+    note_device_barrier();
 }
 
 std::map<std::string, int64_t> device_properties_impl() {
