@@ -44,15 +44,19 @@ __all__ = ["stats", "reset_stats", "arg_sizes", "load"]
 
 _DRIVER_DEFAULT = "simx"
 
-_device_module_registered = False
-_methods_generated = False
+# Registration is process-global and torch refuses to repeat some of it, so the
+# idempotence guard cannot live in a module global: importlib.reload resets
+# those, which made a second import raise "device module of <class
+# 'torch.Tensor'> has already been registered with is_vortex". Stamp torch
+# instead, which survives a reload.
+_REGISTERED_FLAG = "_torch_vortex_registered"
+
 _ext = None
 
 
 def _register_device_module():
     """Register torch.vortex before anything can call a factory."""
-    global _device_module_registered
-    if _device_module_registered:
+    if getattr(torch, _REGISTERED_FLAG + "_module", False):
         return
     if not hasattr(torch, "_register_device_module"):
         raise RuntimeError(
@@ -61,14 +65,14 @@ def _register_device_module():
             "cannot be registered and torch.zeros(device='vortex') would "
             "fail before reaching the dispatcher")
     torch._register_device_module("vortex", _device_module())
+    setattr(torch, _REGISTERED_FLAG + "_module", True)
 
 
 def _register_backend_name():
     """Device rename plus the generated Tensor/Module convenience methods."""
-    global _methods_generated
-    torch.utils.rename_privateuse1_backend("vortex")
-    if _methods_generated:
+    if getattr(torch, _REGISTERED_FLAG, False):
         return
+    torch.utils.rename_privateuse1_backend("vortex")
     generate = getattr(torch.utils, "generate_methods_for_privateuse1_backend",
                        None)
     if generate is None:
@@ -80,7 +84,7 @@ def _register_backend_name():
             "torch_vortex: torch.utils.generate_methods_for_privateuse1_backend "
             "is unavailable on torch %s" % torch.__version__)
     generate()
-    _methods_generated = True
+    setattr(torch, _REGISTERED_FLAG, True)
 
 
 def _device_module():

@@ -200,8 +200,15 @@ hipError_t hipDeviceGet(hipDevice_t* device, int ordinal) {
 
 hipError_t hipDeviceSynchronize(void) {
     if (!g_device.initialized) return RET(hipErrorNotInitialized);
-    // vx_queue_flush drains all queues of the device.
-    return RET_VX(vx_queue_flush(default_queue()));
+    // vx_queue_finish, not vx_queue_flush: flush only wakes the worker so it
+    // notices newly queued commands, it does not wait for anything. Mapping
+    // synchronize onto it made hipDeviceSynchronize return success having
+    // waited for nothing, which every caller above reads as "results are
+    // ready". The barrier is an event enqueued behind the pending work.
+    //
+    // VX_TIMEOUT_INFINITE, not 0: a zero timeout is a poll (wait_for(0ns)),
+    // not "wait forever" -- Event::wait_value returns VX_ERR_TIMEOUT at once.
+    return RET_VX(vx_queue_finish(default_queue(), VX_TIMEOUT_INFINITE));
 }
 
 hipError_t hipDeviceReset(void) {
@@ -475,7 +482,10 @@ hipError_t hipStreamCreate(hipStream_t* stream) {
 hipError_t hipStreamDestroy(hipStream_t stream) {
     if (!stream) return RET(hipErrorInvalidResourceHandle);
     auto* s = (StreamState*)stream;
-    vx_result_t r = vx_queue_flush(s->q);
+    // Finish before releasing: the worker thread runs the queued work against
+    // this queue, so releasing it under an in-flight command is a
+    // use-after-free rather than a lost stream.
+    vx_result_t r = vx_queue_finish(s->q, VX_TIMEOUT_INFINITE);
     if (r != VX_SUCCESS) return RET_VX(r);
     r = vx_queue_release(s->q);
     delete s;
@@ -484,7 +494,8 @@ hipError_t hipStreamDestroy(hipStream_t stream) {
 
 hipError_t hipStreamSynchronize(hipStream_t stream) {
     if (!g_device.initialized) return RET(hipErrorNotInitialized);
-    return RET_VX(vx_queue_flush(stream_queue(stream)));
+    // See hipDeviceSynchronize: flush is not a barrier, finish is.
+    return RET_VX(vx_queue_finish(stream_queue(stream), VX_TIMEOUT_INFINITE));
 }
 
 hipError_t hipStreamWaitEvent(hipStream_t stream, hipEvent_t event) {

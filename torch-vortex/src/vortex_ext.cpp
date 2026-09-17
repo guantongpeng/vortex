@@ -924,6 +924,27 @@ void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
     // at a fixed base address, so separate images would overlap. `dnn_path` is
     // accepted for call compatibility but ignored.
     (void)dnn_path;
+
+    // Idempotent for the same image, loud for a different one.
+    //
+    // Re-importing the Python package (importlib.reload resets its globals)
+    // used to call this again, and a second hipModuleLoad of the same image
+    // fails with "address range overlaps with existing allocation" -- the
+    // process-global registration had already happened, so the correct answer
+    // is to do nothing. Loading a *different* image into the same process is
+    // the multi-module problem (W2.4 of docs/mydocs/pytorch_plan.md): the
+    // kernels were resolved from the first image, so pretending to switch
+    // would silently run the wrong code.
+    static std::string loaded_path;
+    if (!loaded_path.empty()) {
+        TORCH_CHECK(loaded_path == vxbin_path,
+                    "torch_vortex: this process already loaded the kernel "
+                    "image ", loaded_path, ", so it cannot also load ",
+                    vxbin_path, ". Two images in one process is W2.4 of "
+                    "docs/mydocs/pytorch_plan.md; until then load one.");
+        return;
+    }
+
     c10::SetAllocator(c10::DeviceType::PrivateUse1, &g_vortex_allocator);
     VX_CHECK(hipInit(0));
 
@@ -939,6 +960,7 @@ void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
     VX_CHECK(hipModuleGetFunction(&h_##name, g_ops_module, #name));
     TORCH_KERNEL_TABLE(TORCH_KERNEL_RESOLVE)
 #undef TORCH_KERNEL_RESOLVE
+    loaded_path = vxbin_path;
 }
 
 // The argument-block sizes this extension was compiled with, keyed by kernel
