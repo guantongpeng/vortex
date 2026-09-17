@@ -23,10 +23,16 @@
 
 #include <torch/extension.h>
 
+#include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
 
 #include <c10/core/Allocator.h>
 #include <ATen/EmptyTensor.h>
+#include <ATen/ops/view_native.h>
 #include <c10/core/Device.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 
@@ -34,12 +40,107 @@ extern "C" {
 #include <hip/hip_runtime_api.h>
 }
 
+// The single definition of every kernel argument block, shared with the device
+// compiler. Never declare an argument struct in this file.
+#include "torch_kernel_args.h"
+
 #define VX_CHECK(expr)                                                        \
     do {                                                                      \
         hipError_t _e = (expr);                                               \
         TORCH_CHECK(_e == hipSuccess, "torch_vortex: " #expr " failed: ",     \
                     hipGetErrorString(_e));                                   \
     } while (0)
+
+// ---------------------------------------------------------------------------
+// Counters
+// ---------------------------------------------------------------------------
+//
+// The backend's central claim is that a vortex tensor's work happens on the
+// device. That is only checkable if the host side reports what it did, so
+// every launch, transfer, allocation and blocking sync is counted here and
+// exposed as torch_vortex.stats(). Process-global and deliberately not
+// thread-safe: these are diagnostics for single-threaded tests, not a
+// profiler (W7.1 of docs/mydocs/pytorch_plan.md owns that).
+
+namespace {
+
+struct VortexStats {
+    std::atomic<uint64_t> launches{0};
+    std::atomic<uint64_t> skipped_launches{0};
+    std::atomic<uint64_t> h2d_bytes{0};
+    std::atomic<uint64_t> d2h_bytes{0};
+    std::atomic<uint64_t> d2d_bytes{0};
+    std::atomic<uint64_t> allocations{0};
+    std::atomic<uint64_t> frees{0};
+    std::atomic<uint64_t> blocking_syncs{0};
+    std::atomic<uint64_t> host_numeric_ops{0};
+};
+
+VortexStats g_stats;
+
+std::map<std::string, int64_t> stats_snapshot() {
+    return {
+        {"launches", (int64_t)g_stats.launches.load()},
+        {"skipped_launches", (int64_t)g_stats.skipped_launches.load()},
+        {"h2d_bytes", (int64_t)g_stats.h2d_bytes.load()},
+        {"d2h_bytes", (int64_t)g_stats.d2h_bytes.load()},
+        {"d2d_bytes", (int64_t)g_stats.d2d_bytes.load()},
+        {"allocations", (int64_t)g_stats.allocations.load()},
+        {"frees", (int64_t)g_stats.frees.load()},
+        {"blocking_syncs", (int64_t)g_stats.blocking_syncs.load()},
+        {"host_numeric_ops", (int64_t)g_stats.host_numeric_ops.load()},
+    };
+}
+
+void stats_reset() {
+    g_stats.launches = 0;
+    g_stats.skipped_launches = 0;
+    g_stats.h2d_bytes = 0;
+    g_stats.d2h_bytes = 0;
+    g_stats.d2d_bytes = 0;
+    g_stats.allocations = 0;
+    g_stats.frees = 0;
+    g_stats.blocking_syncs = 0;
+    g_stats.host_numeric_ops = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Launch
+// ---------------------------------------------------------------------------
+
+// The one place a kernel is launched. It takes the argument block size from
+// the host compiler's sizeof via HIP_LAUNCH_PARAM_BUFFER_SIZE rather than
+// letting the runtime read args_size out of the image metadata, so a stale or
+// hand-edited metadata file can no longer make the runtime copy the wrong
+// number of bytes off this stack frame (which is what a 104-byte conv record
+// for an 88-byte struct used to do).
+//
+// A zero grid dimension means "nothing to do": no launch is issued and the
+// skip is counted, rather than enqueueing a zero-CTA kernel whose output is
+// left uninitialised.
+template <typename Args>
+void launch(hipFunction_t f, const Args& args, uint32_t gx, uint32_t gy = 1,
+            uint32_t gz = 1, uint32_t bx = 4, uint32_t lmem = 0) {
+    static_assert(std::is_standard_layout<Args>::value,
+                  "argument blocks must be standard layout");
+    if (gx == 0 || gy == 0 || gz == 0) {
+        ++g_stats.skipped_launches;
+        return;
+    }
+    void* extra[] = {
+        HIP_LAUNCH_PARAM_BUFFER_POINTER, const_cast<Args*>(&args),
+        HIP_LAUNCH_PARAM_BUFFER_SIZE, (void*)(uintptr_t)sizeof(Args),
+        (void*)0,
+    };
+    VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem, nullptr,
+                                   nullptr, extra));
+    ++g_stats.launches;
+}
+
+// The previous calling convention (a single pointer in kernelParams, with the
+// size read from image metadata) is deliberately not used anywhere any more.
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Allocator: device memory via hipMalloc (vx_buffer_create under it)
@@ -54,6 +155,7 @@ struct VortexAllocator final : public c10::Allocator {
         void* p = nullptr;
         if (n != 0) {
             VX_CHECK(hipMalloc(&p, n));
+            ++g_stats.allocations;
         }
         return c10::DataPtr(p, p, &vortex_free,
                             c10::Device(c10::DeviceType::PrivateUse1, 0));
@@ -62,12 +164,14 @@ struct VortexAllocator final : public c10::Allocator {
         // Device-to-device byte copy through the host-visible buffer
         // mapping (same-address-space model on current backends).
         VX_CHECK(hipMemcpy(dest, src, count, hipMemcpyDeviceToDevice));
+        g_stats.d2d_bytes += count;
     }
 };
 
 void vortex_free(void* ctx) {
     if (ctx != nullptr) {
         hipFree(ctx);
+        ++g_stats.frees;
     }
 }
 
@@ -134,70 +238,38 @@ C10_REGISTER_GUARD_IMPL(PrivateUse1, VortexGuardImpl);
 
 namespace {
 
-struct BinaryArgs {   // mirrors kernels/ops.hip binary_args_t (host side)
-    uint64_t dst;
-    uint64_t a;
-    uint64_t b;
-    uint32_t n;
-    uint32_t pad;
-};
-struct FillArgs {
-    uint64_t dst;
-    uint32_t n;
-    float value;
-    uint32_t pad;
-};
+// The argument blocks (binary_args_t, fill_args_t, conv_args_t, ...) are
+// defined once in kernels/torch_kernel_args.h and shared verbatim with the
+// device compiler. Never declare one locally in this file.
 
 hipModule_t g_ops_module = nullptr;
-hipFunction_t g_add = nullptr;
-hipFunction_t g_mul = nullptr;
-hipFunction_t g_fill = nullptr;
-hipFunction_t g_relu = nullptr;
 
-// dnn image (plan P5-02): conv2d / pooling / bn / mm / bias add
-struct ConvArgs {
-    uint64_t in, weight, bias, out;
-    uint32_t n, ci, hi, wi, co, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, has_bias;
-};
-struct PoolArgs {
-    uint64_t in, out;
-    uint32_t n, c, hi, wi, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, op;
-};
-struct BnArgs {
-    uint64_t in, mean, rstd, weight, bias, out;
-    uint32_t total, c;
-};
-struct MmArgs {
-    uint64_t a, b, out;
-    uint32_t m, n, k;
-    uint32_t transb;
-};
-struct BiasArgs {
-    uint64_t out, bias;
-    uint32_t m, n;
-};
+// One handle per row of TORCH_KERNEL_TABLE, in table order. Adding a kernel
+// means adding a row in kernels/torch_kernel_args.h: load_ops resolves it and
+// the arg-size cross-check covers it automatically.
+#define TORCH_KERNEL_DECLARE(name, type, mbx, lmem) hipFunction_t h_##name = nullptr;
+TORCH_KERNEL_TABLE(TORCH_KERNEL_DECLARE)
+#undef TORCH_KERNEL_DECLARE
 
-hipModule_t g_dnn_module = nullptr;
-hipFunction_t g_conv2d = nullptr;
-hipFunction_t g_pool2d = nullptr;
-hipFunction_t g_bn = nullptr;
-hipFunction_t g_mm = nullptr;
-hipFunction_t g_bias_add = nullptr;
+// Filled in by load_ops. The conv kernel stages one filter's weights in LMEM,
+// so this is the ceiling on ci*kh*kw*4.
+int64_t g_shared_mem_per_block = 0;
 
 void launch_binary(hipFunction_t f, uint64_t dst, uint64_t a, uint64_t b,
                    uint32_t n) {
-    BinaryArgs args = {dst, a, b, n, 0};
-    void* params[1] = {&args};
-    uint32_t blocks = (n + 3) / 4;
-    VX_CHECK(hipModuleLaunchKernel(f, blocks, 1, 1, 4, 1, 1, 0, nullptr,
-                                   params, nullptr));
+    binary_args_t args = {dst, a, b, n, 0};
+    launch(f, args, (n + 3) / 4);
 }
 
 void check_vortex_f32(const torch::Tensor& t, const char* what) {
+    // Naming the offending device matters here: `x + 1.0` reaches this with a
+    // 0-dim CPU tensor (PyTorch wraps the scalar), and "must be a vortex
+    // tensor" reads like a bug in the caller rather than a v1 boundary.
     TORCH_CHECK(t.device().type() == c10::DeviceType::PrivateUse1,
-                "torch_vortex: ", what, " must be a vortex tensor");
+                "torch_vortex: ", what, " is on ", t.device(), " rather than ",
+                "the vortex device; scalar operands (which PyTorch wraps as ",
+                "0-dim CPU tensors) and cross-device operands are unsupported ",
+                "in v1 -- see W3.2 in docs/mydocs/pytorch_plan.md");
     TORCH_CHECK(t.scalar_type() == at::kFloat,
                 "torch_vortex: ", what, " must be float32 in v1, got ",
                 t.scalar_type());
@@ -224,6 +296,21 @@ static std::vector<int64_t> sym_to_vec(c10::SymIntArrayRef syms) {
     return out;
 }
 
+// A device argument naming vortex:1 or higher must be refused. It used to be
+// silently accepted and answered with a vortex:0 tensor.
+static void check_vortex_device_arg(const std::optional<c10::Device>& d,
+                                    const char* what) {
+    if (!d.has_value()) {
+        return;
+    }
+    TORCH_CHECK(d->type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: wrong device in ", what, ": ", *d);
+    // index() is -1 when the caller wrote device="vortex" with no index
+    TORCH_CHECK(d->index() == -1 || d->index() == 0,
+                "torch_vortex: ", what, ": only device 0 exists, got \"",
+                d->str(), "\"");
+}
+
 static torch::Tensor empty_impl(c10::SymIntArrayRef sym_size,
                                 std::optional<c10::ScalarType> dtype_opt,
                                 std::optional<c10::Layout> layout_opt,
@@ -232,9 +319,7 @@ static torch::Tensor empty_impl(c10::SymIntArrayRef sym_size,
                                 std::optional<c10::MemoryFormat> memory_format_opt) {
     TORCH_CHECK(!layout_opt.has_value() || *layout_opt == c10::Layout::Strided,
                 "torch_vortex: strided layout only");
-    TORCH_CHECK(!device_opt.has_value() ||
-                    device_opt->type() == c10::DeviceType::PrivateUse1,
-                "torch_vortex: wrong device in empty()");
+    check_vortex_device_arg(device_opt, "empty");
     auto dtype = dtype_opt.value_or(at::kFloat);
     auto sizes = sym_to_vec(sym_size);
     auto base = at::detail::empty_generic(
@@ -251,9 +336,7 @@ static torch::Tensor empty_strided_impl(
     std::optional<bool> pin_memory_opt) {
     TORCH_CHECK(!layout_opt.has_value() || *layout_opt == c10::Layout::Strided,
                 "torch_vortex: strided layout only");
-    TORCH_CHECK(!device_opt.has_value() ||
-                    device_opt->type() == c10::DeviceType::PrivateUse1,
-                "torch_vortex: wrong device in empty_strided()");
+    check_vortex_device_arg(device_opt, "empty_strided");
     auto dtype = dtype_opt.value_or(at::kFloat);
     auto sizes = sym_to_vec(sym_size);
     auto strides = sym_to_vec(sym_stride);
@@ -263,16 +346,74 @@ static torch::Tensor empty_strided_impl(
     return torch::Tensor(std::move(base));
 }
 
+// copy_: same dtype, same shape, contiguous destination, offset 0, distinct
+// storage. Everything else is refused by name.
+//
+// The previous version memcpy'd self.nbytes() bytes whatever the source was:
+// a dtype change became a bit-pattern copy, a smaller source was over-read
+// (a host out-of-bounds read on H2D), and a non-contiguous tensor copied
+// storage order rather than its logical contents.
 static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
                                 bool non_blocking) {
-    const auto kind = self.is_privateuseone()
-                          ? (src.is_cpu() ? hipMemcpyHostToDevice
-                                          : hipMemcpyDeviceToDevice)
-                          : hipMemcpyDeviceToHost;
-    const int64_t bytes =
-        self.nbytes() ? self.nbytes() : (int64_t)self.numel() * self.element_size();
-    if (bytes != 0) {
-        VX_CHECK(hipMemcpy(self.data_ptr(), src.data_ptr(), (size_t)bytes, kind));
+    const bool self_dev = self.is_privateuseone();
+    const bool src_dev = src.is_privateuseone();
+    TORCH_CHECK(self_dev || src_dev,
+                "torch_vortex: copy_ reached the vortex backend with neither "
+                "side on the vortex device");
+
+    if (self.is_same(src)) {
+        return self;  // self-copy is a no-op, and hipMemcpy would be UB
+    }
+
+    // The direction is a property of the *pair*, not of self. The old ternary
+    // labelled (CPU, vortex) as DeviceToHost; it happened to be right only
+    // because that was the case it was ever reached in.
+    hipMemcpyKind kind;
+    if (self_dev && src_dev) {
+        kind = hipMemcpyDeviceToDevice;
+    } else if (self_dev) {
+        kind = hipMemcpyHostToDevice;
+    } else {
+        kind = hipMemcpyDeviceToHost;
+    }
+
+    TORCH_CHECK(self.scalar_type() == src.scalar_type(),
+                "torch_vortex: copy_ does not convert dtypes yet (",
+                src.scalar_type(), " -> ", self.scalar_type(),
+                "); casting is W3.2/W4.1 in docs/mydocs/pytorch_plan.md");
+    TORCH_CHECK(self.sizes() == src.sizes(), "torch_vortex: copy_ shape mismatch: ",
+                self.sizes(), " <- ", src.sizes());
+    TORCH_CHECK(self.is_contiguous(),
+                "torch_vortex: copy_ into a non-contiguous vortex tensor is "
+                "unsupported in v1 (strided destinations are W3.2)");
+    TORCH_CHECK(self.storage_offset() == 0,
+                "torch_vortex: copy_ into a vortex tensor at storage_offset ",
+                self.storage_offset(), " is unsupported in v1");
+
+    // A non-contiguous CPU source is cheap to fix on the host and is a
+    // reasonable thing to write (t.t().to("vortex")), so materialise it rather
+    // than either refusing or silently copying storage order.
+    torch::Tensor src_contig = src;
+    if (!src_dev && !src.is_contiguous()) {
+        src_contig = src.contiguous();
+        ++g_stats.host_numeric_ops;
+    }
+
+    const int64_t bytes = self.numel() * self.element_size();
+    if (bytes == 0) {
+        return self;
+    }
+    if (non_blocking) {
+        // Honest rather than silent: hipMemcpy enqueues and then waits on its
+        // own completion event, so this call blocks whatever the flag says.
+        // Counted so a model that depends on overlap is visible.
+        ++g_stats.blocking_syncs;
+    }
+    VX_CHECK(hipMemcpy(self.data_ptr(), src_contig.data_ptr(), (size_t)bytes, kind));
+    switch (kind) {
+        case hipMemcpyHostToDevice: g_stats.h2d_bytes += (uint64_t)bytes; break;
+        case hipMemcpyDeviceToHost: g_stats.d2h_bytes += (uint64_t)bytes; break;
+        default: g_stats.d2d_bytes += (uint64_t)bytes; break;
     }
     return self;
 }
@@ -288,12 +429,9 @@ static torch::Tensor copy_from_impl(const torch::Tensor& self,
 
 static torch::Tensor& fill__impl(torch::Tensor& self, const c10::Scalar& value) {
     check_vortex_f32(self, "fill_");
-    FillArgs args = {(uint64_t)(uintptr_t)self.data_ptr(),
-                     (uint32_t)self.numel(), value.to<float>(), 0};
-    void* params[1] = {&args};
-    uint32_t n = (uint32_t)self.numel();
-    VX_CHECK(hipModuleLaunchKernel(g_fill, (n + 3) / 4, 1, 1, 4, 1, 1, 0,
-                                   nullptr, params, nullptr));
+    fill_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
+                        (uint32_t)self.numel(), value.to<float>(), 0};
+    launch(h_fill_kernel, args, (uint32_t)((self.numel() + 3) / 4));
     return self;
 }
 
@@ -301,30 +439,45 @@ static torch::Tensor& zero__impl(torch::Tensor& self) {
     return fill__impl(self, c10::Scalar(0.0));
 }
 
-// view on contiguous tensors: pure metadata (new sizes, fresh TensorImpl
-// over the same storage). Offset-0 views only — enough for flatten-style
-// reshapes; strided/offset views stay unsupported loudly.
+// view must share storage with its input and reject whatever ATen rejects.
+//
+// Delegating to ATen's own implementation gets -1 resolution, the element
+// count check, computeStride for non-contiguous inputs, the storage offset and
+// the shared version counter. The previous hand-built TensorImpl got none of
+// them: view(-1) produced a tensor with a negative size, view(1000) on a
+// 4-element tensor was accepted, and a view of an offset tensor silently read
+// from the storage base. `reshape` is deliberately not registered — ATen's
+// CompositeImplicitAutograd kernel already implements view-or-copy, which is
+// exactly the distinction that matters.
 static torch::Tensor view_impl(const torch::Tensor& self,
                                c10::SymIntArrayRef sym_sizes) {
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
                 "torch_vortex: view on non-vortex tensor");
-    TORCH_CHECK(self.is_contiguous(),
-                "torch_vortex: view on non-contiguous tensor unsupported in v1");
-    auto sizes = sym_to_vec(sym_sizes);
-    auto impl = c10::make_intrusive<c10::TensorImpl>(
-        c10::Storage(self.storage()), self.key_set(), self.dtype());
-    impl->set_sizes_contiguous(c10::IntArrayRef(sizes));
-    return torch::Tensor(std::move(impl));
+    auto out = at::native::view_symint(self, sym_sizes);
+    TORCH_CHECK(out.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: view produced a tensor on ", out.device());
+    return out;
 }
 
+// relu, non-inplace. PyTorch's relu is max(x, 0) with two properties a naive
+// `x > 0 ? x : 0` gets wrong: NaN propagates, and -0.0 stays -0.0. It also
+// must not touch its input — this used to run the in-place kernel on self and
+// return self, so a residual branch sharing the input was silently modified.
 static torch::Tensor relu_impl(const torch::Tensor& self) {
     check_vortex_f32(self, "relu");
-    FillArgs args = {(uint64_t)(uintptr_t)self.data_ptr(),
-                     (uint32_t)self.numel(), 0.0f, 0};
-    void* params[1] = {&args};
-    uint32_t n = (uint32_t)self.numel();
-    VX_CHECK(hipModuleLaunchKernel(g_relu, (n + 3) / 4, 1, 1, 4, 1, 1, 0,
-                                   nullptr, params, nullptr));
+    auto out = torch::empty_like(self);
+    unary_args_t args = {(uint64_t)(uintptr_t)out.data_ptr(),
+                         (uint64_t)(uintptr_t)self.data_ptr(),
+                         (uint32_t)self.numel(), 0};
+    launch(h_relu_out_kernel, args, (uint32_t)((self.numel() + 3) / 4));
+    return out;
+}
+
+static torch::Tensor& relu__impl(torch::Tensor& self) {
+    check_vortex_f32(self, "relu_");
+    fill_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
+                        (uint32_t)self.numel(), 0.0f, 0};
+    launch(h_relu_kernel, args, (uint32_t)((self.numel() + 3) / 4));
     return self;
 }
 
@@ -336,7 +489,7 @@ static torch::Tensor add_impl(const torch::Tensor& a, const torch::Tensor& b,
                 "torch_vortex: add alpha != 1 unsupported in v1");
     TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: add needs equal shapes");
     auto out = torch::empty_like(a);
-    launch_binary(g_add, (uint64_t)(uintptr_t)out.data_ptr(),
+    launch_binary(h_add_kernel, (uint64_t)(uintptr_t)out.data_ptr(),
                   (uint64_t)(uintptr_t)a.data_ptr(),
                   (uint64_t)(uintptr_t)b.data_ptr(), (uint32_t)a.numel());
     return out;
@@ -347,7 +500,7 @@ static torch::Tensor mul_impl(const torch::Tensor& a, const torch::Tensor& b) {
     check_vortex_f32(b, "mul.b");
     TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: mul needs equal shapes");
     auto out = torch::empty_like(a);
-    launch_binary(g_mul, (uint64_t)(uintptr_t)out.data_ptr(),
+    launch_binary(h_mul_kernel, (uint64_t)(uintptr_t)out.data_ptr(),
                   (uint64_t)(uintptr_t)a.data_ptr(),
                   (uint64_t)(uintptr_t)b.data_ptr(), (uint32_t)a.numel());
     return out;
@@ -362,24 +515,52 @@ static torch::Tensor mul_impl(const torch::Tensor& a, const torch::Tensor& b) {
 static void check_cnn_f32(const torch::Tensor& t, const char* what,
                           int64_t dims) {
     TORCH_CHECK(t.device().type() == c10::DeviceType::PrivateUse1,
-                "torch_vortex: ", what, " must be a vortex tensor");
+                "torch_vortex: ", what, " is on ", t.device(), " rather than ",
+                "the vortex device");
     TORCH_CHECK(t.scalar_type() == at::kFloat,
                 "torch_vortex: ", what, " must be float32 in v1");
     TORCH_CHECK(t.is_contiguous(), "torch_vortex: ", what, " must be contiguous");
     TORCH_CHECK(t.dim() == dims, "torch_vortex: ", what, " must be ", dims, "-D");
 }
 
-static void launch_conv(hipFunction_t f, uint64_t in, uint64_t w, uint64_t b,
-                        uint64_t out, uint32_t n, uint32_t ci, uint32_t hi,
-                        uint32_t wi, uint32_t co, uint32_t kh, uint32_t kw,
-                        uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw) {
-    const uint32_t ho = (hi + 2 * ph - kh) / sh + 1;
-    const uint32_t wo = (wi + 2 * pw - kw) / sw + 1;
-    ConvArgs args = {in, w, b, out, n, ci, hi, wi, co, ho, wo,
-                     kh, kw, ph, pw, sh, sw, b != 0};
-    void* params[1] = {&args};
-    VX_CHECK(hipModuleLaunchKernel(f, ho, co, n, 16, 1, 1,
-                                   ci * kh * kw * 4, nullptr, params, nullptr));
+// Output extent of a convolution/pooling window. Named after the argument so
+// the error says which one is wrong.
+//
+// The sign is the point: this used to be uint32_t arithmetic, so an input
+// smaller than the kernel wrapped around and produced a huge output size and
+// grid instead of an error. PyTorch floors, so a window that does not divide
+// evenly is legal and must not be rejected here.
+static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
+                          const char* what) {
+    TORCH_CHECK(k > 0, "torch_vortex: ", what, ": kernel must be > 0, got ", k);
+    TORCH_CHECK(stride > 0,
+                "torch_vortex: ", what, ": stride must be > 0, got ", stride);
+    TORCH_CHECK(pad >= 0,
+                "torch_vortex: ", what, ": padding must be >= 0, got ", pad);
+    TORCH_CHECK(in + 2 * pad >= k, "torch_vortex: ", what, ": input ", in,
+                " with padding ", pad, " is smaller than kernel ", k);
+    return (in + 2 * pad - k) / stride + 1;
+}
+
+// Dimensions and element counts travel through uint32_t fields in the argument
+// blocks; refuse anything that would be silently truncated.
+static uint32_t u32_dim(int64_t v, const char* what) {
+    TORCH_CHECK(v >= 0 && v <= (int64_t)UINT32_MAX,
+                "torch_vortex: ", what, " = ", v, " does not fit in uint32");
+    return (uint32_t)v;
+}
+
+static uint32_t u32_numel(const torch::Tensor& t, const char* what) {
+    TORCH_CHECK(t.numel() <= (int64_t)UINT32_MAX, "torch_vortex: ", what,
+                " has ", t.numel(), " elements, which does not fit in uint32");
+    return (uint32_t)t.numel();
+}
+
+static void launch_conv(const conv_args_t& args) {
+    // one CTA per (output row, output channel, sample); 16 threads per row;
+    // all of one filter's weights staged in LMEM
+    launch(h_tv_conv2d_kernel, args, args.ho, args.co, args.n, 16,
+           (uint32_t)(args.ci * args.kh * args.kw * 4));
 }
 
 static torch::Tensor convolution_impl(
@@ -396,21 +577,34 @@ static torch::Tensor convolution_impl(
     TORCH_CHECK(groups == 1, "torch_vortex: grouped conv unsupported in v1");
     for (auto d : dilation) TORCH_CHECK(d == 1, "torch_vortex: dilation must be 1");
     for (auto o : output_padding) TORCH_CHECK(o == 0, "torch_vortex: output_padding must be 0");
-    const uint32_t sh = stride.size() > 0 ? (uint32_t)stride[0] : 1;
-    const uint32_t sw = stride.size() > 1 ? (uint32_t)stride[1] : sh;
-    const uint32_t ph = padding.size() > 0 ? (uint32_t)padding[0] : 0;
-    const uint32_t pw = padding.size() > 1 ? (uint32_t)padding[1] : ph;
+    const int64_t sh = stride.size() > 0 ? stride[0] : 1;
+    const int64_t sw = stride.size() > 1 ? stride[1] : sh;
+    const int64_t ph = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pw = padding.size() > 1 ? padding[1] : ph;
 
     const auto& is = input.sizes();
     const auto& ws = weight.sizes();
-    const uint32_t co = (uint32_t)ws[0], ci = (uint32_t)ws[1];
-    const uint32_t kh = (uint32_t)ws[2], kw = (uint32_t)ws[3];
-    TORCH_CHECK((uint32_t)is[1] == ci, "torch_vortex: conv channel mismatch");
-    const uint32_t ho = ((uint32_t)is[2] + 2 * ph - kh) / sh + 1;
-    const uint32_t wo = ((uint32_t)is[3] + 2 * pw - kw) / sw + 1;
+    const int64_t co = ws[0], ci = ws[1];
+    const int64_t kh = ws[2], kw = ws[3];
+    TORCH_CHECK(is[1] == ci, "torch_vortex: conv channel mismatch");
+    const int64_t ho = window_out(is[2], kh, ph, sh, "conv height");
+    const int64_t wo = window_out(is[3], kw, pw, sw, "conv width");
 
-    auto out = torch::empty({is[0], (int64_t)co, (int64_t)ho, (int64_t)wo},
-                            input.options());
+    // One output channel stages all of its weights in LMEM at once. This is
+    // the real ceiling on a full-resolution ResNet stem (ci=512, 3x3, fp32
+    // needs 18 KiB against a 16 KiB default): shrinking the input image does
+    // not reduce it, so say so instead of hanging.
+    const int64_t lmem_needed = ci * kh * kw * 4;
+    if (g_shared_mem_per_block > 0) {
+        TORCH_CHECK(lmem_needed <= g_shared_mem_per_block, "torch_vortex: conv ",
+                    "needs ", lmem_needed, " bytes of local memory to stage one ",
+                    "filter (ci=", ci, " kh=", kh, " kw=", kw, " x 4 bytes), but ",
+                    "only ", g_shared_mem_per_block, " bytes are available. ",
+                    "Tile the weights across output channels; a smaller input ",
+                    "image does not reduce this.");
+    }
+
+    auto out = torch::empty({is[0], co, ho, wo}, input.options());
     uint64_t baddr = 0;
     // Composite layers pass None as an *undefined* tensor inside the
     // optional (still has_value) — treat undefined as absent.
@@ -419,10 +613,17 @@ static torch::Tensor convolution_impl(
         TORCH_CHECK(bias->numel() == co, "torch_vortex: bias size mismatch");
         baddr = (uint64_t)(uintptr_t)bias->data_ptr();
     }
-    launch_conv(g_conv2d, (uint64_t)(uintptr_t)input.data_ptr(),
-                (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
-                (uint64_t)(uintptr_t)out.data_ptr(), (uint32_t)is[0], ci,
-                (uint32_t)is[2], (uint32_t)is[3], co, kh, kw, ph, pw, sh, sw);
+    conv_args_t args = {(uint64_t)(uintptr_t)input.data_ptr(),
+                        (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
+                        (uint64_t)(uintptr_t)out.data_ptr(),
+                        u32_dim(is[0], "conv batch"), u32_dim(ci, "conv ci"),
+                        u32_dim(is[2], "conv hi"), u32_dim(is[3], "conv wi"),
+                        u32_dim(co, "conv co"), u32_dim(ho, "conv ho"),
+                        u32_dim(wo, "conv wo"), u32_dim(kh, "conv kh"),
+                        u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
+                        u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"),
+                        u32_dim(sw, "conv sw"), baddr != 0};
+    launch_conv(args);
     return out;
 }
 
@@ -431,22 +632,31 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
                                c10::IntArrayRef stride,
                                c10::IntArrayRef padding, uint32_t op) {
     check_cnn_f32(self, "pool.input", 4);
-    const uint32_t kh = (uint32_t)kernel_size[0], kw = (uint32_t)kernel_size[1];
-    const uint32_t sh = stride.size() > 0 ? (uint32_t)stride[0] : kh;
-    const uint32_t sw = stride.size() > 1 ? (uint32_t)stride[1] : sh;
-    const uint32_t ph = padding.size() > 0 ? (uint32_t)padding[0] : 0;
-    const uint32_t pw = padding.size() > 1 ? (uint32_t)padding[1] : ph;
+    const int64_t kh = kernel_size[0], kw = kernel_size[1];
+    const int64_t sh = stride.size() > 0 ? stride[0] : kh;
+    const int64_t sw = stride.size() > 1 ? stride[1] : sh;
+    const int64_t ph = padding.size() > 0 ? padding[0] : 0;
+    const int64_t pw = padding.size() > 1 ? padding[1] : ph;
     const auto& s = self.sizes();
-    const uint32_t ho = ((uint32_t)s[2] + 2 * ph - kh) / sh + 1;
-    const uint32_t wo = ((uint32_t)s[3] + 2 * pw - kw) / sw + 1;
-    auto out = torch::empty({s[0], s[1], (int64_t)ho, (int64_t)wo}, self.options());
-    PoolArgs args = {(uint64_t)(uintptr_t)self.data_ptr(),
-                     (uint64_t)(uintptr_t)out.data_ptr(),
-                     (uint32_t)s[0], (uint32_t)s[1], (uint32_t)s[2], (uint32_t)s[3],
-                     ho, wo, kh, kw, ph, pw, sh, sw, op};
-    void* params[1] = {&args};
-    VX_CHECK(hipModuleLaunchKernel(g_pool2d, ho, (uint32_t)s[1], (uint32_t)s[0],
-                                   16, 1, 1, 0, nullptr, params, nullptr));
+    const int64_t ho = window_out(s[2], kh, ph, sh, "pool height");
+    const int64_t wo = window_out(s[3], kw, pw, sw, "pool width");
+    auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
+    pool_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
+                        (uint64_t)(uintptr_t)out.data_ptr(),
+                        u32_dim(s[0], "pool batch"),
+                        u32_dim(s[1], "pool channels"),
+                        u32_dim(s[2], "pool input height"),
+                        u32_dim(s[3], "pool input width"),
+                        u32_dim(ho, "pool output height"),
+                        u32_dim(wo, "pool output width"),
+                        u32_dim(kh, "pool kernel height"),
+                        u32_dim(kw, "pool kernel width"),
+                        u32_dim(ph, "pool padding height"),
+                        u32_dim(pw, "pool padding width"),
+                        u32_dim(sh, "pool stride height"),
+                        u32_dim(sw, "pool stride width"), op};
+    // one CTA per (output row, channel, sample)
+    launch(h_tv_pool2d_kernel, args, args.ho, args.c, args.n, 16);
     return out;
 }
 
@@ -478,99 +688,169 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
     const std::optional<torch::Tensor>& running_mean,
     const std::optional<torch::Tensor>& running_var, bool training,
     double momentum, double eps) {
-    TORCH_CHECK(!training, "torch_vortex: batch_norm training unsupported (inference only)");
+    TORCH_CHECK(!training, "torch_vortex: batch_norm training is unsupported "
+                "(inference only); training is W8.1 in docs/mydocs/pytorch_plan.md");
     check_cnn_f32(input, "bn.input", 4);
     auto is_def = [](const std::optional<torch::Tensor>& t) {
         return t.has_value() && t->defined();
     };
-    TORCH_CHECK(is_def(weight) && is_def(bias) && is_def(running_mean) &&
-                    is_def(running_var),
-                "torch_vortex: bn needs weight/bias/running stats (inference)");
-    const auto c = input.size(1);
-    TORCH_CHECK(weight->numel() == c && bias->numel() == c &&
-                running_mean->numel() == c && running_var->numel() == c,
-                "torch_vortex: bn parameter size mismatch");
+    TORCH_CHECK(is_def(running_mean) && is_def(running_var),
+                "torch_vortex: bn in inference mode needs running_mean and "
+                "running_var");
+    const auto& s = input.sizes();
+    const int64_t c = s[1];
+    const int64_t hw = s[2] * s[3];
+    const int64_t total = input.numel();
+    TORCH_CHECK(total == s[0] * c * hw, "torch_vortex: bn input is not NCHW");
 
-    // rstd = 1/sqrt(var + eps) computed on host into a device scratch.
-    std::vector<float> varv((size_t)c);
-    VX_CHECK(hipMemcpy(varv.data(), running_var->data_ptr(), varv.size() * 4,
-                       hipMemcpyDeviceToHost));
-    std::vector<float> rstdv((size_t)c);
-    for (size_t i = 0; i < varv.size(); ++i) rstdv[i] = 1.0f / std::sqrt(varv[i] + (float)eps);
-    void* rstd_dev = nullptr;
-    VX_CHECK(hipMalloc(&rstd_dev, varv.size() * 4));
-    VX_CHECK(hipMemcpy(rstd_dev, rstdv.data(), varv.size() * 4, hipMemcpyHostToDevice));
+    // Optional affine: both must be present or both absent.
+    const bool has_affine = is_def(weight) || is_def(bias);
+    TORCH_CHECK(is_def(weight) == is_def(bias),
+                "torch_vortex: bn needs weight and bias together or not at all");
+    auto check_param = [&](const std::optional<torch::Tensor>& t,
+                           const char* what) {
+        TORCH_CHECK(t->device().type() == c10::DeviceType::PrivateUse1,
+                    "torch_vortex: bn ", what, " is on ", t->device(),
+                    " rather than the vortex device");
+        TORCH_CHECK(t->scalar_type() == at::kFloat,
+                    "torch_vortex: bn ", what, " must be float32");
+        TORCH_CHECK(t->is_contiguous(), "torch_vortex: bn ", what,
+                    " must be contiguous");
+        TORCH_CHECK(t->numel() == c, "torch_vortex: bn ", what, " has ",
+                    t->numel(), " elements but the input has ", c, " channels");
+    };
+    check_param(running_mean, "running_mean");
+    check_param(running_var, "running_var");
+    if (has_affine) {
+        check_param(weight, "weight");
+        check_param(bias, "bias");
+    }
 
     auto out = torch::empty_like(input);
-    BnArgs args = {(uint64_t)(uintptr_t)input.data_ptr(),
-                   (uint64_t)(uintptr_t)running_mean->data_ptr(),
-                   (uint64_t)(uintptr_t)rstd_dev,
-                   (uint64_t)(uintptr_t)weight->data_ptr(),
-                   (uint64_t)(uintptr_t)bias->data_ptr(),
-                   (uint64_t)(uintptr_t)out.data_ptr(),
-                   (uint32_t)input.numel(), (uint32_t)c};
-    void* params[1] = {&args};
-    uint32_t total = (uint32_t)input.numel();
-    VX_CHECK(hipModuleLaunchKernel(g_bn, (total + 3) / 4, 1, 1, 4, 1, 1, 0,
-                                   nullptr, params, nullptr));
-    hipFree(rstd_dev);
+    bn_args_t args = {(uint64_t)(uintptr_t)input.data_ptr(),
+                      (uint64_t)(uintptr_t)running_mean->data_ptr(),
+                      (uint64_t)(uintptr_t)running_var->data_ptr(),
+                      has_affine ? (uint64_t)(uintptr_t)weight->data_ptr() : 0,
+                      has_affine ? (uint64_t)(uintptr_t)bias->data_ptr() : 0,
+                      (uint64_t)(uintptr_t)out.data_ptr(),
+                      u32_numel(input, "bn input"), u32_dim(c, "bn channels"),
+                      u32_dim(hw, "bn spatial span"), (float)eps,
+                      has_affine ? 1u : 0u};
+    launch(h_tv_bn_affine_kernel, args, (uint32_t)((total + 3) / 4));
+    // rstd is computed inside the kernel from running_var, so this path makes
+    // no host round-trip and allocates no scratch buffer. The previous version
+    // copied running_var to the host, took a sqrt, copied it back, and freed
+    // the scratch immediately after an asynchronous launch.
     auto empty_aux = torch::empty({0}, input.options());
     return std::make_tuple(out, empty_aux, empty_aux);
 }
 
-static torch::Tensor mm_impl(const torch::Tensor& a, const torch::Tensor& b,
-                             uint32_t transb) {
-    check_cnn_f32(a, "mm.a", 2);
-    check_cnn_f32(b, "mm.b", 2);
-    TORCH_CHECK(a.size(1) == b.size(transb ? 1 : 0),
-                "torch_vortex: mm shape mismatch");
-    auto out = torch::empty({a.size(0), b.size(transb ? 0 : 1)}, a.options());
-    MmArgs args = {(uint64_t)(uintptr_t)a.data_ptr(),
-                   (uint64_t)(uintptr_t)b.data_ptr(),
-                   (uint64_t)(uintptr_t)out.data_ptr(),
-                   (uint32_t)a.size(0), (uint32_t)out.size(1), (uint32_t)a.size(1),
-                   transb};
-    void* params[1] = {&args};
-    VX_CHECK(hipModuleLaunchKernel(g_mm, (uint32_t)((out.size(1) + 15) / 16),
-                                   (uint32_t)((a.size(0) + 15) / 16), 1, 16, 1,
-                                   1, 1024, nullptr, params, nullptr));
+// The single matmul launcher. mm, linear and addmm are thin wrappers with
+// different epilogues; having one implementation is what stops them from
+// disagreeing about which axis is contracted.
+static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b,
+                               uint32_t transb, const torch::Tensor* self,
+                               uint32_t self_kind, float alpha, float beta) {
+    check_cnn_f32(a, "mm.mat1", 2);
+    check_cnn_f32(b, "mm.mat2", 2);
+    const int64_t k = a.size(1);
+    const int64_t k_other = b.size(transb ? 1 : 0);
+    TORCH_CHECK(k == k_other, "torch_vortex: matmul contraction mismatch: mat1 ",
+                "is (", a.size(0), ", ", k, ") and mat2 is (", b.size(0), ", ",
+                b.size(1), "), so the inner dimensions differ");
+    const int64_t m = a.size(0), n = b.size(transb ? 0 : 1);
+    auto out = torch::empty({m, n}, a.options());
+    mm_args_t args = {(uint64_t)(uintptr_t)a.data_ptr(),
+                      (uint64_t)(uintptr_t)b.data_ptr(),
+                      (uint64_t)(uintptr_t)out.data_ptr(),
+                      u32_dim(m, "matmul m"), u32_dim(n, "matmul n"),
+                      u32_dim(k, "matmul k"), transb};
+    // K == 0 is legal and needs no special case: the accumulation loop does
+    // not execute and the kernel writes zeros.
+    launch(h_tv_mm_kernel, args, (uint32_t)((n + 15) / 16),
+           (uint32_t)((m + 15) / 16), 1, 16, 1024);
+
+    // torch.addmm's alpha/beta/self scaling is a separate in-place pass rather
+    // than an epilogue in tv_mm_kernel: that branch inside the matmul kernel
+    // makes VOLT accumulate wrongly for any n that is not a multiple of 16.
+    // See tv_mm_epilogue_kernel and W5.4 of docs/mydocs/pytorch_plan.md.
+    if ((self_kind != 0 || alpha != 1.0f) && out.numel() != 0) {
+        mm_epilogue_args_t ep = {
+            (uint64_t)(uintptr_t)out.data_ptr(),
+            self ? (uint64_t)(uintptr_t)self->data_ptr() : 0,
+            u32_dim(m, "epilogue m"), u32_dim(n, "epilogue n"), alpha, beta,
+            self_kind, 0};
+        launch(h_tv_mm_epilogue_kernel, ep, (uint32_t)((out.numel() + 3) / 4));
+    }
     return out;
 }
 
 static torch::Tensor mm_impl_wrap(const torch::Tensor& a,
                                   const torch::Tensor& b) {
-    return mm_impl(a, b, 0);
+    return mm_launch(a, b, 0, nullptr, 0, 1.0f, 0.0f);
 }
 
 static torch::Tensor linear_impl(
     const torch::Tensor& input, const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias) {
+    // v1 is 2-D only. A 1-D input has a different output rank, and quietly
+    // treating it as 2-D is worse than refusing it.
     check_cnn_f32(input, "linear.input", 2);
     check_cnn_f32(weight, "linear.weight", 2);
-    auto out = mm_impl(input, weight, 1);  // x @ w^T
+    TORCH_CHECK(input.size(1) == weight.size(1),
+                "torch_vortex: linear input has ", input.size(1),
+                " features but weight expects ", weight.size(1));
+    auto out = mm_launch(input, weight, 1, nullptr, 0, 1.0f, 0.0f);  // x @ w^T
     if (bias.has_value() && bias->defined()) {
         check_cnn_f32(*bias, "linear.bias", 1);
-        TORCH_CHECK(bias->numel() == out.size(1), "torch_vortex: bias size mismatch");
-        BiasArgs args = {(uint64_t)(uintptr_t)out.data_ptr(),
-                         (uint64_t)(uintptr_t)bias->data_ptr(),
-                         (uint32_t)out.size(0), (uint32_t)out.size(1)};
-        void* params[1] = {&args};
-        uint32_t total = (uint32_t)out.numel();
-        VX_CHECK(hipModuleLaunchKernel(g_bias_add, (total + 3) / 4, 1, 1, 4, 1,
-                                       1, 0, nullptr, params, nullptr));
+        TORCH_CHECK(bias->numel() == out.size(1), "torch_vortex: linear bias has ",
+                    bias->numel(), " elements but the output has ", out.size(1),
+                    " columns");
+        bias_args_t args = {(uint64_t)(uintptr_t)out.data_ptr(),
+                            (uint64_t)(uintptr_t)bias->data_ptr(),
+                            u32_dim(out.size(0), "linear rows"),
+                            u32_dim(out.size(1), "linear columns")};
+        launch(h_tv_bias_add_kernel, args, (uint32_t)((out.numel() + 3) / 4));
     }
     return out;
 }
 
+// torch.addmm: beta*self + alpha*(mat1 @ mat2).
+//
+// This used to delegate to linear_impl, which computes mat1 @ mat2^T: a
+// non-square system was rejected for the wrong reason and a square one
+// silently produced mat1 @ mat2^T + self.
 static torch::Tensor addmm_impl(const torch::Tensor& self,
                                 const torch::Tensor& mat1,
                                 const torch::Tensor& mat2,
-                                const c10::Scalar& beta, const c10::Scalar& alpha) {
-    TORCH_CHECK(beta.to<double>() == 1.0 && alpha.to<double>() == 1.0,
-                "torch_vortex: addmm beta/alpha != 1 unsupported in v1");
-    TORCH_CHECK(self.dim() == 1 && self.size(0) == mat2.size(1),
-                "torch_vortex: addmm self must be the (n,) bias vector in v1");
-    return linear_impl(mat1, mat2, self);
+                                const c10::Scalar& beta,
+                                const c10::Scalar& alpha) {
+    check_cnn_f32(mat1, "addmm.mat1", 2);
+    check_cnn_f32(mat2, "addmm.mat2", 2);
+    check_vortex_f32(self, "addmm.self");
+    const int64_t m = mat1.size(0), k = mat1.size(1), n = mat2.size(1);
+    TORCH_CHECK(mat2.size(0) == k, "torch_vortex: addmm contraction mismatch: ",
+                "mat1 is (", m, ", ", k, ") and mat2 is (", mat2.size(0), ", ",
+                n, ")");
+
+    // self may be (m, n) or an (n,) row broadcast. A (m, 1) column would
+    // broadcast in some other paths but not here: refuse it by name.
+    uint32_t self_kind = 0;
+    if (!(beta.to<double>() == 0.0 && self.numel() != 0)) {
+        if (self.dim() == 1) {
+            TORCH_CHECK(self.size(0) == n, "torch_vortex: addmm self is (",
+                        self.size(0), ",) but the result is (", m, ", ", n, ")");
+            self_kind = 1;
+        } else {
+            TORCH_CHECK(self.size(0) == m && self.size(1) == n,
+                        "torch_vortex: addmm self is (", self.size(0), ", ",
+                        self.size(1), ") but the result is (", m, ", ", n,
+                        "); a column-vector addend is unsupported in v1");
+            self_kind = 2;
+        }
+    }
+    return mm_launch(mat1, mat2, 0, &self, self_kind, alpha.to<float>(),
+                     beta.to<float>());
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -582,6 +862,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("zero_", &zero__impl);
     m.impl("view", &view_impl);
     m.impl("relu", &relu_impl);
+    m.impl("relu_", &relu__impl);
     m.impl("add.Tensor", &add_impl);
     m.impl("mul.Tensor", &mul_impl);
     m.impl("convolution", &convolution_impl);
@@ -593,52 +874,45 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("addmm", &addmm_impl);
 }
 
-// Factory ops dispatch through BackendSelect: route vortex-device calls to
-// the implementations above and chain everything else to the CPU factory.
-static torch::Tensor bs_empty_impl(
-    c10::SymIntArrayRef sym_size, std::optional<c10::ScalarType> dtype_opt,
-    std::optional<c10::Layout> layout_opt, std::optional<c10::Device> device_opt,
-    std::optional<bool> pin_memory_opt,
-    std::optional<c10::MemoryFormat> memory_format_opt) {
-    if (device_opt.has_value() &&
-        device_opt->type() == c10::DeviceType::PrivateUse1) {
-        return empty_impl(sym_size, dtype_opt, layout_opt, device_opt,
-                          pin_memory_opt, memory_format_opt);
-    }
-    auto sizes = sym_to_vec(sym_size);
-    return torch::Tensor(at::detail::empty_cpu(
-        c10::IntArrayRef(sizes), dtype_opt, layout_opt, device_opt,
-        pin_memory_opt, memory_format_opt));
+// ---------------------------------------------------------------------------
+// Backend fallbacks
+// ---------------------------------------------------------------------------
+
+// The factory ops are registered on the PrivateUse1 key only (see the
+// TORCH_LIBRARY_IMPL(aten, PrivateUse1) block above). There is deliberately no
+// BackendSelect registration: registering one replaces ATen's own
+// backend-select kernel process-wide, which used to route *every* non-vortex
+// factory call to at::detail::empty_cpu — torch.empty(3), torch.zeros,
+// torch.arange and device='meta' included. PrivateUse1 alone is sufficient:
+// ATen resolves a vortex request to this key, and CPU/Meta requests to their
+// own, with no extension involvement.
+
+// Consulted only when the dispatch table has no entry for the operator at
+// all; operators with a real PrivateUse1 kernel or a CompositeImplicitAutograd
+// math kernel never reach it. Its job is to make "this ran on the CPU"
+// impossible to miss — the README used to advertise a
+// `torch_vortex.fallback_counter` that never existed.
+static void vortex_no_fallback(const c10::OperatorHandle& op,
+                               c10::Stack* stack) {
+    (void)stack;
+    TORCH_CHECK(false,
+                "torch_vortex: operator ", op.schema().operator_name(),
+                " has no vortex implementation; refusing to fall back to the "
+                "CPU. Register it in src/vortex_ext.cpp or remove it from the "
+                "model path.");
 }
 
-static torch::Tensor bs_empty_strided_impl(
-    c10::SymIntArrayRef sym_size, c10::SymIntArrayRef sym_stride,
-    std::optional<c10::ScalarType> dtype_opt,
-    std::optional<c10::Layout> layout_opt, std::optional<c10::Device> device_opt,
-    std::optional<bool> pin_memory_opt) {
-    if (device_opt.has_value() &&
-        device_opt->type() == c10::DeviceType::PrivateUse1) {
-        return empty_strided_impl(sym_size, sym_stride, dtype_opt, layout_opt,
-                                  device_opt, pin_memory_opt);
-    }
-    auto sizes = sym_to_vec(sym_size);
-    auto strides = sym_to_vec(sym_stride);
-    return torch::Tensor(at::detail::empty_strided_cpu(
-        c10::IntArrayRef(sizes), c10::IntArrayRef(strides), dtype_opt,
-        layout_opt, device_opt, pin_memory_opt));
-}
-
-// Autograd pass-through for every registered op (inference-only v1: the
-// composite autograd kernels would need cross-device sync, so gradient
-// support is explicitly out of scope and the key just falls through).
+// Autograd pass-through for every registered op. Inference only: a gradient
+// taken through a vortex tensor is discarded rather than computed, which
+// torch cannot distinguish from a correct zero gradient. Training is W8.1 of
+// docs/mydocs/pytorch_plan.md; until then this is the honest boundary.
 // Namespace-wide fallbacks must use the catch-all TORCH_LIBRARY_IMPL(_, ...).
 TORCH_LIBRARY_IMPL(_, AutogradPrivateUse1, m) {
   m.fallback(torch::CppFunction::makeFallthrough());
 }
 
-TORCH_LIBRARY_IMPL(aten, BackendSelect, m) {
-    m.impl("empty.memory_format", &bs_empty_impl);
-    m.impl("empty_strided", &bs_empty_strided_impl);
+TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
+    m.fallback(torch::CppFunction::makeFromBoxedFunction<&vortex_no_fallback>());
 }
 
 // ---------------------------------------------------------------------------
@@ -646,24 +920,58 @@ TORCH_LIBRARY_IMPL(aten, BackendSelect, m) {
 // ---------------------------------------------------------------------------
 
 void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
-    // One combined image (ops + dnn kernels): the simx backend loads
-    // modules at a fixed base address, so separate images would overlap.
-    // `dnn_path` is accepted for call compatibility but ignored.
+    // One combined image (ops + dnn kernels): the simx backend loads modules
+    // at a fixed base address, so separate images would overlap. `dnn_path` is
+    // accepted for call compatibility but ignored.
     (void)dnn_path;
     c10::SetAllocator(c10::DeviceType::PrivateUse1, &g_vortex_allocator);
     VX_CHECK(hipInit(0));
+
+    // Cached once: conv's LMEM staging is checked against sharedMemPerBlock
+    // before every launch, and the runtime's own error for an oversized block
+    // is an opaque VX_ERR_INVALID_VALUE.
+    hipDeviceProp_t prop;
+    VX_CHECK(hipGetDeviceProperties(&prop, 0));
+    g_shared_mem_per_block = (int64_t)prop.sharedMemPerBlock;
+
     VX_CHECK(hipModuleLoad(&g_ops_module, vxbin_path.c_str()));
-    VX_CHECK(hipModuleGetFunction(&g_add, g_ops_module, "add_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_mul, g_ops_module, "mul_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_fill, g_ops_module, "fill_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_relu, g_ops_module, "relu_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_conv2d, g_ops_module, "tv_conv2d_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_pool2d, g_ops_module, "tv_pool2d_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_bn, g_ops_module, "tv_bn_affine_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_mm, g_ops_module, "tv_mm_kernel"));
-    VX_CHECK(hipModuleGetFunction(&g_bias_add, g_ops_module, "tv_bias_add_kernel"));
+#define TORCH_KERNEL_RESOLVE(name, type, mbx, lmem)                            \
+    VX_CHECK(hipModuleGetFunction(&h_##name, g_ops_module, #name));
+    TORCH_KERNEL_TABLE(TORCH_KERNEL_RESOLVE)
+#undef TORCH_KERNEL_RESOLVE
+}
+
+// The argument-block sizes this extension was compiled with, keyed by kernel
+// name. The Python side compares these against <vxbin>.meta.json, which
+// gen_metadata wrote from the same header at build time: if the image and the
+// host disagree, that is a stale vxbin and it must fail at init rather than
+// produce wrong numbers.
+std::map<std::string, int64_t> arg_sizes_impl() {
+    std::map<std::string, int64_t> out;
+#define TORCH_KERNEL_SIZE(name, type, mbx, lmem) out[#name] = (int64_t)sizeof(type);
+    TORCH_KERNEL_TABLE(TORCH_KERNEL_SIZE)
+#undef TORCH_KERNEL_SIZE
+    return out;
+}
+
+std::map<std::string, int64_t> device_properties_impl() {
+    hipDeviceProp_t prop;
+    VX_CHECK(hipGetDeviceProperties(&prop, 0));
+    return {
+        {"shared_mem_per_block", (int64_t)prop.sharedMemPerBlock},
+        {"max_threads_per_block", (int64_t)prop.maxThreadsPerBlock},
+        {"warp_size", (int64_t)prop.warpSize},
+        {"total_global_mem", (int64_t)prop.totalGlobalMem},
+    };
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("load_ops", &load_ops, "initialize the vortex backend (allocator + ops/dnn images)");
+    m.def("load_ops", &load_ops,
+          "initialize the vortex backend (allocator + kernel image)");
+    m.def("stats", &stats_snapshot,
+          "device counters: launches, transfer bytes, allocations, syncs");
+    m.def("reset_stats", &stats_reset, "zero the counters returned by stats()");
+    m.def("arg_sizes", &arg_sizes_impl,
+          "argument-block sizes this extension was compiled with");
+    m.def("device_properties", &device_properties_impl, "cached device limits");
 }

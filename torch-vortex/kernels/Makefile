@@ -5,6 +5,15 @@ include $(ROOT_DIR)/config.mk
 # the simx backend loads modules at a fixed base address, so multiple
 # images would overlap (measured: second hipModuleLoad fails with an
 # address-range conflict).
+#
+# The argument-block sizes in the VXKMDATA footer are generated from measured
+# sizeof() by gen_metadata, not typed here: they used to be hand-maintained and
+# had drifted (conv declared 104 bytes for an 88-byte struct).
+
+ifeq ($(filter $(XLEN),64),)
+$(error torch-vortex kernel images require XLEN=64: the host extension's \
+	argument blocks are LP64 and an rv32 image would misread every pointer)
+endif
 
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) \
@@ -13,43 +22,31 @@ ifneq ($(strip $(CONFIGS)),)
 HIPCC_FLAGS += --configs='$(CONFIGS)'
 endif
 
-# struct sizes (C layout, align 8 on rv64 / 4 on rv32):
-# binary: 3p+2u = 32/20; fill: p+u+f+u = 24/16
-# conv: 4p+17u = 104/84; pool: 2p+15u = 80/68; bn: 6p+2u = 56/32
-# mm: 3p+4u = 40/28; bias: 2p+2u = 24/16
-ifeq ($(XLEN),64)
-BIN_SIZE := 32
-FILL_SIZE := 24
-else
-BIN_SIZE := 20
-FILL_SIZE := 16
-endif
-ifeq ($(XLEN),64)
-CONV_SIZE := 104
-POOL_SIZE := 80
-BN_SIZE := 56
-MM_SIZE := 40
-BIAS_SIZE := 24
-else
-CONV_SIZE := 84
-POOL_SIZE := 68
-BN_SIZE := 32
-MM_SIZE := 28
-BIAS_SIZE := 12
-endif
-ALL_META := [{"name": "add_kernel", "args_size": $(BIN_SIZE)}, {"name": "mul_kernel", "args_size": $(BIN_SIZE)}, {"name": "fill_kernel", "args_size": $(FILL_SIZE)}, {"name": "relu_kernel", "args_size": $(FILL_SIZE)}, {"name": "tv_conv2d_kernel", "args_size": $(CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "tv_pool2d_kernel", "args_size": $(POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "tv_bn_affine_kernel", "args_size": $(BN_SIZE)}, {"name": "tv_mm_kernel", "args_size": $(MM_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "tv_bias_add_kernel", "args_size": $(BIAS_SIZE)}]
+CXX ?= c++
+VXBIN := torch_all.vxbin
+META := all_meta.json
+SIDECAR := $(VXBIN).meta.json
 
-all: torch_all.vxbin
+all: $(VXBIN)
 
-torch_all.vxbin: ops.hip dnn.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
-	echo '$(ALL_META)' > all_meta.json
-	$(HIPCC) $(HIPCC_FLAGS) ops.hip -c -o ops.o
-	$(HIPCC) $(HIPCC_FLAGS) dnn.hip -c -o dnn.o
-	VX_KERNEL_METADATA=$$PWD/all_meta.json \
+gen_metadata: gen_metadata.cpp torch_kernel_args.h
+	$(CXX) -std=c++17 -I. -o $@ gen_metadata.cpp
+
+# One invocation writes both: the VXKMDATA records for hipcc, and the sidecar
+# the extension cross-checks its own compiled-in sizes against at init time.
+$(META): gen_metadata torch_kernel_args.h
+	./gen_metadata --xlen=$(XLEN) --meta=$(META) --sidecar=$(SIDECAR)
+
+$(SIDECAR): $(META)
+
+$(VXBIN): ops.hip dnn.hip torch_kernel_args.h $(META) $(VORTEX_HOME)/ci/hipcc_vortex.py
+	$(HIPCC) $(HIPCC_FLAGS) -I$(CURDIR) ops.hip -c -o ops.o
+	$(HIPCC) $(HIPCC_FLAGS) -I$(CURDIR) dnn.hip -c -o dnn.o
+	VX_KERNEL_METADATA=$$PWD/$(META) \
 	  $(HIPCC) $(HIPCC_FLAGS) ops.o dnn.o -o $@
 	rm -f ops.o dnn.o
 
 clean:
-	rm -f torch_all.vxbin all_meta.json *.hipcc_tmp* ops.o dnn.o
+	rm -f $(VXBIN) $(META) $(SIDECAR) gen_metadata *.hipcc_tmp* ops.o dnn.o
 
 .PHONY: all clean

@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Which dependency combinations torch-vortex has actually been exercised on.",
+    "Hand-authored and reviewable on purpose: the point of this file is to record",
+    "what has NOT been tested, so that an observation is never mistaken for a",
+    "compatibility claim.",
+    "",
+    "torch-vortex was originally built against torch 2.4.1 on the system Python",
+    "3.8. Nothing between 2.4 and 2.14 was ever tested; the 2.4 pitfall notes in",
+    "docs/mydocs/p5_01_torch_vortex.md are archaeology, not documentation.",
+    "xlen 32 is unsupported rather than untested: the host extension is always",
+    "LP64, and its arg blocks are host-compiled, so an rv32 image cannot work."
+  ],
+  "schema": 1,
+  "supported": [
+    {
+      "torch": "==2.14.0",
+      "python": ">=3.10,<3.11",
+      "triton": "==3.8.0",
+      "xlen": 64,
+      "driver": "simx",
+      "status": "supported"
+    }
+  ],
+  "untested": [
+    {"torch": ">=2.4,<2.14", "note": "the 2.4.1/py3.8 combination is the historical baseline; re-verify before claiming"},
+    {"driver": "rtlsim", "note": "never run for the torch backend"},
+    {"driver": "xrt", "note": "never run for the torch backend"}
+  ],
+  "unsupported": [
+    {"torch": ">=2.15", "reason": "no PrivateUse1 API re-verification has been done past 2.14"},
+    {"python": "<3.10", "reason": "not exercised since the 2.14 migration"},
+    {"xlen": 32, "reason": "host arg blocks are LP64; the kernels are built for rv64 only"}
+  ]
+}

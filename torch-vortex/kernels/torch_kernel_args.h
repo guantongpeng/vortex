@@ -1,0 +1,167 @@
+// Copyright © 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// THE argument-block layout for torch-vortex kernels.
+//
+// This header is included by all three consumers:
+//   - kernels/ops.hip           (device -- VOLT/clang, rv64)
+//   - kernels/dnn.hip           (device -- VOLT/clang, rv64)
+//   - src/vortex_ext.cpp        (host   -- the host C++ compiler, LP64)
+//   - kernels/gen_metadata.cpp  (host   -- generates the VXKMDATA args_size)
+//
+// It exists because those were previously three independent hand-written
+// copies of the same structs plus a hand-typed sizeof table in the Makefile,
+// and the table had drifted: conv declared 104 bytes for an 88-byte struct and
+// pool 80 for 72. The runtime copies exactly args_size bytes off the host
+// blob (sw/runtime/common/queue.cpp), so conv was reading 16 bytes past the
+// end of the host argument block.
+//
+// Addresses are uint64_t everywhere, never uintptr_t or a host pointer: the
+// images are rv64 (LP64) and so is the host, so one width is correct on both
+// sides. Keep this header free of HIP/ATen includes so the host compiler can
+// include it directly.
+//
+// A pure-C header: no includes beyond stdint, so the device compiler and the
+// host compiler see literally the same declarations.
+
+#ifndef TORCH_VORTEX_KERNEL_ARGS_H
+#define TORCH_VORTEX_KERNEL_ARGS_H
+
+#include <stdint.h>
+
+// ---- elementwise ----------------------------------------------------------
+
+// add_kernel, mul_kernel
+struct binary_args_t {
+    uint64_t dst;
+    uint64_t a;
+    uint64_t b;
+    uint32_t n;
+    uint32_t pad;
+};
+
+// fill_kernel; relu_kernel (in-place) reuses the layout (dst + n)
+struct fill_args_t {
+    uint64_t dst;
+    uint32_t n;
+    float value;
+    uint32_t pad;
+};
+
+// unary op with a distinct source and destination: relu_out_kernel. Separate
+// from fill_args_t because relu must not run in place on its input.
+struct unary_args_t {
+    uint64_t dst;
+    uint64_t a;
+    uint32_t n;
+    uint32_t pad;
+};
+
+// ---- cnn ------------------------------------------------------------------
+
+// tv_conv2d_kernel (NCHW, dilation 1, groups 1)
+struct conv_args_t {
+    uint64_t in, weight, bias, out;
+    uint32_t n, ci, hi, wi, co, ho, wo;
+    uint32_t kh, kw, ph, pw, sh, sw, has_bias;
+};
+
+// tv_pool2d_kernel (op 0 = max, 1 = avg)
+struct pool_args_t {
+    uint64_t in, out;
+    uint32_t n, c, hi, wi, ho, wo;
+    uint32_t kh, kw, ph, pw, sh, sw, op;
+};
+
+// tv_bn_affine_kernel: inference batch norm over NCHW.
+//
+// `hw` is the spatial span H*W and is passed explicitly rather than derived:
+// the channel of element idx is (idx / (H*W)) % C, and deriving the divisor as
+// total/c gives N*H*W, which happens to be right only when N == 1.
+//
+// The kernel computes rstd = 1/sqrt(var + eps) itself, so var is passed
+// directly and no host-side sqrt round-trip is needed. has_affine selects
+// weight/bias (both pointers must be valid when it is set).
+struct bn_args_t {
+    uint64_t in, mean, var, weight, bias, out;
+    uint32_t total, c, hw;
+    float eps;
+    uint32_t has_affine;
+};
+
+// tv_mm_kernel: 16x16 tile per CTA, K in chunks of 8
+//
+// transb: 0 = b is [k][n] row-major, 1 = b is [n][k] (i.e. use b^T)
+//
+// Plain out = a @ b, deliberately with no epilogue. The alpha/beta/self
+// scaling of torch.addmm lives in tv_mm_epilogue_kernel below, because
+// putting that branch inside this kernel's epilogue makes VOLT emit code that
+// accumulates wrongly (see docs/mydocs/pytorch_plan.md W5.4 and
+// tests/test_matmul.py::test_addmm_kernel_is_plain_matmul). Keep this kernel
+// shape-stable: it is the known-good form.
+struct mm_args_t {
+    uint64_t a, b, out;
+    uint32_t m, n, k;
+    uint32_t transb;
+};
+
+// tv_mm_epilogue_kernel: out = alpha*out + beta*self, applied in place.
+//
+// A separate elementwise pass rather than an epilogue in tv_mm_kernel (see
+// above). Simple elementwise kernels are unaffected by the codegen problem.
+//
+// self_kind: 0 = no addend, 1 = self is (n,) broadcast across rows,
+//            2 = self is the full (m, n) matrix.
+// The `beta != 0` test is not an optimisation: torch.addmm with beta == 0 is
+// defined to ignore self entirely, NaN and Inf included, and 0 * Inf is NaN.
+struct mm_epilogue_args_t {
+    uint64_t out, self;
+    uint32_t m, n;
+    float alpha, beta;
+    uint32_t self_kind;
+    uint32_t pad;
+};
+
+// tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
+struct bias_args_t {
+    uint64_t out, bias;
+    uint32_t m, n;
+};
+
+// ---- the kernel table -----------------------------------------------------
+//
+// One row per kernel entry point. Fields:
+//   X(entry_point_name, arg_type, max_block_x, static_lmem_bytes)
+// A max_block_x of 0 means "no max_block in the metadata" (the runtime then
+// only applies its own NUM_THREADS*NUM_WARPS ceiling); static_lmem_bytes of 0
+// means the kernel uses no static LMEM.
+//
+// gen_metadata.cpp walks this table to emit the VXKMDATA args_size values, the
+// extension walks it to expose arg_sizes() for the init-time cross-check, and
+// load_ops() walks it to resolve every entry point. Adding a kernel means
+// adding one row.
+
+#define TORCH_KERNEL_TABLE(X)                                                  \
+    X(add_kernel, binary_args_t, 0, 0)                                         \
+    X(mul_kernel, binary_args_t, 0, 0)                                         \
+    X(fill_kernel, fill_args_t, 0, 0)                                          \
+    X(relu_kernel, fill_args_t, 0, 0)                                          \
+    X(relu_out_kernel, unary_args_t, 0, 0)                                     \
+    X(tv_conv2d_kernel, conv_args_t, 16, 0)                                    \
+    X(tv_pool2d_kernel, pool_args_t, 16, 0)                                    \
+    X(tv_bn_affine_kernel, bn_args_t, 0, 0)                                    \
+    X(tv_mm_kernel, mm_args_t, 16, 1024)                                       \
+    X(tv_mm_epilogue_kernel, mm_epilogue_args_t, 0, 0)                         \
+    X(tv_bias_add_kernel, bias_args_t, 0, 0)
+
+#endif  // TORCH_VORTEX_KERNEL_ARGS_H

@@ -20,12 +20,10 @@
 #include <math.h>
 #include <stdint.h>
 
-// ---- conv2d (NCHW, dilation 1, groups 1) ----------------------------------
-struct conv_args_t {
-    uint64_t in, weight, bias, out;
-    uint32_t n, ci, hi, wi, co, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, has_bias;
-};
+// Argument blocks are defined once, for both the device and host compilers, in
+// torch_kernel_args.h. Do not declare them locally: a second definition is
+// exactly how the host/device layout drift started.
+#include "torch_kernel_args.h"
 
 __global__ void tv_conv2d_kernel(conv_args_t* arg) {
     const uint32_t n = blockIdx.z;
@@ -74,12 +72,6 @@ __global__ void tv_conv2d_kernel(conv_args_t* arg) {
 }
 
 // ---- pooling (op 0 = max, 1 = avg) ----------------------------------------
-struct pool_args_t {
-    uint64_t in, out;
-    uint32_t n, c, hi, wi, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw, op;
-};
-
 __global__ void tv_pool2d_kernel(pool_args_t* arg) {
     const uint32_t n = blockIdx.z;
     const uint32_t c = blockIdx.y;
@@ -89,7 +81,11 @@ __global__ void tv_pool2d_kernel(pool_args_t* arg) {
     float* out_row = (float*)(uintptr_t)arg->out +
                      (((size_t)n * arg->c + c) * arg->ho + oy) * arg->wo;
     for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        float acc = (arg->op == 0) ? -3.4e38f : 0.0f;
+        // -INFINITY, not a finite sentinel: -3.4e38f dropped -inf inputs and
+        // turned an all-NaN window into that sentinel instead of propagating
+        // NaN. Out-of-range taps are skipped below, which is equivalent to
+        // -inf padding for finite inputs.
+        float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
             const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
@@ -99,7 +95,10 @@ __global__ void tv_pool2d_kernel(pool_args_t* arg) {
                 if (ix < 0 || ix >= (int32_t)arg->wi) continue;
                 float v = in_ch[(size_t)iy * arg->wi + ix];
                 if (arg->op == 0) {
-                    if (v > acc) acc = v;
+                    // NaN must win: plain `v > acc` (and fmaxf, which ignores
+                    // NaN) would leave the accumulator at the sentinel and
+                    // silently erase the NaN.
+                    if (v > acc || isnan(v)) acc = v;
                 } else {
                     acc += v;
                 }
@@ -111,38 +110,31 @@ __global__ void tv_pool2d_kernel(pool_args_t* arg) {
 }
 
 // ---- batch-norm affine -----------------------------------------------------
-struct bn_args_t {
-    uint64_t in, mean, rstd, weight, bias, out;
-    uint32_t total, c;
-};
-
 __global__ void tv_bn_affine_kernel(bn_args_t* arg) {
-    const uint32_t plane = arg->total / arg->c;
+    // arg->hw is H*W, the per-channel span in NCHW. Deriving it as total/c
+    // gives N*H*W instead, which selects the right channel only when N == 1 --
+    // the bug the batch>1 tests exist to catch.
+    const uint32_t plane = arg->hw;
     for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
          idx < arg->total; idx += blockDim.x * gridDim.x) {
         const uint32_t ch = (idx / plane) % arg->c;
         const float x = ((const float*)(uintptr_t)arg->in)[idx];
-        ((float*)(uintptr_t)arg->out)[idx] =
-            (x - ((const float*)(uintptr_t)arg->mean)[ch]) *
-                ((const float*)(uintptr_t)arg->rstd)[ch] *
-                ((const float*)(uintptr_t)arg->weight)[ch] +
-            ((const float*)(uintptr_t)arg->bias)[ch];
+        const float mean = ((const float*)(uintptr_t)arg->mean)[ch];
+        const float var = ((const float*)(uintptr_t)arg->var)[ch];
+        const float w = arg->has_affine
+                            ? ((const float*)(uintptr_t)arg->weight)[ch]
+                            : 1.0f;
+        const float b = arg->has_affine
+                            ? ((const float*)(uintptr_t)arg->bias)[ch]
+                            : 0.0f;
+        // deliberate: 1/sqrt, not rsqrt, so the result is bit-comparable with
+        // the CPU reference instead of leaving an avoidable ULP to absorb
+        const float rstd = 1.0f / sqrtf(var + arg->eps);
+        ((float*)(uintptr_t)arg->out)[idx] = (x - mean) * rstd * w + b;
     }
 }
 
 // ---- mm: 16x16 tile per 4-warp CTA, K in chunks of 8, LMEM staging --------
-struct mm_args_t {
-    uint64_t a, b, out;
-    uint32_t m, n, k;
-    uint32_t transb;  // b layout: 0 = [k][n] row-major, 1 = [n][k] (i.e. use b^T)
-};
-
-// out[i, j] += bias[j] (row broadcast), for linear/addmm epilogues.
-struct bias_args_t {
-    uint64_t out, bias;
-    uint32_t m, n;
-};
-
 __global__ void tv_mm_kernel(mm_args_t* arg) {
     float* lA = (float*)__local_mem();
     float* lB = lA + 16 * 8;
@@ -183,6 +175,31 @@ __global__ void tv_mm_kernel(mm_args_t* arg) {
             if (gm < arg->m && gn < arg->n)
                 ((float*)(uintptr_t)arg->out)[(size_t)gm * arg->n + gn] = acc[ii][jj];
         }
+}
+
+// In-place epilogue for torch.addmm: out = alpha*out + beta*self.
+//
+// Kept out of tv_mm_kernel on purpose. Adding this branch to that kernel's
+// epilogue makes VOLT generate code that accumulates incorrectly for any
+// shape whose n is not a multiple of 16 -- the accumulation picks up values
+// that were never loaded. A minimal repro is the branch itself: replacing the
+// body with `v += arg->beta;` still reproduces it, while the same code here in
+// a plain elementwise loop is correct. See W5.4 of
+// docs/mydocs/pytorch_plan.md; tests/test_matmul.py pins the separation.
+__global__ void tv_mm_epilogue_kernel(mm_epilogue_args_t* arg) {
+    for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < arg->m * arg->n; idx += blockDim.x * gridDim.x) {
+        float v = arg->alpha * ((float*)(uintptr_t)arg->out)[idx];
+        // beta == 0 must not read self at all: torch.addmm ignores it then,
+        // and 0 * Inf would be NaN.
+        if (arg->self_kind != 0 && arg->beta != 0.0f) {
+            const float* self = (const float*)(uintptr_t)arg->self;
+            const uint32_t i = idx / arg->n, j = idx % arg->n;
+            v += arg->beta *
+                 ((arg->self_kind == 1) ? self[j] : self[(size_t)i * arg->n + j]);
+        }
+        ((float*)(uintptr_t)arg->out)[idx] = v;
+    }
 }
 
 __global__ void tv_bias_add_kernel(bias_args_t* arg) {
