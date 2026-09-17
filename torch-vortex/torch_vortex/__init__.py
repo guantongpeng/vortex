@@ -89,13 +89,6 @@ def _register_backend_name():
 
 def _device_module():
     """The torch.vortex device module (availability query / sync)."""
-    import ctypes
-
-    build = _paths.find_build()
-    hip = ctypes.CDLL(os.path.join(build, "sw", "hip", "libhip_vortex.so"))
-    hip.hipInit.argtypes = [ctypes.c_uint]
-    hip.hipDeviceSynchronize.restype = ctypes.c_int
-    hip.hipDeviceSynchronize.argtypes = []
 
     class _VortexModule:
         def is_available(self):
@@ -131,9 +124,14 @@ def _device_module():
             return None
 
         def synchronize(self, device=None):
-            rc = hip.hipDeviceSynchronize()
-            if rc != 0:
-                raise RuntimeError("vortex synchronize failed: %d" % rc)
+            """Route through the extension: one barrier implementation.
+
+            This used to reach hipDeviceSynchronize through its own ctypes
+            handle. Beyond the duplication, the extension's allocator now uses
+            "has anything been enqueued since the last barrier" to decide
+            whether a free can be immediate, so it has to see every barrier.
+            """
+            _require_ext().device_synchronize()
 
     return _VortexModule()
 

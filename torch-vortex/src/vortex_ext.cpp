@@ -71,12 +71,41 @@ struct VortexStats {
     std::atomic<uint64_t> d2h_bytes{0};
     std::atomic<uint64_t> d2d_bytes{0};
     std::atomic<uint64_t> allocations{0};
+    std::atomic<uint64_t> allocated_bytes{0};
     std::atomic<uint64_t> frees{0};
+    std::atomic<uint64_t> immediate_frees{0};
     std::atomic<uint64_t> blocking_syncs{0};
     std::atomic<uint64_t> host_numeric_ops{0};
 };
 
 VortexStats g_stats;
+
+// False until load_ops has initialised the device, and false again once it is
+// torn down. The allocator's deleter consults it: the stream-ordered free
+// needs a live queue, and during teardown there may not be one.
+std::atomic<bool> g_device_ready{false};
+
+// Epoch counters for the allocator's fast path.
+//
+// The queue is FIFO and every host-side barrier (hipMemcpy waits on its own
+// completion event, hipDeviceSynchronize finishes the queue) retires
+// everything enqueued before it. So "no launch since the last barrier" means
+// there is no in-flight kernel that could still be reading a buffer we are
+// about to free, and the free can be immediate.
+//
+// Without this every free was deferred, which is correct but not free: the
+// test suite went from 25s to 48s because no address was ever reused.
+std::atomic<uint64_t> g_launch_epoch{0};
+std::atomic<uint64_t> g_barrier_epoch{0};
+
+// Called after anything that drains the queue host-side.
+void note_barrier() {
+    g_barrier_epoch.store(g_launch_epoch.load());
+}
+
+bool work_since_last_barrier() {
+    return g_launch_epoch.load() != g_barrier_epoch.load();
+}
 
 std::map<std::string, int64_t> stats_snapshot() {
     return {
@@ -86,7 +115,9 @@ std::map<std::string, int64_t> stats_snapshot() {
         {"d2h_bytes", (int64_t)g_stats.d2h_bytes.load()},
         {"d2d_bytes", (int64_t)g_stats.d2d_bytes.load()},
         {"allocations", (int64_t)g_stats.allocations.load()},
+        {"allocated_bytes", (int64_t)g_stats.allocated_bytes.load()},
         {"frees", (int64_t)g_stats.frees.load()},
+        {"immediate_frees", (int64_t)g_stats.immediate_frees.load()},
         {"blocking_syncs", (int64_t)g_stats.blocking_syncs.load()},
         {"host_numeric_ops", (int64_t)g_stats.host_numeric_ops.load()},
     };
@@ -99,7 +130,9 @@ void stats_reset() {
     g_stats.d2h_bytes = 0;
     g_stats.d2d_bytes = 0;
     g_stats.allocations = 0;
+    g_stats.allocated_bytes = 0;
     g_stats.frees = 0;
+    g_stats.immediate_frees = 0;
     g_stats.blocking_syncs = 0;
     g_stats.host_numeric_ops = 0;
 }
@@ -135,6 +168,7 @@ void launch(hipFunction_t f, const Args& args, uint32_t gx, uint32_t gy = 1,
     VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem, nullptr,
                                    nullptr, extra));
     ++g_stats.launches;
+    ++g_launch_epoch;
 }
 
 // The previous calling convention (a single pointer in kernelParams, with the
@@ -156,6 +190,7 @@ struct VortexAllocator final : public c10::Allocator {
         if (n != 0) {
             VX_CHECK(hipMalloc(&p, n));
             ++g_stats.allocations;
+            g_stats.allocated_bytes += n;
         }
         return c10::DataPtr(p, p, &vortex_free,
                             c10::Device(c10::DeviceType::PrivateUse1, 0));
@@ -168,11 +203,40 @@ struct VortexAllocator final : public c10::Allocator {
     }
 };
 
+// The c10 deleter. It runs on whichever thread drops the last reference, and
+// c10::Allocator gives it nowhere to record which stream the tensor was used
+// on (allocate/deleter take no stream and DataPtr carries only a raw pointer),
+// so this releases through the default queue -- which is where every op
+// currently runs.
+//
+// hipFree, not hipFree, is NOT safe here: it returns the address to the device
+// allocator's free list immediately, on this thread, with no regard for a
+// launch that is still reading it. Measured before this change: a 32768-element
+// relu recycled its input's address 44 us after the launch returned, with 11.6 s
+// of kernel still to run. hipFreeAsync defers the release behind the queue's
+// pending work, so the address cannot come back until the kernel has retired.
+//
+// What it costs: memory is held until the queue drains, so a program that frees
+// a lot while a long kernel runs will use more. Lifetime correctness first --
+// the plan is explicit that a caching allocator comes after, not before.
 void vortex_free(void* ctx) {
-    if (ctx != nullptr) {
-        hipFree(ctx);
-        ++g_stats.frees;
+    if (ctx == nullptr) {
+        return;
     }
+    ++g_stats.frees;
+    // Fast path: nothing has been enqueued since the last host-side barrier,
+    // so no kernel can still be reading this buffer.
+    if (g_device_ready && work_since_last_barrier()) {
+        if (hipFreeAsync(ctx, nullptr) == hipSuccess) {
+            return;
+        }
+        // Counted rather than swallowed: a silent fallback to the immediate
+        // free is exactly the race this function exists to remove.
+        ++g_stats.immediate_frees;
+    } else {
+        ++g_stats.immediate_frees;
+    }
+    hipFree(ctx);
 }
 
 VortexAllocator g_vortex_allocator;  // static lifetime (SetAllocator is non-owning)
@@ -410,6 +474,10 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
         ++g_stats.blocking_syncs;
     }
     VX_CHECK(hipMemcpy(self.data_ptr(), src_contig.data_ptr(), (size_t)bytes, kind));
+    // hipMemcpy enqueues and then waits on its own completion event; the queue
+    // is FIFO, so everything enqueued before it has retired by the time it
+    // returns. The allocator's fast path relies on knowing that.
+    note_barrier();
     switch (kind) {
         case hipMemcpyHostToDevice: g_stats.h2d_bytes += (uint64_t)bytes; break;
         case hipMemcpyDeviceToHost: g_stats.d2h_bytes += (uint64_t)bytes; break;
@@ -947,6 +1015,9 @@ void load_ops(const std::string& vxbin_path, const std::string& dnn_path) {
 
     c10::SetAllocator(c10::DeviceType::PrivateUse1, &g_vortex_allocator);
     VX_CHECK(hipInit(0));
+    // From here on the allocator's deleter can release through the queue
+    // instead of freeing immediately (see vortex_free).
+    g_device_ready = true;
 
     // Cached once: conv's LMEM staging is checked against sharedMemPerBlock
     // before every launch, and the runtime's own error for an oversized block
@@ -976,6 +1047,14 @@ std::map<std::string, int64_t> arg_sizes_impl() {
     return out;
 }
 
+// The one barrier implementation. The Python device module used to reach
+// hipDeviceSynchronize through its own ctypes handle, which meant two places
+// had to agree about what synchronising means.
+void device_synchronize_impl() {
+    VX_CHECK(hipDeviceSynchronize());
+    note_barrier();
+}
+
 std::map<std::string, int64_t> device_properties_impl() {
     hipDeviceProp_t prop;
     VX_CHECK(hipGetDeviceProperties(&prop, 0));
@@ -995,5 +1074,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("reset_stats", &stats_reset, "zero the counters returned by stats()");
     m.def("arg_sizes", &arg_sizes_impl,
           "argument-block sizes this extension was compiled with");
+    m.def("device_synchronize", &device_synchronize_impl,
+          "block until every queued command on the device has retired");
     m.def("device_properties", &device_properties_impl, "cached device limits");
 }
