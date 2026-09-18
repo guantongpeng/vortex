@@ -29,11 +29,26 @@ typedef uint32_t vx_dl_ptr_t;
 typedef uint64_t vx_dl_ptr_t;
 #endif
 
+// Unary operations. The numbering is append-only: existing values stay put so
+// an image and a host built at different times still agree.
+//
+// GELU is spelled out because it has two forms and torch's default is the erf
+// one; an unsuffixed GELU that meant the tanh approximation is how a caller
+// gets the wrong function without noticing.
 typedef enum {
     VX_PRIM_RELU = 0,
-    VX_PRIM_GELU = 1,
+    VX_PRIM_GELU_TANH = 1,   // was VX_PRIM_GELU; same value, clearer name
     VX_PRIM_SILU = 2,
     VX_PRIM_NEG  = 3,
+    VX_PRIM_ABS = 4,
+    VX_PRIM_EXP = 5,
+    VX_PRIM_LOG = 6,
+    VX_PRIM_SQRT = 7,
+    VX_PRIM_RSQRT = 8,
+    VX_PRIM_SIGMOID = 9,
+    VX_PRIM_TANH = 10,
+    VX_PRIM_RECIPROCAL = 11,
+    VX_PRIM_GELU_ERF = 12,   // torch's default gelu
 } vx_prim_op_e;
 
 // Elementwise unary over n FP32 values.
@@ -44,12 +59,28 @@ typedef struct {
     uint32_t op;   // vx_prim_op_e
 } vx_prim_unary_args_t;
 
-// Block reduce over n FP32 values. op 0=sum, 1=max, 2=argmax (out is u32).
+// Reduction operations, one row at a time. Append-only, same as the unary
+// numbering, and for the same reason: the host picks the kernel's op with a
+// subtraction, so a value that moved would select a different reduction
+// without any diagnostic.
+typedef enum {
+    VX_PRIM_RED_SUM = 0,
+    VX_PRIM_RED_MAX = 1,
+    VX_PRIM_RED_ARGMAX = 2,   // out is uint32
+    VX_PRIM_RED_MEAN = 3,
+} vx_prim_reduce_op_e;
+
+// Row-wise reduce over rows x cols FP32 (row-major, one CTA per row); out[r]
+// is the reduction of row r. A reduction over a whole vector is rows = 1,
+// which is also the only shape the previous single-CTA version could express
+// -- hence the extra field rather than a second entry point.
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;
-    uint32_t n;
-    uint32_t op;
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t op;   // vx_prim_reduce_op_e
+    uint32_t pad;
 } vx_prim_reduce_args_t;
 
 // Per-row softmax over rows x cols FP32 (row-major, one CTA per row).

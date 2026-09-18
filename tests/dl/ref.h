@@ -25,9 +25,15 @@
 namespace ref {
 
 inline double gelu(double x) {
-    // tanh approximation — matches prim_kernels.hip
+    // tanh approximation — matches prim_kernels.hip's VX_PRIM_GELU_TANH
     return 0.5 * x *
            (1.0 + std::tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)));
+}
+
+// torch's default gelu, the erf form. The two are different functions, not
+// two spellings of one, which is why the kernels name both.
+inline double gelu_erf(double x) {
+    return 0.5 * x * (1.0 + std::erf(x * 0.70710678118654752440));
 }
 
 inline double silu(double x) { return x / (1.0 + std::exp(-x)); }

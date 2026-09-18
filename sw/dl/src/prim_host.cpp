@@ -23,6 +23,45 @@
 
 #include "prim_args.h"
 
+// The op numbers are declared twice: once here for callers, once in
+// prim_args.h for the device compiler, which cannot see <vortex/prim.h>. The
+// unary entry passes the caller's value through unchanged and the reduce entry
+// derives the kernel's op by subtracting, so a value that drifted between the
+// two declarations would run a different operation with no diagnostic. This is
+// the mechanism that keeps them equal -- without it the agreement is a
+// coincidence that the next added op silently breaks.
+#define PRIM_UNARY_OP_IS(name)                                                 \
+    static_assert((int)VX_PRIM_OP_##name == (int)VX_PRIM_##name,               \
+                  "public and kernel unary op numbers disagree: " #name)
+PRIM_UNARY_OP_IS(RELU);
+PRIM_UNARY_OP_IS(GELU_TANH);
+PRIM_UNARY_OP_IS(SILU);
+PRIM_UNARY_OP_IS(NEG);
+PRIM_UNARY_OP_IS(ABS);
+PRIM_UNARY_OP_IS(EXP);
+PRIM_UNARY_OP_IS(LOG);
+PRIM_UNARY_OP_IS(SQRT);
+PRIM_UNARY_OP_IS(RSQRT);
+PRIM_UNARY_OP_IS(SIGMOID);
+PRIM_UNARY_OP_IS(TANH);
+PRIM_UNARY_OP_IS(RECIPROCAL);
+PRIM_UNARY_OP_IS(GELU_ERF);
+#undef PRIM_UNARY_OP_IS
+
+// The reductions cannot share the unary numbers -- both live in vx_prim_op --
+// so they are offset by VX_PRIM_OP_SUM and the host subtracts. These pin the
+// offset per op rather than the values, which is the property vx_prim_reduce
+// relies on.
+#define PRIM_REDUCE_OP_IS(name)                                                \
+    static_assert((int)VX_PRIM_OP_##name - (int)VX_PRIM_OP_SUM ==              \
+                      (int)VX_PRIM_RED_##name,                                 \
+                  "public and kernel reduce op numbers disagree: " #name)
+PRIM_REDUCE_OP_IS(SUM);
+PRIM_REDUCE_OP_IS(MAX);
+PRIM_REDUCE_OP_IS(ARGMAX);
+PRIM_REDUCE_OP_IS(MEAN);
+#undef PRIM_REDUCE_OP_IS
+
 namespace {
 
 struct PrimState {
@@ -114,7 +153,8 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
                              uint64_t in, uint64_t out, uint32_t n) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || n == 0) return VX_PRIM_ERR_BAD_ARGS;
-    if (op > VX_PRIM_OP_NEG) return VX_PRIM_ERR_BAD_ARGS;
+    // The unary half of vx_prim_op, which ends where the reductions start.
+    if (op > VX_PRIM_OP_GELU_ERF) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_unary_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.out = (vx_dl_ptr_t)out;
@@ -126,16 +166,18 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
 }
 
 vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
-                              uint64_t in, uint64_t out, uint32_t n) {
+                              uint64_t in, uint64_t out,
+                              uint32_t rows, uint32_t cols) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
-    if (!in || !out || n == 0) return VX_PRIM_ERR_BAD_ARGS;
-    if (op < VX_PRIM_OP_SUM) return VX_PRIM_ERR_BAD_ARGS;
+    if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
+    if (op < VX_PRIM_OP_SUM || op > VX_PRIM_OP_MEAN) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_reduce_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.out = (vx_dl_ptr_t)out;
-    args.n = n;
+    args.rows = rows;
+    args.cols = cols;
     args.op = (uint32_t)(op - VX_PRIM_OP_SUM);
-    return launch(q, g_prim.reduce, &args, sizeof(args), 1, 16, 256);
+    return launch(q, g_prim.reduce, &args, sizeof(args), rows, 16, 256);
 }
 
 vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,

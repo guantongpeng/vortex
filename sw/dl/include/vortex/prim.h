@@ -36,13 +36,29 @@ typedef enum vx_prim_status {
 } vx_prim_status;
 
 typedef enum vx_prim_op {
+    // Elementwise unary. The values are the kernel's own numbering verbatim
+    // (src/prim_args.h), because the host passes this straight through;
+    // prim_host.cpp pins every one of them.
     VX_PRIM_OP_RELU = 0,
-    VX_PRIM_OP_GELU = 1,   // tanh approximation
+    VX_PRIM_OP_GELU_TANH = 1,   // approximate="tanh"
     VX_PRIM_OP_SILU = 2,
     VX_PRIM_OP_NEG  = 3,
-    VX_PRIM_OP_SUM  = 4,
-    VX_PRIM_OP_MAX  = 5,
-    VX_PRIM_OP_ARGMAX = 6, // out is uint32
+    VX_PRIM_OP_ABS = 4,
+    VX_PRIM_OP_EXP = 5,
+    VX_PRIM_OP_LOG = 6,
+    VX_PRIM_OP_SQRT = 7,
+    VX_PRIM_OP_RSQRT = 8,
+    VX_PRIM_OP_SIGMOID = 9,
+    VX_PRIM_OP_TANH = 10,
+    VX_PRIM_OP_RECIPROCAL = 11,
+    VX_PRIM_OP_GELU_ERF = 12,   // the default gelu, not the tanh one
+
+    // Reductions, from these onwards. (op - VX_PRIM_OP_SUM) is the kernel's
+    // VX_PRIM_RED_* numbering; prim_host.cpp pins that too.
+    VX_PRIM_OP_SUM  = 13,
+    VX_PRIM_OP_MAX  = 14,
+    VX_PRIM_OP_ARGMAX = 15,     // out is uint32
+    VX_PRIM_OP_MEAN = 16,
 } vx_prim_op;
 
 vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path);
@@ -52,9 +68,11 @@ vx_prim_status vx_prim_finalize(void);
 vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
                              uint64_t in, uint64_t out, uint32_t n);
 
-// Reductions (single-CTA kernel over the whole vector).
+// Row-wise reduction over a rows x cols FP32 row-major buffer; out[r] is the
+// reduction of row r. A whole-vector reduction is rows = 1.
 vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
-                              uint64_t in, uint64_t out, uint32_t n);
+                              uint64_t in, uint64_t out,
+                              uint32_t rows, uint32_t cols);
 
 // Row-wise softmax over rows x cols.
 vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,

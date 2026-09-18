@@ -47,11 +47,24 @@ __global__ void prim_unary_kernel(vx_prim_unary_args_t* arg) {
             // -0.0 into +0.0 (F01 in docs/mydocs/pytorch_plan.md).
             y = x < 0.0f ? 0.0f : x;
             break;
-        case VX_PRIM_GELU:
-            // tanh approximation (matches the reference harness)
+        case VX_PRIM_GELU_TANH:
             y = 0.5f * x * (1.0f + tanhf(
                 0.7978845608028654f * (x + 0.044715f * x * x * x)));
             break;
+        case VX_PRIM_GELU_ERF:
+            // torch's default gelu; not the same function as the tanh form
+            y = 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
+            break;
+        // fabsf, not `x < 0.0f ? -x : x`: the latter returns -0.0 for -0.0,
+        // while torch.abs(-0.0) is +0.0.
+        case VX_PRIM_ABS:        y = fabsf(x);              break;
+        case VX_PRIM_EXP:        y = expf(x);               break;
+        case VX_PRIM_LOG:        y = logf(x);               break;
+        case VX_PRIM_SQRT:       y = sqrtf(x);              break;
+        case VX_PRIM_RSQRT:      y = 1.0f / sqrtf(x);       break;
+        case VX_PRIM_SIGMOID:    y = 1.0f / (1.0f + expf(-x)); break;
+        case VX_PRIM_TANH:       y = tanhf(x);              break;
+        case VX_PRIM_RECIPROCAL: y = 1.0f / x;              break;
         case VX_PRIM_SILU:
             y = x / (1.0f + expf(-x));
             break;
@@ -64,8 +77,8 @@ __global__ void prim_unary_kernel(vx_prim_unary_args_t* arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Block reduce: one 16-thread CTA over the whole vector (gridDim.x = 1).
-// Multi-warp CTA with LMEM staging; out[0] = result (f32 or u32 argmax).
+// Row reduce: one 16-thread CTA per row, over that row's `cols` values.
+// Multi-warp CTA with LMEM staging; out[r] = f(row r).
 // ---------------------------------------------------------------------------
 
 static __device__ float warp_sum(float x) {
@@ -75,42 +88,62 @@ static __device__ float warp_sum(float x) {
     return x;
 }
 
+// max with NaN winning. fmaxf returns the non-NaN operand, so a NaN anywhere
+// in the row used to reduce to whatever the other values were -- and both
+// torch.amax and torch.max propagate it.
+static __device__ float nan_max(float a, float b) {
+    return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
+}
+
 static __device__ float warp_max(float x) {
     for (uint32_t off = warpSize / 2; off > 0; off >>= 1) {
-        x = fmaxf(x, __shfl_down(x, (int)off, warpSize));
+        x = nan_max(x, __shfl_down(x, (int)off, warpSize));
     }
     return x;
+}
+
+// The better of two (value, index) candidates: NaN beats every number, and
+// among equals -- NaN included, since NaN == NaN is false -- the smaller index
+// wins, which is what torch.argmax returns for a tie.
+static __device__ bool argmax_better(float v, uint32_t i, float bv, uint32_t bi) {
+    if (isnan(v) != isnan(bv)) return isnan(v);
+    if (v != bv) return v > bv;
+    return i < bi;
 }
 
 __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
     float* tbuf = (float*)__local_mem();
     const uint32_t lane = threadIdx.x % warpSize;
     const uint32_t wid = threadIdx.x / warpSize;
+    const uint32_t row = blockIdx.x;
+    const float* in = (const float*)(uintptr_t)arg->in + (size_t)row * arg->cols;
+    const uint32_t cols = arg->cols;
+    const uint32_t nwarp = PRIM_BLOCK / warpSize;
 
-    float acc = (arg->op == 1) ? -INFINITY : 0.0f;
-    float seen = -INFINITY;  // for argmax: best value seen by this lane
+    float acc = (arg->op == VX_PRIM_RED_MAX) ? -INFINITY : 0.0f;
+    float seen = -INFINITY;  // argmax: best value this lane has seen
     uint32_t seen_idx = 0;
 
-    for (uint32_t i = threadIdx.x; i < arg->n; i += PRIM_BLOCK) {
-        float x = ((const float*)(uintptr_t)arg->in)[i];
-        if (arg->op == 0) {
+    for (uint32_t i = threadIdx.x; i < cols; i += PRIM_BLOCK) {
+        const float x = in[i];
+        if (arg->op == VX_PRIM_RED_SUM || arg->op == VX_PRIM_RED_MEAN) {
             acc += x;
         } else {
-            if (x > seen) {
+            // The same compare serves the value and the index, so the two
+            // cannot disagree about which element won.
+            if (x > seen || isnan(x)) {
                 seen = x;
                 seen_idx = i;
             }
-            acc = fmaxf(acc, x);
+            acc = nan_max(acc, x);
         }
     }
 
-    // argmax reduces (value, index) pairs: warp shuffle the max value,
-    // then pick the smallest index among lanes holding it.
-    if (arg->op == 2) {
+    if (arg->op == VX_PRIM_RED_ARGMAX) {
         for (uint32_t off = warpSize / 2; off > 0; off >>= 1) {
-            float ov = __shfl_down(seen, (int)off, warpSize);
-            uint32_t oi = __shfl_down(seen_idx, (int)off, warpSize);
-            if (ov > seen || (ov == seen && oi < seen_idx)) {
+            const float ov = __shfl_down(seen, (int)off, warpSize);
+            const uint32_t oi = __shfl_down(seen_idx, (int)off, warpSize);
+            if (argmax_better(ov, oi, seen, seen_idx)) {
                 seen = ov;
                 seen_idx = oi;
             }
@@ -124,30 +157,31 @@ __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
         if (threadIdx.x == 0) {
             float bv = tbuf[0];
             uint32_t bi = ubuf[PRIM_LMEM_FLOATS / 2];
-            for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) {
-                float v = tbuf[w];
-                uint32_t i2 = ubuf[PRIM_LMEM_FLOATS / 2 + w];
-                if (v > bv || (v == bv && i2 < bi)) {
+            for (uint32_t w = 1; w < nwarp; ++w) {
+                const float v = tbuf[w];
+                const uint32_t i2 = ubuf[PRIM_LMEM_FLOATS / 2 + w];
+                if (argmax_better(v, i2, bv, bi)) {
                     bv = v;
                     bi = i2;
                 }
             }
-            ((uint32_t*)(uintptr_t)arg->out)[0] = bi;
+            ((uint32_t*)(uintptr_t)arg->out)[row] = bi;
         }
         return;
     }
 
-    acc = (arg->op == 1) ? warp_max(acc) : warp_sum(acc);
+    acc = (arg->op == VX_PRIM_RED_MAX) ? warp_max(acc) : warp_sum(acc);
     if (lane == 0) {
         tbuf[wid] = acc;
     }
     __syncthreads();
     if (threadIdx.x == 0) {
         float v = tbuf[0];
-        for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) {
-            v = (arg->op == 1) ? fmaxf(v, tbuf[w]) : v + tbuf[w];
+        for (uint32_t w = 1; w < nwarp; ++w) {
+            v = (arg->op == VX_PRIM_RED_MAX) ? nan_max(v, tbuf[w]) : v + tbuf[w];
         }
-        ((float*)(uintptr_t)arg->out)[0] = v;
+        if (arg->op == VX_PRIM_RED_MEAN) v /= (float)cols;
+        ((float*)(uintptr_t)arg->out)[row] = v;
     }
 }
 
@@ -162,7 +196,12 @@ __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
     float* out = (float*)(uintptr_t)arg->out + (size_t)row * arg->cols;
     const uint32_t cols = arg->cols;
 
-    // pass 1: row max
+    // pass 1: row max. Unlike the reductions this does not need to be
+    // NaN-aware. A NaN in the row reaches the output through pass 2's
+    // exponential and the sum that divides by it, whatever this max was, so a
+    // row holding a NaN comes out NaN either way -- measured, not assumed:
+    // spelling this max with the reductions' NaN-aware combine changes no
+    // result.
     float m = -INFINITY;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
         m = fmaxf(m, in[j]);
