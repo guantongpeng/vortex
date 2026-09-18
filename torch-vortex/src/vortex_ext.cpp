@@ -65,12 +65,26 @@ extern "C" {
     } while (0)
 
 // The DL library has its own status enums (all with 0 = OK) rather than
-// hipError_t, so it gets its own check.
+// hipError_t, so it gets its own check. Initialisation is not device work and
+// uses this one.
 #define DL_CHECK(expr)                                                        \
     do {                                                                      \
         const int _s = (int)(expr);                                           \
         TORCH_CHECK(_s == 0, "torch_vortex: " #expr " failed with status ",   \
                     _s);                                                      \
+    } while (0)
+
+// A DL call that queues a kernel. It has to say so: the DL library launches on
+// the queue it was handed and never passes through launch(), which is the only
+// place the allocator's epoch is kept. A DL launch that skipped this left
+// work_since_last_barrier() false, so freeing a tensor the kernel was still
+// reading took the immediate hipFree path -- the race the deferred free exists
+// to remove, reintroduced by the migration that moved these ops into the
+// library.
+#define DL_LAUNCH(expr)                                                       \
+    do {                                                                      \
+        DL_CHECK(expr);                                                       \
+        note_device_work();                                                   \
     } while (0)
 
 
@@ -263,6 +277,20 @@ vx_queue_h current_queue() {
     return (vx_queue_h)q;
 }
 
+// Bookkeeping every submitted kernel owes, whichever path submitted it: the
+// diagnostic counter and the epochs the allocator's deferred free reads.
+// Defined once because there are now two launch paths into the device -- this
+// extension's own kernels and the DL library's -- and only one of them used to
+// pay it.
+void note_device_work() {
+    ++g_stats.launches;
+    if (current_hip_stream() == nullptr) {
+        ++g_launch_epoch;
+    } else {
+        g_nondefault_work = true;
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -293,15 +321,9 @@ void launch(hipFunction_t f, const Args& args, uint32_t gx, uint32_t gy = 1,
         HIP_LAUNCH_PARAM_BUFFER_SIZE, (void*)(uintptr_t)sizeof(Args),
         (void*)0,
     };
-    const hipStream_t stream = current_hip_stream();
-    VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem, stream,
-                                   nullptr, extra));
-    ++g_stats.launches;
-    if (stream == nullptr) {
-        ++g_launch_epoch;
-    } else {
-        g_nondefault_work = true;
-    }
+    VX_CHECK(hipModuleLaunchKernel(f, gx, gy, gz, bx, 1, 1, lmem,
+                                   current_hip_stream(), nullptr, extra));
+    note_device_work();
 }
 
 // The previous calling convention (a single pointer in kernelParams, with the
@@ -1535,9 +1557,11 @@ static torch::Tensor convolution_impl(
         u32_dim(is[3], "conv wi"), u32_dim(co, "conv co"),
         u32_dim(kh, "conv kh"), u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
         u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"), u32_dim(sw, "conv sw"));
+    // Not DL_LAUNCH: this one explains what its status codes mean, which the
+    // macro has no room for. The accounting below is the same call it makes.
     TORCH_CHECK(status == 0, "torch_vortex: vx_dnn_conv2d failed with status ",
                 status, " (2 is bad args, 3 is a shape the DL kernel rejects)");
-    ++g_stats.launches;
+    note_device_work();
     return out;
 }
 
@@ -1563,19 +1587,18 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     // The shape arithmetic stays here: window_out is bounds-checked and names
     // the argument it rejects, while the DL's is plain unsigned arithmetic.
     // ATen validates, the DL computes.
-    DL_CHECK(vx_dnn_pool2d(current_queue(),
-                           (uint64_t)(uintptr_t)self.data_ptr(),
-                           (uint64_t)(uintptr_t)out.data_ptr(),
-                           u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
-                           u32_dim(s[2], "pool input height"),
-                           u32_dim(s[3], "pool input width"),
-                           u32_dim(kh, "pool kernel height"),
-                           u32_dim(kw, "pool kernel width"),
-                           u32_dim(ph, "pool padding height"),
-                           u32_dim(pw, "pool padding width"),
-                           u32_dim(sh, "pool stride height"),
-                           u32_dim(sw, "pool stride width"), op));
-    ++g_stats.launches;
+    DL_LAUNCH(vx_dnn_pool2d(current_queue(),
+                            (uint64_t)(uintptr_t)self.data_ptr(),
+                            (uint64_t)(uintptr_t)out.data_ptr(),
+                            u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
+                            u32_dim(s[2], "pool input height"),
+                            u32_dim(s[3], "pool input width"),
+                            u32_dim(kh, "pool kernel height"),
+                            u32_dim(kw, "pool kernel width"),
+                            u32_dim(ph, "pool padding height"),
+                            u32_dim(pw, "pool padding width"),
+                            u32_dim(sh, "pool stride height"),
+                            u32_dim(sw, "pool stride width"), op));
     return out;
 }
 
@@ -1654,7 +1677,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
     // The DL kernel computes rstd from var + eps itself, so there is no host
     // round-trip here; and it takes weight/bias as optional, which is why the
     // ATen-side optional affine maps onto it without dummy buffers.
-    DL_CHECK(vx_dnn_bn_affine(
+    DL_LAUNCH(vx_dnn_bn_affine(
         current_queue(), (uint64_t)(uintptr_t)input.data_ptr(),
         (uint64_t)(uintptr_t)running_mean->data_ptr(),
         (uint64_t)(uintptr_t)running_var->data_ptr(),
@@ -1662,7 +1685,6 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
         has_affine ? (uint64_t)(uintptr_t)bias->data_ptr() : 0,
         (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(s[0], "bn batch"),
         u32_dim(c, "bn channels"), u32_dim(hw, "bn spatial span"), (float)eps));
-    ++g_stats.launches;
     // rstd is computed inside the kernel from running_var, so this path makes
     // no host round-trip and allocates no scratch buffer. The previous version
     // copied running_var to the host, took a sqrt, copied it back, and freed
@@ -1709,12 +1731,11 @@ static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b_in
     if (m == 0 || n == 0 || k == 0) {
         return out;
     }
-    DL_CHECK(vx_blas_gemm(current_queue(), VX_BLAS_F32, u32_dim(m, "matmul m"),
-                          u32_dim(n, "matmul n"), u32_dim(k, "matmul k"), alpha,
-                          1.0f, (uint64_t)(uintptr_t)a.data_ptr(),
-                          (uint64_t)(uintptr_t)b.data_ptr(),
-                          (uint64_t)(uintptr_t)out.data_ptr()));
-    ++g_stats.launches;
+    DL_LAUNCH(vx_blas_gemm(current_queue(), VX_BLAS_F32, u32_dim(m, "matmul m"),
+                           u32_dim(n, "matmul n"), u32_dim(k, "matmul k"), alpha,
+                           1.0f, (uint64_t)(uintptr_t)a.data_ptr(),
+                           (uint64_t)(uintptr_t)b.data_ptr(),
+                           (uint64_t)(uintptr_t)out.data_ptr()));
     return out;
 }
 

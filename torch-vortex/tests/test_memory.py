@@ -58,6 +58,51 @@ def test_free_is_deferred_while_work_is_outstanding(backend):
     gc.collect()
 
 
+# Ops that submit their kernel through the sw/dl library rather than through
+# this extension's own launch helper. Each takes the input and a buffer of the
+# same element count and returns without waiting.
+DL_OPS = {
+    "conv2d": lambda x, w: torch.nn.functional.conv2d(x, w, padding=1),
+}
+
+
+@pytest.mark.parametrize("opus", DL_OPS.values(), ids=list(DL_OPS))
+def test_free_is_deferred_while_a_dl_kernel_is_outstanding(backend, opus):
+    """The same lifetime rule, for the launch path that bypasses launch().
+
+    W3.1 moved conv, pooling, batch norm and matmul into sw/dl. Those entry
+    points enqueue on the queue directly, so they never pass through the helper
+    where the deferred free's epochs are kept -- a free after one of them took
+    the immediate hipFree path, with the kernel still queued to read the buffer.
+
+    Everything the device does before the op under test is built and retired
+    first, and the counters are reset after: if any other launch were still
+    outstanding, the epochs would be dirty for a reason that has nothing to do
+    with the DL path, and this would pass without testing anything.
+    """
+    n, c, h, w = 1, 4, 32, 32
+    x = torch.ones(n, c, h, w, device="vortex")
+    weight = torch.ones(4, c, 3, 3, device="vortex")
+    torch.vortex.synchronize()
+    held = x.data_ptr()
+    backend.reset_stats()
+
+    out = opus(x, weight)
+    del x
+    gc.collect()
+    fresh = torch.empty(n * c * h * w, device="vortex")
+
+    st = backend.stats()
+    assert st["frees"] > 0, "the tensor was never freed; test is not measuring anything"
+    assert st["frees"] > st["immediate_frees"], (
+        "the free ran immediately despite a DL launch still outstanding: %r" % st)
+    assert fresh.data_ptr() != held, (
+        "the address was handed back while a DL kernel could still read it")
+
+    del fresh, weight, out
+    gc.collect()
+
+
 def test_free_is_immediate_once_the_queue_is_drained(backend):
     """The fast path: no outstanding work means no deferral is needed.
 
