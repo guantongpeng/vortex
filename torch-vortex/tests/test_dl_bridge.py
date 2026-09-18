@@ -462,6 +462,90 @@ def test_the_reduction_kernel_propagates_nan(backend, dl, dl_prim):
     assert torch.isnan(direct[0]) and direct[1] == 6.0
 
 
+def test_aten_layer_norm_is_the_dl_prim_kernel(backend, dl):
+    """Layer norm, bit for bit, statistics included.
+
+    aten::native_layer_norm is the schema registered here; torch's
+    aten::layer_norm is a composite that calls it, which is why the public
+    spelling below works without a second registration.
+    """
+    hip = dl[0]
+    libdl = ctypes.CDLL(os.path.join(_paths.find_build(), "sw", "dl",
+                                     "libvortex_dl.so"))
+    ln = libdl.vx_prim_layernorm
+    ln.restype = ctypes.c_int
+    ln.argtypes = [ctypes.c_void_p] + [ctypes.c_uint64] * 6 + \
+                  [ctypes.c_uint32] * 2 + [ctypes.c_float]
+
+    torch.manual_seed(53)
+    rows, cols = 6, 9
+    x = torch.randn(rows, cols)
+    w = torch.randn(cols)
+    b = torch.randn(cols)
+    eps = 1e-5
+
+    got, mean, rstd = torch.native_layer_norm(x.to("vortex"), [cols],
+                                              w.to("vortex"), b.to("vortex"), eps)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+
+    def flat(t):
+        return t.detach().contiguous().numpy().tobytes()
+
+    dx = _upload(hip, flat(x))
+    dw = _upload(hip, flat(w))
+    db = _upload(hip, flat(b))
+    dout = _upload(hip, b"\0" * (rows * cols * 4))
+    dmean = _upload(hip, b"\0" * (rows * 4))
+    drstd = _upload(hip, b"\0" * (rows * 4))
+    rc = ln(queue, dx.value, dw.value, db.value, dout.value, dmean.value,
+            drstd.value, rows, cols, ctypes.c_float(eps))
+    assert rc == 0, "vx_prim_layernorm returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+
+    for name, buf, n, aten in (("out", dout, rows * cols, got),
+                               ("mean", dmean, rows, mean),
+                               ("rstd", drstd, rows, rstd)):
+        direct = torch.frombuffer(bytearray(_download(hip, buf, n * 4)),
+                                  dtype=torch.float32)
+        want = aten.detach().contiguous().flatten().cpu()
+        assert torch.equal(direct, want), (
+            "the ATen layer-norm path and a direct vx_prim_layernorm call "
+            "disagree about %s; they are not the same kernel.\n"
+            "  max |diff| = %g" % (name, (direct - want).abs().max().item()))
+
+
+def test_aten_rms_norm_is_the_dl_prim_kernel(backend, dl):
+    hip = dl[0]
+    libdl = ctypes.CDLL(os.path.join(_paths.find_build(), "sw", "dl",
+                                     "libvortex_dl.so"))
+    rms = libdl.vx_prim_rmsnorm
+    rms.restype = ctypes.c_int
+    rms.argtypes = [ctypes.c_void_p] + [ctypes.c_uint64] * 3 + \
+                   [ctypes.c_uint32] * 2 + [ctypes.c_float]
+
+    torch.manual_seed(59)
+    rows, cols = 5, 7
+    x = torch.randn(rows, cols)
+    eps = float(torch.finfo(torch.float32).eps)   # the default, not 1e-5
+
+    aten = torch.rms_norm(x.to("vortex"), [cols])
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (rows * cols * 4))
+    rc = rms(queue, dx.value, 0, dout.value, rows, cols, ctypes.c_float(eps))
+    assert rc == 0, "vx_prim_rmsnorm returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, rows * cols * 4)),
+                              dtype=torch.float32).reshape(rows, cols)
+    assert torch.equal(direct, aten.cpu()), (
+        "the ATen rms-norm path and a direct vx_prim_rmsnorm call disagree; "
+        "they are not the same kernel")
+
+
 # The kernel -> argument-struct mapping, read from the kernel sources rather
 # than restated here: each entry point takes exactly one argument block.
 _KERNEL_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(\s*(\w+)\s*\*\s*arg\s*\)")

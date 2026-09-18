@@ -1733,6 +1733,142 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
     return std::make_tuple(out, empty_aux, empty_aux);
 }
 
+// ---- layer norm / rms norm ------------------------------------------------
+//
+// Both normalise over the trailing dims, which is exactly the (rows, cols)
+// view the DL library's row kernels take, so `cols` is the product of the
+// normalized dims and `rows` everything in front of them. ATen validates the
+// shape and the DL kernel computes, the same division of labour as conv.
+
+// The normalized dims must be the input's trailing ones and the affine, if
+// present, must be cols-long. Torch accepts nothing else, and its message for
+// a mis-shaped normalized_shape is worth reproducing in substance: it names
+// both shapes.
+static void check_norm_shape(const torch::Tensor& input,
+                             c10::SymIntArrayRef normalized_shape,
+                             const char* name, int64_t& rows, int64_t& cols) {
+    const auto ns = sym_to_vec(normalized_shape);
+    const int64_t nd = input.dim();
+    const int64_t k = (int64_t)ns.size();
+    TORCH_CHECK(k <= nd, "torch_vortex: ", name, " normalized_shape has ", k,
+                " dimensions but the input has ", nd);
+    for (int64_t i = 0; i < k; ++i) {
+        TORCH_CHECK(input.size(nd - k + i) == ns[i], "torch_vortex: ", name,
+                    " normalized_shape=", ns, " must match the input's trailing "
+                    "dimensions; got input of size ", input.sizes());
+    }
+    // Counted rather than divided: a zero-length normalized dimension makes
+    // numel/cols meaningless, and the leading dims are the answer anyway.
+    rows = 1;
+    for (int64_t d = 0; d < nd - k; ++d) rows *= input.size(d);
+    cols = 1;
+    for (int64_t d = nd - k; d < nd; ++d) cols *= input.size(d);
+}
+
+// A norm's affine parameter: cols values on this device, in this dtype. It is
+// never broadcast here -- torch requires it to be exactly the normalized shape
+// (or the leading dims, which this refuses for now).
+static uint64_t norm_affine_addr(const std::optional<torch::Tensor>& t,
+                                 int64_t cols, const char* what) {
+    check_vortex_f32(*t, what);
+    TORCH_CHECK(t->numel() == cols, "torch_vortex: ", what, " has ",
+                t->numel(), " elements but the normalized shape has ", cols);
+    return (uint64_t)(uintptr_t)t->data_ptr();
+}
+
+static bool is_defined(const std::optional<torch::Tensor>& t) {
+    return t.has_value() && t->defined();
+}
+
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+native_layer_norm_impl(const torch::Tensor& input,
+                       c10::SymIntArrayRef normalized_shape,
+                       const std::optional<torch::Tensor>& weight,
+                       const std::optional<torch::Tensor>& bias, double eps) {
+    check_vortex_f32(input, "layer_norm.input");
+    int64_t rows = 0, cols = 0;
+    check_norm_shape(input, normalized_shape, "layer_norm", rows, cols);
+
+    // mean and rstd keep the input's rank with the normalized dims as 1s,
+    // which is what torch returns: (2,3,4) with shape [4] gives (2,3,1).
+    std::vector<int64_t> stat_shape(input.sizes().begin(), input.sizes().end());
+    for (size_t i = stat_shape.size() - normalized_shape.size();
+         i < stat_shape.size(); ++i) {
+        stat_shape[i] = 1;
+    }
+    auto out = torch::empty_like(input);
+    auto mean = torch::empty(stat_shape, input.options());
+    auto rstd = torch::empty(stat_shape, input.options());
+
+    // Optional affine: both or neither. Torch treats the absent case as
+    // gamma=1, beta=0 rather than as an error, and F.layer_norm(x, shape) is
+    // how that arrives.
+    TORCH_CHECK(is_defined(weight) == is_defined(bias), "torch_vortex: "
+                "layer_norm needs weight and bias together or not at all");
+    uint64_t gaddr = 0, baddr = 0;
+    if (is_defined(weight)) {
+        gaddr = norm_affine_addr(weight, cols, "layer_norm.weight");
+        baddr = norm_affine_addr(bias, cols, "layer_norm.bias");
+    }
+
+    // A batch of zero rows is not a launch: the statistics outputs are empty
+    // too, so there is nothing to write and nothing to compute.
+    if (rows == 0) {
+        ++g_stats.skipped_launches;
+        return std::make_tuple(out, mean, rstd);
+    }
+    if (cols == 0) {
+        // A zero-length normalized dimension. Nothing to normalise, so the
+        // output is empty -- but the statistics are not: torch answers with
+        // mean 0 and rstd NaN here (measured), not with empties.
+        fill_args_t m = {(uint64_t)(uintptr_t)mean.data_ptr(), (uint32_t)rows,
+                         0.0f, 0};
+        launch(h_fill_kernel, m, (uint32_t)((rows + 3) / 4));
+        fill_args_t r = {(uint64_t)(uintptr_t)rstd.data_ptr(), (uint32_t)rows,
+                         (float)NAN, 0};
+        launch(h_fill_kernel, r, (uint32_t)((rows + 3) / 4));
+        return std::make_tuple(out, mean, rstd);
+    }
+
+    DL_LAUNCH(vx_prim_layernorm(
+        current_queue(), (uint64_t)(uintptr_t)input.data_ptr(), gaddr, baddr,
+        (uint64_t)(uintptr_t)out.data_ptr(),
+        (uint64_t)(uintptr_t)mean.data_ptr(),
+        (uint64_t)(uintptr_t)rstd.data_ptr(), u32_dim(rows, "layer_norm rows"),
+        u32_dim(cols, "layer_norm cols"), (float)eps));
+    return std::make_tuple(out, mean, rstd);
+}
+
+static torch::Tensor rms_norm_impl(const torch::Tensor& input,
+                                   c10::SymIntArrayRef normalized_shape,
+                                   const std::optional<torch::Tensor>& weight,
+                                   std::optional<double> eps) {
+    check_vortex_f32(input, "rms_norm.input");
+    int64_t rows = 0, cols = 0;
+    check_norm_shape(input, normalized_shape, "rms_norm", rows, cols);
+
+    uint64_t gaddr = 0;
+    if (is_defined(weight)) {
+        gaddr = norm_affine_addr(weight, cols, "rms_norm.weight");
+    }
+
+    auto out = torch::empty_like(input);
+    if (rows == 0 || cols == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    // eps=None is not eps=0: torch falls back to the dtype's machine epsilon,
+    // which is 1.19e-07 for float32. Measured -- rms_norm with None is
+    // bit-identical to eps=finfo.eps and differs from eps=0.
+    const double e = eps.has_value() ? *eps
+                                     : (double)std::numeric_limits<float>::epsilon();
+    DL_LAUNCH(vx_prim_rmsnorm(
+        current_queue(), (uint64_t)(uintptr_t)input.data_ptr(), gaddr,
+        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(rows, "rms_norm rows"),
+        u32_dim(cols, "rms_norm cols"), (float)e));
+    return out;
+}
+
 // The single matmul launcher. mm, linear and addmm are thin wrappers with
 // different epilogues; having one implementation is what stops them from
 // disagreeing about which axis is contracted.
@@ -1977,6 +2113,8 @@ void register_vortex_ops() {
 #undef VX_REGISTER_UNARY
     VX_IMPL("convolution", &convolution_impl);
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);
+    VX_IMPL("native_layer_norm", &native_layer_norm_impl);
+    VX_IMPL("rms_norm", &rms_norm_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
     VX_IMPL("mm", &mm_impl_wrap);
