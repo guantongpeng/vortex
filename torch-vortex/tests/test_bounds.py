@@ -97,6 +97,51 @@ def test_empty_inputs_launch_nothing(backend):
     assert backend.stats()["launches"] == 0, "an empty input launched a kernel"
 
 
+def test_empty_elementwise_and_reductions_launch_nothing(backend):
+    """Zero elements is not a launch, on the DL path either.
+
+    The elementwise and reduction kernels now live in sw/dl, whose entry points
+    refuse n == 0 (and rows == 0) rather than accepting an empty job. The old
+    local kernels never saw the case: the launch helper dropped a zero grid
+    first. So the rule has to be stated on this side, and if it stops being
+    stated the DL library answers with an error rather than an empty result.
+    """
+    backend.reset_stats()
+    empty = torch.empty(0, 4, device="vortex")
+
+    assert torch.relu(empty).shape == (0, 4)
+    # zero rows: an empty result, so nothing to compute and nothing to write
+    assert torch.amax(empty, dim=1).shape == (0,)
+
+    st = backend.stats()
+    assert st["launches"] == 0, "an empty tensor launched a kernel: %r" % st
+
+
+def test_full_reduction_of_an_empty_tensor_has_no_max(backend):
+    """amax of a tensor with no elements is undefined, and torch says so.
+
+    sum and mean do have answers (0 and NaN) and this path writes them with
+    one fill rather than a reduction; max has none, so inventing -inf -- which
+    is what the old kernel's -INFINITY seed produced -- would be a value torch
+    never returns. Refusing is the parity-preserving answer.
+    """
+    empty = torch.empty(0, device="vortex")
+    # the output tensor is sized before the reduction is handed the layout, so
+    # the refusal comes after an allocation -- the launch check still applies
+    with assert_rejected("no elements", backend, may_allocate=True):
+        torch.amax(empty)
+
+    assert empty.sum().cpu().item() == 0.0
+    assert torch.isnan(empty.mean().cpu())
+
+    # Reducing a dimension that is itself empty is still refused, and that is
+    # the pre-existing gap rather than something this path closed: the layout
+    # normalisation divides by the row length, so it has no shape to build.
+    # torch returns zeros(3) here. Pinned so the gap stays visible.
+    with pytest.raises(RuntimeError):
+        torch.empty(3, 0, device="vortex").sum(dim=1)
+
+
 def test_degenerate_pool_window_matches_cpu(backend):
     """A 0-size spatial input is rejected by PyTorch too, so refusal is parity."""
     with pytest.raises(RuntimeError):

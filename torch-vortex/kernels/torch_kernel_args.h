@@ -45,23 +45,11 @@
 // operation selected by a field, so adding an op is a row here rather than a
 // kernel. The enum lives in this header because the host and the device must
 // agree on the numbering, and a mismatch is silent wrong answers.
-
-enum TorchUnaryOp {
-    TORCH_UNARY_RELU = 0,
-    TORCH_UNARY_NEG,
-    TORCH_UNARY_ABS,
-    TORCH_UNARY_EXP,
-    TORCH_UNARY_LOG,
-    TORCH_UNARY_SQRT,
-    TORCH_UNARY_RSQRT,
-    TORCH_UNARY_SIGMOID,
-    TORCH_UNARY_TANH,
-    TORCH_UNARY_RECIPROCAL,
-    TORCH_UNARY_GELU,          // erf form, torch's default
-    TORCH_UNARY_GELU_TANH,     // approximate="tanh"
-    TORCH_UNARY_SILU,
-    TORCH_UNARY_COUNT
-};
+//
+// The unary operations are not here: they are sw/dl's (vx_prim_op), because
+// that library's prim module implements them and this image would only be a
+// second copy of the same switch. The binary and scalar forms stay, since the
+// DL library has no binary elementwise op.
 
 enum TorchBinaryOp {
     TORCH_BINARY_ADD = 0,
@@ -114,39 +102,11 @@ struct broadcast_op_args_t {
     uint32_t b_strides[4];
 };
 
-// fill_kernel; relu_kernel (in-place) reuses the layout (dst + n)
+// fill_kernel: dst[i] = value
 struct fill_args_t {
     uint64_t dst;
     uint32_t n;
     float value;
-    uint32_t pad;
-};
-
-// unary_op_kernel: dst = f(a) with f selected by `op`. Separate source and
-// destination because aten::relu and friends must not run in place on their
-// input; the in-place forms go through fill_args_t (relu) or scalar_args_t.
-struct unary_args_t {
-    uint64_t dst;
-    uint64_t a;
-    uint32_t n;
-    uint32_t op;
-};
-
-// reduce_rows_kernel: one thread per row, reducing `cols` contiguous values.
-//
-// Row-wise and contiguous, with no LMEM and no tree, which is the simplest
-// shape there is -- deliberate, given what an unusual kernel shape cost in
-// tv_mm_kernel. Anything that is not "reduce the trailing dimension" is
-// normalised on the host with movedim+contiguous before it gets here, so this
-// kernel never has to know about strides.
-//
-// op: 0 = sum, 1 = mean, 2 = max.
-struct reduce_args_t {
-    uint64_t in;
-    uint64_t out;
-    uint32_t rows;
-    uint32_t cols;
-    uint32_t op;
     uint32_t pad;
 };
 
@@ -192,11 +152,8 @@ struct bias_args_t {
     X(binary_op_kernel, binary_args_t, 0, 0)                                   \
     X(broadcast_op_kernel, broadcast_op_args_t, 0, 0)                         \
     X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
-    X(unary_op_kernel, unary_args_t, 0, 0)                                     \
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
-    X(reduce_rows_kernel, reduce_args_t, 0, 0)                                \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
-    X(relu_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 
 #endif  // TORCH_VORTEX_KERNEL_ARGS_H

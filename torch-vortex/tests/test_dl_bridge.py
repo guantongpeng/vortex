@@ -90,6 +90,34 @@ def dl():
     return hip, conv, pool, gemm, bn
 
 
+# The prim op numbers, from sw/dl/include/vortex/prim.h. Restated rather than
+# imported, on purpose: what these tests assert is that the ATen path and a
+# direct call reach the same kernel, and reading the numbers from the same
+# header the extension compiles against would assume part of the answer. A
+# change to either enum has to be made here too.
+PRIM_OP_RELU = 0
+PRIM_OP_GELU_ERF = 12
+PRIM_OP_SUM = 13
+PRIM_OP_MAX = 14
+PRIM_OP_MEAN = 16
+
+
+@pytest.fixture(scope="module")
+def dl_prim():
+    """The DL library's prim entry points (elementwise unary, row reduction)."""
+    libdl = ctypes.CDLL(os.path.join(_paths.find_build(), "sw", "dl",
+                                     "libvortex_dl.so"))
+    unary = libdl.vx_prim_unary
+    unary.restype = ctypes.c_int
+    unary.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64,
+                      ctypes.c_uint64, ctypes.c_uint32]
+    reduce_fn = libdl.vx_prim_reduce
+    reduce_fn.restype = ctypes.c_int
+    reduce_fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64,
+                          ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32]
+    return unary, reduce_fn
+
+
 def _upload(hip, data):
     p = ctypes.c_void_p()
     assert hip.hipMalloc(ctypes.byref(p), len(data)) == 0
@@ -342,6 +370,96 @@ def test_aten_batch_norm_is_the_dl_kernel(backend, dl):
         "the ATen batch-norm path and a direct vx_dnn_bn_affine call disagree; "
         "they are not the same kernel.\n  max |diff| = %g"
         % (direct - got).abs().max().item())
+
+
+@pytest.mark.parametrize("name,op,fn", [
+    ("relu", PRIM_OP_RELU, torch.relu),
+    ("gelu", PRIM_OP_GELU_ERF, torch.nn.functional.gelu),
+])
+def test_aten_unary_is_the_dl_prim_kernel(backend, dl, dl_prim, name, op, fn):
+    """Elementwise unary, same comparison: bit patterns, not tolerances.
+
+    Two independent implementations of relu would agree on every input, which
+    is exactly why agreeing is not the criterion. Being the same kernel is.
+    """
+    hip, unary = dl[0], dl_prim[0]
+    torch.manual_seed(97)
+    x = torch.randn(999)
+
+    aten = fn(x.to("vortex")).cpu()
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.numpy().tobytes())
+    dout = _upload(hip, b"\0" * (x.numel() * 4))
+    rc = unary(queue, op, dx.value, dout.value, x.numel())
+    assert rc == 0, "vx_prim_unary returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, x.numel() * 4)),
+                              dtype=torch.float32)
+
+    assert torch.equal(direct, aten), (
+        "the ATen %s path and a direct vx_prim_unary call disagree; they are "
+        "not the same kernel" % name)
+
+
+@pytest.mark.parametrize("name,op,fn", [
+    ("sum", PRIM_OP_SUM, lambda t: t.sum()),
+    ("mean", PRIM_OP_MEAN, lambda t: t.mean()),
+    ("amax", PRIM_OP_MAX, lambda t: torch.amax(t)),
+    ("sum_dim1", PRIM_OP_SUM, lambda t: t.sum(dim=1)),
+    ("amax_dim1", PRIM_OP_MAX, lambda t: torch.amax(t, dim=1)),
+])
+def test_aten_reduction_is_the_dl_prim_kernel(backend, dl, dl_prim, name, op, fn):
+    """Reductions, including the row-wise shape.
+
+    The ATen path normalises to a contiguous (rows, cols) view -- one row for
+    a full reduction, the trailing dimension otherwise -- so the direct call
+    below reproduces that shape rather than the tensor's own. A difference in
+    how the comparison was set up would otherwise read as a difference in the
+    kernel.
+    """
+    hip, reduce_fn = dl[0], dl_prim[1]
+    torch.manual_seed(31)
+    x = torch.randn(5, 13)
+
+    aten = fn(x.to("vortex")).cpu()
+    rows, cols = (1, x.numel()) if fn(x).dim() == 0 else (x.size(0), x.size(1))
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (rows * 4))
+    rc = reduce_fn(queue, op, dx.value, dout.value, rows, cols)
+    assert rc == 0, "vx_prim_reduce returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, rows * 4)),
+                              dtype=torch.float32).reshape(aten.shape)
+
+    assert torch.equal(direct, aten), (
+        "the ATen %s path and a direct vx_prim_reduce call disagree; they are "
+        "not the same kernel.\n  max |diff| = %g"
+        % (name, (direct - aten).abs().max().item()))
+
+
+def test_the_reduction_kernel_propagates_nan(backend, dl, dl_prim):
+    """amax's NaN rule, through the shared kernel rather than beside it."""
+    hip, reduce_fn = dl[0], dl_prim[1]
+    x = torch.tensor([[1.0, float("nan"), 3.0],
+                      [4.0, 5.0, 6.0]])
+
+    got = torch.amax(x.to("vortex"), dim=1).cpu()
+    assert torch.isnan(got[0]) and got[1] == 6.0
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.numpy().tobytes())
+    dout = _upload(hip, b"\0" * 8)
+    assert reduce_fn(queue, PRIM_OP_MAX, dx.value, dout.value, 2, 3) == 0
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, 8)),
+                              dtype=torch.float32)
+    assert torch.isnan(direct[0]) and direct[1] == 6.0
 
 
 # The kernel -> argument-struct mapping, read from the kernel sources rather

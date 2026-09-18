@@ -117,15 +117,22 @@ def hip_lib():
     return _hip()
 
 
+# DL images the backend does not load itself. It holds torch_all, blas, dnn
+# and prim; asking the HIP layer for one of those is a second load of the same
+# file, which the runtime refuses by address range -- correctly, and it is the
+# reason this fixture exists rather than a load inside each test.
+UNOWNED_DL_IMAGES = ("rng", "quant")
+
+
 @pytest.fixture(scope="module")
 def dl_modules(hip_lib):
     """Load the DL images once for the whole module.
 
     The runtime keys a loaded image by its address range, so loading the same
-    file twice in one process is a conflict -- which is also why the loader
-    belongs behind a fixture here rather than in each test.
+    file twice in one process is a conflict.
     """
-    return {name: _load(hip_lib, _dl_image(name)) for name in ("rng", "prim")}
+    return {name: _load(hip_lib, _dl_image(name))
+            for name in UNOWNED_DL_IMAGES}
 
 
 def _dl_image(name):
@@ -192,9 +199,22 @@ def test_kernels_from_two_images_both_execute(backend, hip_lib, dl_modules):
     assert bool(((a * a).cpu() == 4.0).all())
 
 
-def test_three_images_coexist(backend, hip_lib, dl_modules):
-    assert len(dl_modules) == 2      # plus the backend's own image, loaded at import
-    # and the backend's image is still usable
+def test_every_image_coexists(backend, hip_lib, dl_modules):
+    """The backend's own images plus the hand-loaded ones, all at once.
+
+    The count is asserted rather than implied: the backend holds one image of
+    its own and one per DL module it has unified an operator onto, and a
+    regression that quietly loaded a fifth slot would otherwise show up only as
+    a module that stopped being reachable.
+    """
+    assert len(dl_modules) == 2
+    build = _paths.find_build()
+    assert os.path.exists(os.path.join(build, "torch-vortex", "kernels",
+                                       "torch_all.vxbin"))
+    # and the backend's own kernels still work with all of them resident
     a = torch.ones(64, device="vortex")
     three = torch.full((64,), 3.0, device="vortex")
     assert bool(((a * three).cpu() == 3.0).all())
+    # as does a DL kernel the backend reaches through the unified path
+    assert bool((torch.relu(torch.tensor([-1.0, 2.0], device="vortex")).cpu()
+                 == torch.tensor([0.0, 2.0])).all())

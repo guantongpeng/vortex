@@ -31,33 +31,6 @@
 // second definition is exactly how the host/device layout drift started.
 #include "torch_kernel_args.h"
 
-__device__ inline float torch_unary_apply(float x, uint32_t op) {
-    switch (op) {
-    // max(x, 0) with PyTorch's semantics: NaN propagates, -0.0 is preserved.
-    // `x > 0.0f ? x : 0.0f` gets both wrong.
-    case TORCH_UNARY_RELU:       return x < 0.0f ? 0.0f : x;
-    case TORCH_UNARY_NEG:        return -x;
-    case TORCH_UNARY_ABS:        return x < 0.0f ? -x : x;
-    case TORCH_UNARY_EXP:        return expf(x);
-    case TORCH_UNARY_LOG:        return logf(x);
-    case TORCH_UNARY_SQRT:       return sqrtf(x);
-    case TORCH_UNARY_RSQRT:      return 1.0f / sqrtf(x);
-    case TORCH_UNARY_SIGMOID:    return 1.0f / (1.0f + expf(-x));
-    case TORCH_UNARY_TANH:       return tanhf(x);
-    case TORCH_UNARY_RECIPROCAL: return 1.0f / x;
-    // Two gelu forms, because torch has two: the default is erf-based and
-    // approximate="tanh" is the tanh one. They are not interchangeable.
-    case TORCH_UNARY_GELU:
-        return 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
-    case TORCH_UNARY_GELU_TANH:
-        return 0.5f * x *
-               (1.0f + tanhf(0.7978845608028654f *
-                             (x + 0.044715f * x * x * x)));
-    case TORCH_UNARY_SILU:       return x / (1.0f + expf(-x));
-    default:                     return x;
-    }
-}
-
 __device__ inline float torch_binary_apply(float a, float b, uint32_t op) {
     switch (op) {
     case TORCH_BINARY_ADD:     return a + b;
@@ -92,29 +65,10 @@ __global__ void scalar_op_kernel(scalar_args_t* arg) {
     }
 }
 
-__global__ void unary_op_kernel(unary_args_t* arg) {
-    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
-         i += blockDim.x * gridDim.x) {
-        ((float*)(uintptr_t)arg->dst)[i] =
-            torch_unary_apply(((const float*)(uintptr_t)arg->a)[i], arg->op);
-    }
-}
-
 __global__ void fill_kernel(fill_args_t* arg) {
     for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
          i += blockDim.x * gridDim.x) {
         ((float*)(uintptr_t)arg->dst)[i] = arg->value;
-    }
-}
-
-// In-place relu. A separate entry point rather than the unary kernel with a
-// flag, because aten::relu_ mutates its input while aten::relu must not, and
-// two names make that difference visible at the call site.
-__global__ void relu_kernel(fill_args_t* arg) {
-    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
-         i += blockDim.x * gridDim.x) {
-        float* dst = (float*)(uintptr_t)arg->dst;
-        dst[i] = torch_unary_apply(dst[i], TORCH_UNARY_RELU);
     }
 }
 
@@ -154,26 +108,4 @@ __global__ void broadcast_op_kernel(broadcast_op_args_t* arg) {
             torch_binary_apply(((const float*)(uintptr_t)arg->a)[a_off],
                                ((const float*)(uintptr_t)arg->b)[b_off], arg->op);
     }
-}
-
-// One thread per row over `cols` contiguous values. sum, mean and max.
-//
-// The accumulator starts at -INFINITY for max, not a finite sentinel, and NaN
-// wins: torch.amax propagates NaN, and `-3.4e38f` (as the pool kernel used to
-// seed with) drops -inf inputs and erases NaN.
-__global__ void reduce_rows_kernel(reduce_args_t* arg) {
-    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= arg->rows) return;
-    const float* in = (const float*)(uintptr_t)arg->in + (size_t)row * arg->cols;
-    float acc = (arg->op == 2) ? -INFINITY : 0.0f;
-    for (uint32_t i = 0; i < arg->cols; ++i) {
-        const float v = in[i];
-        if (arg->op == 2) {
-            if (v > acc || isnan(v)) acc = v;
-        } else {
-            acc += v;
-        }
-    }
-    if (arg->op == 1) acc /= (float)arg->cols;
-    ((float*)(uintptr_t)arg->out)[row] = acc;
 }

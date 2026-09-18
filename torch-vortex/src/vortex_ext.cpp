@@ -675,9 +675,19 @@ void launch_binary_op(uint64_t dst, uint64_t a, uint64_t b, uint32_t n,
     launch(h_binary_op_kernel, args, (n + 3) / 4);
 }
 
+// The unary operations are sw/dl's prim kernel rather than one of ours (W3.1).
+// `op` is a vx_prim_op, in-place forms included: source and destination are the
+// same buffer there, which is safe because each thread reads and writes the
+// same index.
 void launch_unary_op(uint64_t dst, uint64_t a, uint32_t n, uint32_t op) {
-    unary_args_t args = {dst, a, n, op};
-    launch(h_unary_op_kernel, args, (n + 3) / 4);
+    // Nothing to do is not a launch, and the DL entry point refuses n == 0
+    // rather than accepting an empty job. This used to fall out of the grid
+    // being zero; it has to be said out loud now.
+    if (n == 0) {
+        ++g_stats.skipped_launches;
+        return;
+    }
+    DL_LAUNCH(vx_prim_unary(current_queue(), (vx_prim_op)op, a, dst, n));
 }
 
 void launch_scalar_op(uint64_t dst, uint64_t a, float value, uint32_t n,
@@ -994,7 +1004,9 @@ static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src) {
 // The normalising copy costs a pass. A stride-aware reduction kernel is the
 // obvious next step (W7.1 measures whether it matters); correctness first.
 
-enum TorchReduceOp { TORCH_REDUCE_SUM = 0, TORCH_REDUCE_MEAN, TORCH_REDUCE_MAX };
+// The reduce ops are the DL prim library's (vx_prim_op's reduction half), so
+// there is no local enum here: a second numbering is how the host and the
+// kernel start disagreeing about what "1" means.
 
 // The shape the result has, which ATen would otherwise compute for us.
 static std::vector<int64_t> reduced_shape(const torch::Tensor& self,
@@ -1092,11 +1104,39 @@ static torch::Tensor& reduce_into(const torch::Tensor& self, torch::Tensor& out,
     TORCH_CHECK(out.numel() == src.size(0), "torch_vortex: ", name, " out has ",
                 out.numel(), " elements but the reduction produces ",
                 src.size(0));
-    reduce_args_t args = {(uint64_t)(uintptr_t)src.data_ptr(),
-                          (uint64_t)(uintptr_t)out.data_ptr(),
-                          u32_dim(src.size(0), "reduce rows"),
-                          u32_dim(src.size(1), "reduce columns"), op, 0};
-    launch(h_reduce_rows_kernel, args, (args.rows + 3) / 4);
+    // Nothing to reduce is not a launch, and the DL entry point refuses both
+    // zero shapes rather than accepting an empty job. The local kernel this
+    // replaced expressed neither: a zero row count came out as a zero grid and
+    // was skipped, while a zero row length launched a CTA whose loop body
+    // never ran, leaving the accumulator at its seed. Both answers are now
+    // stated rather than inherited from that.
+    if (src.size(0) == 0) {
+        // Zero rows: the result is empty, so there is nothing to write.
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    if (src.size(1) == 0) {
+        // One row of zero elements. sum and mean still have answers, and no
+        // kernel can produce them -- there is nothing to accumulate -- so the
+        // identity is written instead. max has no identity, and torch refuses
+        // the same call with "amax(): Expected reduction dim to be specified
+        // for input.numel() == 0"; agreeing with that beats inventing a value.
+        // (The seed the old kernel left behind was -INFINITY, which torch never
+        // returns.)
+        TORCH_CHECK(op != VX_PRIM_OP_MAX, "torch_vortex: ", name,
+                    " of a tensor with no elements has no result; torch amax "
+                    "requires a reduction dim for an empty input");
+        fill_args_t args = {(uint64_t)(uintptr_t)out.data_ptr(),
+                            u32_numel(out, name),
+                            op == VX_PRIM_OP_MEAN ? (float)NAN : 0.0f, 0};
+        launch(h_fill_kernel, args, (args.n + 3) / 4);
+        return out;
+    }
+    DL_LAUNCH(vx_prim_reduce(current_queue(), (vx_prim_op)op,
+                             (uint64_t)(uintptr_t)src.data_ptr(),
+                             (uint64_t)(uintptr_t)out.data_ptr(),
+                             u32_dim(src.size(0), "reduce rows"),
+                             u32_dim(src.size(1), "reduce columns")));
     return out;
 }
 
@@ -1410,10 +1450,10 @@ static torch::Tensor& unary_op_(torch::Tensor& self, uint32_t op,
 // not a different spelling of the same one.
 static uint32_t gelu_op(const std::string_view& approximate, const char* name) {
     if (approximate == "none") {
-        return TORCH_UNARY_GELU;
+        return VX_PRIM_OP_GELU_ERF;
     }
     if (approximate == "tanh") {
-        return TORCH_UNARY_GELU_TANH;
+        return VX_PRIM_OP_GELU_TANH;
     }
     TORCH_CHECK(false, "torch_vortex: ", name, " approximate='", approximate,
                 "' is unsupported; use 'none' or 'tanh'");
@@ -1429,10 +1469,10 @@ static torch::Tensor& gelu__impl(torch::Tensor& self,
 }
 
 static torch::Tensor relu_impl(const torch::Tensor& self) {
-    return unary_op(self, TORCH_UNARY_RELU, "relu");
+    return unary_op(self, VX_PRIM_OP_RELU, "relu");
 }
 static torch::Tensor& relu__impl(torch::Tensor& self) {
-    return unary_op_(self, TORCH_UNARY_RELU, "relu_");
+    return unary_op_(self, VX_PRIM_OP_RELU, "relu_");
 }
 
 #define VX_UNARY_OP(NAME, OP, LABEL)                                           \
@@ -1443,16 +1483,16 @@ static torch::Tensor& relu__impl(torch::Tensor& self) {
         return unary_op_(self, OP, LABEL);                                     \
     }
 
-VX_UNARY_OP(neg, TORCH_UNARY_NEG, "neg")
-VX_UNARY_OP(abs, TORCH_UNARY_ABS, "abs")
-VX_UNARY_OP(exp, TORCH_UNARY_EXP, "exp")
-VX_UNARY_OP(log, TORCH_UNARY_LOG, "log")
-VX_UNARY_OP(sqrt, TORCH_UNARY_SQRT, "sqrt")
-VX_UNARY_OP(rsqrt, TORCH_UNARY_RSQRT, "rsqrt")
-VX_UNARY_OP(sigmoid, TORCH_UNARY_SIGMOID, "sigmoid")
-VX_UNARY_OP(tanh, TORCH_UNARY_TANH, "tanh")
-VX_UNARY_OP(reciprocal, TORCH_UNARY_RECIPROCAL, "reciprocal")
-VX_UNARY_OP(silu, TORCH_UNARY_SILU, "silu")
+VX_UNARY_OP(neg, VX_PRIM_OP_NEG, "neg")
+VX_UNARY_OP(abs, VX_PRIM_OP_ABS, "abs")
+VX_UNARY_OP(exp, VX_PRIM_OP_EXP, "exp")
+VX_UNARY_OP(log, VX_PRIM_OP_LOG, "log")
+VX_UNARY_OP(sqrt, VX_PRIM_OP_SQRT, "sqrt")
+VX_UNARY_OP(rsqrt, VX_PRIM_OP_RSQRT, "rsqrt")
+VX_UNARY_OP(sigmoid, VX_PRIM_OP_SIGMOID, "sigmoid")
+VX_UNARY_OP(tanh, VX_PRIM_OP_TANH, "tanh")
+VX_UNARY_OP(reciprocal, VX_PRIM_OP_RECIPROCAL, "reciprocal")
+VX_UNARY_OP(silu, VX_PRIM_OP_SILU, "silu")
 #undef VX_UNARY_OP
 
 // ---------------------------------------------------------------------------
@@ -1825,7 +1865,7 @@ static torch::Tensor sum_impl(const torch::Tensor& self,
     check_reduce_dtype(dtype, "sum");
     check_reduce_dims(self, dim, "sum");
     auto out = torch::empty(reduced_shape(self, dim, keepdim), self.options());
-    return reduce_into(self, out, dim, TORCH_REDUCE_SUM, "sum");
+    return reduce_into(self, out, dim, VX_PRIM_OP_SUM, "sum");
 }
 static torch::Tensor& sum_out_impl(const torch::Tensor& self,
                                    c10::OptionalArrayRef<int64_t> dim,
@@ -1833,7 +1873,7 @@ static torch::Tensor& sum_out_impl(const torch::Tensor& self,
                                    std::optional<c10::ScalarType> dtype,
                                    torch::Tensor& out) {
     check_reduce_dtype(dtype, "sum");
-    return reduce_into(self, out, dim, TORCH_REDUCE_SUM, "sum");
+    return reduce_into(self, out, dim, VX_PRIM_OP_SUM, "sum");
 }
 
 static torch::Tensor mean_impl(const torch::Tensor& self,
@@ -1842,7 +1882,7 @@ static torch::Tensor mean_impl(const torch::Tensor& self,
     check_reduce_dtype(dtype, "mean");
     check_reduce_dims(self, dim, "mean");
     auto out = torch::empty(reduced_shape(self, dim, keepdim), self.options());
-    return reduce_into(self, out, dim, TORCH_REDUCE_MEAN, "mean");
+    return reduce_into(self, out, dim, VX_PRIM_OP_MEAN, "mean");
 }
 static torch::Tensor& mean_out_impl(const torch::Tensor& self,
                                     c10::OptionalArrayRef<int64_t> dim,
@@ -1850,7 +1890,7 @@ static torch::Tensor& mean_out_impl(const torch::Tensor& self,
                                     std::optional<c10::ScalarType> dtype,
                                     torch::Tensor& out) {
     check_reduce_dtype(dtype, "mean");
-    return reduce_into(self, out, dim, TORCH_REDUCE_MEAN, "mean");
+    return reduce_into(self, out, dim, VX_PRIM_OP_MEAN, "mean");
 }
 
 // amax's dim is an int[1] (empty means every dimension), not an optional.
@@ -1859,21 +1899,21 @@ static torch::Tensor amax_impl(const torch::Tensor& self, c10::IntArrayRef dim,
     c10::OptionalArrayRef<int64_t> d =
         dim.size() == 0 ? std::nullopt : std::make_optional(dim);
     auto out = torch::empty(reduced_shape(self, d, keepdim), self.options());
-    return reduce_into(self, out, d, TORCH_REDUCE_MAX, "amax");
+    return reduce_into(self, out, d, VX_PRIM_OP_MAX, "amax");
 }
 static torch::Tensor& amax_out_impl(const torch::Tensor& self,
                                     c10::IntArrayRef dim, bool keepdim,
                                     torch::Tensor& out) {
     c10::OptionalArrayRef<int64_t> d =
         dim.size() == 0 ? std::nullopt : std::make_optional(dim);
-    return reduce_into(self, out, d, TORCH_REDUCE_MAX, "amax");
+    return reduce_into(self, out, d, VX_PRIM_OP_MAX, "amax");
 }
 
 // aten::max with no dim is a full reduction. max(dim=...) also returns
 // indices, which needs an argmax kernel and is refused by name.
 static torch::Tensor max_impl(const torch::Tensor& self) {
     auto out = torch::empty({}, self.options());
-    return reduce_into(self, out, std::nullopt, TORCH_REDUCE_MAX, "max");
+    return reduce_into(self, out, std::nullopt, VX_PRIM_OP_MAX, "max");
 }
 
 // Defined with the fallbacks, below.
@@ -2052,6 +2092,7 @@ void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
     };
     DL_CHECK(vx_dnn_init(g_dl_device, dl_image("dnn").c_str()));
     DL_CHECK(vx_blas_init(g_dl_device, dl_image("blas").c_str()));
+    DL_CHECK(vx_prim_init(g_dl_device, dl_image("prim").c_str()));
 
     VX_CHECK(hipModuleLoad(&g_ops_module, vxbin_path.c_str()));
 #define TORCH_KERNEL_RESOLVE(name, type, mbx, lmem)                            \
@@ -2105,6 +2146,7 @@ void vortex_at_exit() {
     // first, then reset, or the device goes away underneath them.
     vx_blas_finalize();
     vx_dnn_finalize();
+    vx_prim_finalize();
     hipDeviceReset();
 }
 
