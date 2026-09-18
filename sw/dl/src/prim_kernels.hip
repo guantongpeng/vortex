@@ -103,10 +103,19 @@ static __device__ float warp_max(float x) {
 }
 
 // The better of two (value, index) candidates: NaN beats every number, and
-// among equals -- NaN included, since NaN == NaN is false -- the smaller index
-// wins, which is what torch.argmax returns for a tie.
+// among equals the smaller index wins -- which is what torch.argmax returns
+// for a tie.
+//
+// Two NaNs are an equality, and that needs saying: NaN != NaN is true, so a
+// plain `if (v != bv) return v > bv;` sends two NaNs down the value compare,
+// gets false, and keeps whichever candidate happened to be on the left. The
+// result is not the first NaN but the last one in the merge order, which is
+// measurable: for [1, NaN, NaN, NaN] this returned index 2 where torch
+// returns 1, and it returned 16 for a 21-wide row whose first element is the
+// NaN, where torch returns 0.
 static __device__ bool argmax_better(float v, uint32_t i, float bv, uint32_t bi) {
     if (isnan(v) != isnan(bv)) return isnan(v);
+    if (isnan(v)) return i < bi;          // both NaN: the earlier index wins
     if (v != bv) return v > bv;
     return i < bi;
 }
@@ -130,8 +139,11 @@ __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
             acc += x;
         } else {
             // The same compare serves the value and the index, so the two
-            // cannot disagree about which element won.
-            if (x > seen || isnan(x)) {
+            // cannot disagree about which element won. `isnan(x) && !isnan(seen)`
+            // rather than `|| isnan(x)`: with the latter, a lane that already
+            // holds a NaN adopts every later NaN as well and ends up reporting
+            // the last one instead of the first.
+            if (x > seen || (isnan(x) && !isnan(seen))) {
                 seen = x;
                 seen_idx = i;
             }
@@ -258,35 +270,63 @@ __global__ void prim_layernorm_kernel(vx_prim_norm_args_t* arg) {
     float* out = (float*)(uintptr_t)arg->out + (size_t)row * arg->cols;
     const uint32_t cols = arg->cols;
 
-    float s1 = 0.0f, s2 = 0.0f;
+    // pass 1: the mean
+    float s1 = 0.0f;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
         s1 += in[j];
-        s2 += in[j] * in[j];
     }
     s1 = warp_sum(s1);
-    s2 = warp_sum(s2);
     if (threadIdx.x % warpSize == 0) {
         tbuf[threadIdx.x / warpSize] = s1;
-        tbuf[8 + threadIdx.x / warpSize] = s2;
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-        float v1 = 0.0f, v2 = 0.0f;
-        for (uint32_t w = 0; w < PRIM_BLOCK / warpSize; ++w) {
-            v1 += tbuf[w];
-            v2 += tbuf[8 + w];
-        }
+        float v1 = 0.0f;
+        for (uint32_t w = 0; w < PRIM_BLOCK / warpSize; ++w) v1 += tbuf[w];
         tbuf[16] = v1 / (float)cols;              // mean
-        tbuf[17] = v2 / (float)cols;              // mean of squares
     }
     __syncthreads();
     const float mean = tbuf[16];
-    const float m2 = tbuf[17];
-    const float var = fmaxf(m2 - mean * mean, 0.0f);
-    const float rstd = rsqrtf(var + arg->eps);
 
+    // pass 2: the variance, as the mean squared deviation from the mean.
+    //
+    // It used to be E[x^2] - mean^2 in one pass, which is the same number in
+    // exact arithmetic and a different one in float32: for a row of values
+    // around 1e6 both terms are ~1e12 and their difference is ~1, so every
+    // significant digit cancels and the result clamps to 0 (rstd then comes
+    // out as 1/sqrt(eps) = 316.2 where the answer is 0.894). Two passes cost
+    // one more read of a row that is already in cache, and Welford -- what
+    // ATen uses -- is not available without a cross-thread recurrence.
+    float s2 = 0.0f;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-        out[j] = (in[j] - mean) * rstd * gamma[j] + beta[j];
+        const float d = in[j] - mean;
+        s2 += d * d;
+    }
+    s2 = warp_sum(s2);
+    if (threadIdx.x % warpSize == 0) {
+        tbuf[threadIdx.x / warpSize] = s2;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float v2 = 0.0f;
+        for (uint32_t w = 0; w < PRIM_BLOCK / warpSize; ++w) v2 += tbuf[w];
+        const float var = v2 / (float)cols;
+        const float rstd = rsqrtf(var + arg->eps);
+        tbuf[17] = rstd;
+        if (arg->mean) ((float*)(uintptr_t)arg->mean)[row] = mean;
+        if (arg->rstd) ((float*)(uintptr_t)arg->rstd)[row] = rstd;
+    }
+    __syncthreads();
+    const float rstd = tbuf[17];
+
+    if (gamma && beta) {
+        for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
+            out[j] = (in[j] - mean) * rstd * gamma[j] + beta[j];
+        }
+    } else {
+        for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
+            out[j] = (in[j] - mean) * rstd;
+        }
     }
 }
 
@@ -315,7 +355,15 @@ __global__ void prim_rmsnorm_kernel(vx_prim_rmsnorm_args_t* arg) {
     __syncthreads();
     const float inv_rms = tbuf[16];
 
-    for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-        out[j] = in[j] * inv_rms * gamma[j];
+    // gamma is optional: torch.rms_norm(x, shape) and nn.RMSNorm without a
+    // weight pass none, which is a mode rather than a caller error.
+    if (gamma) {
+        for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
+            out[j] = in[j] * inv_rms * gamma[j];
+        }
+    } else {
+        for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
+            out[j] = in[j] * inv_rms;
+        }
     }
 }

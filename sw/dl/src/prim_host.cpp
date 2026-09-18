@@ -193,17 +193,21 @@ vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
 }
 
 vx_prim_status vx_prim_layernorm(vx_queue_h q, uint64_t in, uint64_t gamma,
-                                 uint64_t beta, uint64_t out,
-                                 uint32_t rows, uint32_t cols, float eps) {
+                                 uint64_t beta, uint64_t out, uint64_t mean,
+                                 uint64_t rstd, uint32_t rows, uint32_t cols,
+                                 float eps) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
-    if (!in || !gamma || !beta || !out || rows == 0 || cols == 0) {
-        return VX_PRIM_ERR_BAD_ARGS;
-    }
+    if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
+    // Affine is all or nothing: the kernel reads gamma and beta together, so
+    // one without the other would silently ignore the one that was given.
+    if ((gamma == 0) != (beta == 0)) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_norm_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.gamma = (vx_dl_ptr_t)gamma;
     args.beta = (vx_dl_ptr_t)beta;
     args.out = (vx_dl_ptr_t)out;
+    args.mean = (vx_dl_ptr_t)mean;
+    args.rstd = (vx_dl_ptr_t)rstd;
     args.rows = rows;
     args.cols = cols;
     args.eps = eps;
@@ -214,9 +218,7 @@ vx_prim_status vx_prim_rmsnorm(vx_queue_h q, uint64_t in, uint64_t gamma,
                                uint64_t out, uint32_t rows, uint32_t cols,
                                float eps) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
-    if (!in || !gamma || !out || rows == 0 || cols == 0) {
-        return VX_PRIM_ERR_BAD_ARGS;
-    }
+    if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_rmsnorm_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.gamma = (vx_dl_ptr_t)gamma;

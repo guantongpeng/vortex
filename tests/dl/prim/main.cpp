@@ -386,18 +386,47 @@ int main(int argc, char** argv) {
         DevBuf bg = make_buf(dev, C * 4);
         DevBuf bb = make_buf(dev, C * 4);
         DevBuf bout = make_buf(dev, nin.size() * 4);
+        DevBuf bmean = make_buf(dev, R * 4);
+        DevBuf brstd = make_buf(dev, R * 4);
         upload(q, bin, nin.data(), nin.size() * 4);
         upload(q, bg, gamma.data(), C * 4);
         upload(q, bb, beta.data(), C * 4);
         std::vector<float> ngot(nin.size());
 
         CHECK(vx_prim_layernorm(q, bin.addr, bg.addr, bb.addr, bout.addr,
-                                R, C, 1e-5f));
+                                bmean.addr, brstd.addr, R, C, 1e-5f));
         CHECK(vx_queue_flush(q));
         download(q, ngot.data(), bout, ngot.size() * 4);
         std::vector<double> nref;
         ref::layernorm(nin, gamma, beta, R, C, 1e-5, nref);
         check("layernorm", ngot, nref, 2e-4, 1e-4, &failures);
+
+        // the auxiliary outputs, which aten::native_layer_norm returns
+        {
+            std::vector<float> mgot(R), rgot(R);
+            std::vector<double> mref(R), rref(R);
+            download(q, mgot.data(), bmean, R * 4);
+            download(q, rgot.data(), brstd, R * 4);
+            ref::layer_stats(nin, R, C, 1e-5, mref, rref);
+            check("ln_mean", mgot, mref, 1e-5, 1e-5, &failures);
+            check("ln_rstd", rgot, rref, 1e-5, 1e-5, &failures);
+        }
+
+        // no affine: the mode F.layer_norm(x, shape) asks for
+        CHECK(vx_prim_layernorm(q, bin.addr, 0, 0, bout.addr, 0, 0,
+                                R, C, 1e-5f));
+        CHECK(vx_queue_flush(q));
+        download(q, ngot.data(), bout, ngot.size() * 4);
+        ref::layernorm(nin, std::vector<float>(C, 1.0f), std::vector<float>(C, 0.0f),
+                       R, C, 1e-5, nref);
+        check("layernorm_noaffine", ngot, nref, 2e-4, 1e-4, &failures);
+
+        // half an affine is a caller error, not a mode
+        if (vx_prim_layernorm(q, bin.addr, bg.addr, 0, bout.addr, 0, 0,
+                              R, C, 1e-5f) != VX_PRIM_ERR_BAD_ARGS) {
+            fprintf(stderr, "  layernorm accepted gamma without beta\n");
+            ++failures;
+        }
 
         CHECK(vx_prim_rmsnorm(q, bin.addr, bg.addr, bout.addr, R, C, 1e-5f));
         CHECK(vx_queue_flush(q));
@@ -405,10 +434,85 @@ int main(int argc, char** argv) {
         ref::rmsnorm(nin, gamma, R, C, 1e-5, nref);
         check("rmsnorm", ngot, nref, 2e-4, 1e-4, &failures);
 
+        CHECK(vx_prim_rmsnorm(q, bin.addr, 0, bout.addr, R, C, 1e-5f));
+        CHECK(vx_queue_flush(q));
+        download(q, ngot.data(), bout, ngot.size() * 4);
+        ref::rmsnorm(nin, std::vector<float>(C, 1.0f), R, C, 1e-5, nref);
+        check("rmsnorm_noaffine", ngot, nref, 2e-4, 1e-4, &failures);
+
         vx_buffer_release(bin.h);
         vx_buffer_release(bg.h);
         vx_buffer_release(bb.h);
         vx_buffer_release(bout.h);
+        vx_buffer_release(bmean.h);
+        vx_buffer_release(brstd.h);
+    }
+
+    // ---- layernorm: the estimator, not just the average --------------------
+    //
+    // Values around 1e6 in float32 make E[x^2] and mean^2 both ~1e12. Their
+    // difference is ~1, so every significant digit cancels: the one-pass
+    // variance came out 0 and rstd 1/sqrt(eps) = 316.2, where the answer is
+    // 1.25 and 0.894. The reference above uses the same one-pass formula in
+    // double, so it agreed with the wrong kernel -- a defect written into its
+    // own oracle, which is how it survived.
+    {
+        const std::vector<float> big = {1e6f, 1e6f + 1.0f, 1e6f + 2.0f,
+                                        1e6f + 3.0f};
+        const uint32_t C = (uint32_t)big.size(), R = 1;
+        DevBuf bin = make_buf(dev, C * 4), bout = make_buf(dev, C * 4);
+        DevBuf brstd = make_buf(dev, R * 4);
+        upload(q, bin, big.data(), C * 4);
+        CHECK(vx_prim_layernorm(q, bin.addr, 0, 0, bout.addr, 0, brstd.addr,
+                                R, C, 1e-5f));
+        CHECK(vx_queue_flush(q));
+        float rstd = 0.0f;
+        download(q, &rstd, brstd, 4);
+        // 1/sqrt(1.25 + 1e-5) at double precision, then rounded to float32
+        const double want = 1.0 / std::sqrt(1.25 + 1e-5);
+        if (std::fabs((double)rstd - want) > 1e-5) {
+            fprintf(stderr, "  rstd for 1e6-scale input: got %.7g want %.7g\n",
+                    (double)rstd, want);
+            ++failures;
+        }
+        vx_buffer_release(bin.h);
+        vx_buffer_release(bout.h);
+        vx_buffer_release(brstd.h);
+    }
+
+    // ---- argmax: the first NaN, not the last one ---------------------------
+    //
+    // torch.argmax returns the first index among ties, NaNs included. The
+    // merge compared two NaNs with `v != bv`, which is true for NaN vs NaN and
+    // sent them down the greater-than branch, so the winner was whichever
+    // candidate the tree happened to visit last.
+    {
+        const std::vector<std::pair<std::vector<float>, uint32_t>> cases = {
+            {{1.0f, NAN, NAN, NAN}, 1},
+            {{NAN, 1.0f, NAN, NAN}, 0},
+            {{1.0f, 2.0f, 3.0f, 3.0f}, 2},
+            // 21 wide: thread 0 owns both index 0 and index 16, and the warp
+            // merge has to prefer the lower lane on a tie
+            {{NAN, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f,
+              11.0f, 12.0f, 13.0f, 14.0f, 15.0f, NAN, 17.0f, 18.0f, 19.0f,
+              20.0f}, 0},
+        };
+        for (const auto& c : cases) {
+            const uint32_t n = (uint32_t)c.first.size();
+            DevBuf bin = make_buf(dev, n * 4), bout = make_buf(dev, 4);
+            upload(q, bin, c.first.data(), n * 4);
+            CHECK(vx_prim_reduce(q, VX_PRIM_OP_ARGMAX, bin.addr, bout.addr, 1, n));
+            CHECK(vx_queue_flush(q));
+            uint32_t got = ~0u;
+            download(q, &got, bout, 4);
+            if (got != c.second) {
+                fprintf(stderr, "  argmax of a %u-wide row: got %u want %u\n",
+                        n, got, c.second);
+                ++failures;
+            }
+            vx_buffer_release(bin.h);
+            vx_buffer_release(bout.h);
+        }
     }
 
     vx_buffer_release(din.h);

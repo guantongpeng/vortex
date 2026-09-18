@@ -92,21 +92,31 @@ typedef struct {
 } vx_prim_rowargs_t;
 
 // LayerNorm: mean/var over the row, then scale/gamma + shift/beta.
+//
+// gamma and beta are optional: a null address means no affine, which is what
+// F.layer_norm(x, shape) and nn.LayerNorm(elementwise_affine=False) ask for.
+// Giving only one of them is a caller error, not a mode.
+//
+// mean and rstd are also optional outputs, one float per row:
+// aten::native_layer_norm returns them and there is no second entry point that
+// would compute them. rstd is 1/sqrt(var + eps), the reciprocal.
 typedef struct {
     vx_dl_ptr_t in;
-    vx_dl_ptr_t gamma;
-    vx_dl_ptr_t beta;
+    vx_dl_ptr_t gamma;   // 0 for none
+    vx_dl_ptr_t beta;    // 0 for none
     vx_dl_ptr_t out;
+    vx_dl_ptr_t mean;    // rows floats, or 0
+    vx_dl_ptr_t rstd;    // rows floats, or 0
     uint32_t rows;
     uint32_t cols;
     float eps;
     uint32_t pad;
 } vx_prim_norm_args_t;
 
-// RMSNorm: rms = sqrt(mean(x^2) + eps); out = x / rms * gamma (+beta opt).
+// RMSNorm: rms = sqrt(mean(x^2) + eps); out = x / rms * gamma.
 typedef struct {
     vx_dl_ptr_t in;
-    vx_dl_ptr_t gamma;
+    vx_dl_ptr_t gamma;   // 0 for none
     vx_dl_ptr_t out;
     uint32_t rows;
     uint32_t cols;

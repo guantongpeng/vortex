@@ -58,24 +58,44 @@ inline void softmax(const std::vector<float>& in, uint32_t rows,
     }
 }
 
+// The per-row mean and rstd, which is what aten::native_layer_norm returns
+// alongside the normalised output. The variance is the mean squared deviation
+// from the mean -- NOT E[x^2] - mean^2, which is the same number in exact
+// arithmetic and a different one in floating point. Both forms are written in
+// double here so the reference itself is not the limiting factor; the kernel
+// runs in float32 and is compared to this.
+inline void layer_stats(const std::vector<float>& in, uint32_t rows,
+                        uint32_t cols, double eps, std::vector<double>& mean,
+                        std::vector<double>& rstd) {
+    mean.assign(rows, 0.0);
+    rstd.assign(rows, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        const float* row = in.data() + (size_t)r * cols;
+        double s1 = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) s1 += row[j];
+        const double m = s1 / cols;
+        double s2 = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) {
+            const double d = (double)row[j] - m;
+            s2 += d * d;
+        }
+        mean[r] = m;
+        rstd[r] = 1.0 / std::sqrt(s2 / cols + eps);
+    }
+}
+
 inline void layernorm(const std::vector<float>& in,
                       const std::vector<float>& gamma,
                       const std::vector<float>& beta, uint32_t rows,
                       uint32_t cols, double eps, std::vector<double>& out) {
     out.assign((size_t)rows * cols, 0.0);
+    std::vector<double> mean, rstd;
+    layer_stats(in, rows, cols, eps, mean, rstd);
     for (uint32_t r = 0; r < rows; ++r) {
         const float* row = in.data() + (size_t)r * cols;
-        double s1 = 0.0, s2 = 0.0;
-        for (uint32_t j = 0; j < cols; ++j) {
-            s1 += row[j];
-            s2 += (double)row[j] * row[j];
-        }
-        double mean = s1 / cols;
-        double var = std::max(s2 / cols - mean * mean, 0.0);
-        double rstd = 1.0 / std::sqrt(var + eps);
         for (uint32_t j = 0; j < cols; ++j) {
             out[(size_t)r * cols + j] =
-                ((double)row[j] - mean) * rstd * gamma[j] + beta[j];
+                ((double)row[j] - mean[r]) * rstd[r] * gamma[j] + beta[j];
         }
     }
 }

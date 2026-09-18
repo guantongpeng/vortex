@@ -78,10 +78,17 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
 vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
                                uint32_t rows, uint32_t cols);
 
-// LayerNorm / RMSNorm, one CTA per row; gamma/beta are cols-length.
+// LayerNorm, one CTA per row; gamma/beta are cols-length. Either both are 0
+// (no affine) or both are addresses -- one of the two is a caller error.
+//
+// mean and rstd are rows-length outputs, one per row, and may each be 0 if the
+// caller does not want them. rstd is 1/sqrt(var + eps).
 vx_prim_status vx_prim_layernorm(vx_queue_h q, uint64_t in, uint64_t gamma,
-                                 uint64_t beta, uint64_t out,
-                                 uint32_t rows, uint32_t cols, float eps);
+                                 uint64_t beta, uint64_t out, uint64_t mean,
+                                 uint64_t rstd, uint32_t rows, uint32_t cols,
+                                 float eps);
+
+// RMSNorm, one CTA per row; gamma is cols-length and may be 0 (no affine).
 vx_prim_status vx_prim_rmsnorm(vx_queue_h q, uint64_t in, uint64_t gamma,
                                uint64_t out, uint32_t rows, uint32_t cols,
                                float eps);
