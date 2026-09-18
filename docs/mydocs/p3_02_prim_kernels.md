@@ -9,8 +9,8 @@
 - [`sw/dl/include/vortex/prim.h`](../../sw/dl/include/vortex/prim.h):主机 C API(`vx_prim_init/finalize/unary/reduce/softmax/layernorm/rmsnorm`)。
 - [`sw/dl/src/prim_args.h`](../../sw/dl/src/prim_args.h):每算子参数块(设备宽度指针,同 blas 约定)。
 - [`sw/dl/src/prim_kernels.hip`](../../sw/dl/src/prim_kernels.hip):KMU 镜像,5 个 kernel:
-  - `prim_unary_kernel`:ReLU/GELU(tanh 近似)/SiLU,grid-stride 单 warp CTA(P2-03 约束);
-  - `prim_reduce_kernel`:sum/max/argmax,单 16 线程多 warp CTA + LMEM 分块归约;argmax 以 (value, index) 对 shuffle,平局取最小索引(测试显式验证);
+  - `prim_unary_kernel`:13 个一元算子(ReLU、gelu 的 erf 与 tanh 两式、SiLU、NEG、ABS、EXP、LOG、SQRT、RSQRT、SIGMOID、TANH、RECIPROCAL),grid-stride 单 warp CTA(P2-03 约束)。算子集合在 P5.6 扩到与 ATen 侧一致,此前为 ReLU/GELU(tanh)/SiLU/NEG;
+  - `prim_reduce_kernel`:按行归约 `rows x cols`,一行一个 16 线程多 warp CTA + LMEM 分块归约;sum/mean/max/argmax。max 与 argmax 都 NaN 胜出,argmax 以 (value, index) 对 shuffle,平局取最小索引(测试显式验证)。P5.6 前是单 CTA 归约整条向量、且 max 用 `fmaxf` 丢 NaN;
   - `prim_softmax_kernel`:每 CTA 一行,三遍(max→exp+sum→scale),LMEM 广播槽;
   - `prim_layernorm_kernel`/`prim_rmsnorm_kernel`:每 CTA 一行,warp 归约 + LMEM 广播,LN 用 E[x²]−mean² 方差。
 - [`sw/dl/src/prim_host.cpp`](../../sw/dl/src/prim_host.cpp):dispatch(与 blas 同一 `libvortex_dl.so`);未用维度一律填 1(P3-01 发现)。
@@ -18,6 +18,8 @@
 - [`tests/dl/prim/`](../../tests/dl/prim/):777 元素(非整块)、softmax 65 列、LN/RMS 33 列、大值边界、argmax 平局(500 与 123 同值取 123)。
 
 ## 验证记录(2026-09-14)
+
+**这是本节点当时的记录**,算子集合与归约形态见 P5.6([p5_06_w3_prim_unification.md](p5_06_w3_prim_unification.md))的更新;下表未重测,不要当作当前状态。
 
 | 算子 | simx rv64 | rtlsim rv64 | simx rv32 |
 |---|---|---|---|

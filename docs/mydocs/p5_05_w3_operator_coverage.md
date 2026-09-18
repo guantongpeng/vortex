@@ -68,7 +68,7 @@ SUPPORTED                          UNSUPPORTED
 5. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
 6. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
 7. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
-8. **W3.1 与 `sw/dl` 统一** —— 已开始,见 §5。`conv2d` 与 pooling 已迁到 DL kernel 并删除重复实现;`batch norm` 与 `mm` 尚未。`sw/dl` 的 `prim_reduce`/`prim_unary` 与本轮的归约/一元 kernel 仍是**重复实现**。
+8. ~~**W3.1 与 `sw/dl` 统一**~~ —— **已完成**,见 §5 与 [p5_06](p5_06_w3_prim_unification.md)。`conv2d`、pooling、`mm/linear/addmm`、`batch norm`、一元与归约全部走 DL kernel,重复实现已删除。**例外**:二元 elementwise(`binary_op_kernel` 等)仍留在 torch 镜像,因为 DL 的 prim 只有一元;要统一需先给 prim 加二元入口。
 9. **`max(dim=)`/`argmax`/`topk`** —— 需要索引归约。
 
 ## 4. 本轮的一个实现教训
@@ -151,8 +151,15 @@ F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条�
 
 ### 5.7 仍未完成
 
-- `prim`:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce`
-  的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。
+> 前两条已在 P5.6 关闭,见 [p5_06_w3_prim_unification.md](p5_06_w3_prim_unification.md):
+> 一元与归约已迁到 DL 的 prim kernel（`unary_op_kernel`/`reduce_rows_kernel` 及参数块已删除）,
+> `prim_reduce` 的 NaN 语义与按行形态都已修。W3.1 的算子迁移至此完成;二元 elementwise
+> 仍留在 torch 镜像,因为 DL 的 prim 没有二元入口。
+
+- ~~`prim`:`vx_prim_unary`/`vx_prim_reduce` 与本轮的归约/一元 kernel 仍是两套实现;`prim_reduce`
+  的 max 用 `fmaxf`(丢 NaN),迁移前要一并修。~~(P5.6 已关闭)
+- 二元 elementwise(`binary_op_kernel`/`scalar_op_kernel`/`broadcast_op_kernel`)仍是 torch
+  镜像里的实现:DL 的 prim 只有一元。要统一需先给 prim 加二元入口。
 - `linear` 每次调用物化 `w.t().contiguous()`——DL gemm 没有 `transb`,这次拷贝是「一个 GEMM
   而不是两个」的代价。给 `vx_blas_gemm` 加 `transb` 是后续项。
 - `mxfp8_args.h` 的尺寸未纳入漂移测试:它的头文件在 host 侧编不过(声明了设备侧辅助函数),
