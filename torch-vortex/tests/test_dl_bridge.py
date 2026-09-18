@@ -546,6 +546,74 @@ def test_aten_rms_norm_is_the_dl_prim_kernel(backend, dl):
         "they are not the same kernel")
 
 
+@pytest.mark.parametrize("name,entry,fn", [
+    ("softmax", "vx_prim_softmax", lambda t: torch.softmax(t, -1)),
+    ("log_softmax", "vx_prim_log_softmax", lambda t: torch.log_softmax(t, -1)),
+])
+def test_aten_softmax_is_the_dl_prim_kernel(backend, dl, name, entry, fn):
+    """The softmax family, bit for bit. The trailing dim only: a middle dim
+    goes through a moved copy, which is a different question from which kernel
+    computes the answer.
+    """
+    hip = dl[0]
+    libdl = ctypes.CDLL(os.path.join(_paths.find_build(), "sw", "dl",
+                                     "libvortex_dl.so"))
+    call = getattr(libdl, entry)
+    call.restype = ctypes.c_int
+    call.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64,
+                     ctypes.c_uint32, ctypes.c_uint32]
+
+    torch.manual_seed(67)
+    rows, cols = 6, 11
+    x = torch.randn(rows, cols)
+
+    aten = fn(x.to("vortex")).cpu()
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (rows * cols * 4))
+    rc = call(queue, dx.value, dout.value, rows, cols)
+    assert rc == 0, "%s returned %d" % (entry, rc)
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, rows * cols * 4)),
+                              dtype=torch.float32).reshape(rows, cols)
+
+    assert torch.equal(direct, aten), (
+        "the ATen %s path and a direct %s call disagree; they are not the same "
+        "kernel.\n  max |diff| = %g"
+        % (name, entry, (direct - aten).abs().max().item()))
+
+
+def test_aten_logsumexp_is_the_dl_prim_kernel(backend, dl):
+    """logsumexp writes one value per row, so the comparison is rows-long."""
+    hip = dl[0]
+    libdl = ctypes.CDLL(os.path.join(_paths.find_build(), "sw", "dl",
+                                     "libvortex_dl.so"))
+    lse = libdl.vx_prim_logsumexp
+    lse.restype = ctypes.c_int
+    lse.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64,
+                    ctypes.c_uint32, ctypes.c_uint32]
+
+    torch.manual_seed(71)
+    rows, cols = 5, 13
+    x = torch.randn(rows, cols)
+
+    aten = torch.logsumexp(x.to("vortex"), -1).cpu()
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.detach().contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (rows * 4))
+    rc = lse(queue, dx.value, dout.value, rows, cols)
+    assert rc == 0, "vx_prim_logsumexp returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, rows * 4)),
+                              dtype=torch.float32)
+    assert torch.equal(direct, aten), (
+        "the ATen logsumexp path and a direct vx_prim_logsumexp call disagree")
+
+
 # The kernel -> argument-struct mapping, read from the kernel sources rather
 # than restated here: each entry point takes exactly one argument block.
 _KERNEL_RE = re.compile(r"__global__\s+void\s+(\w+)\s*\(\s*(\w+)\s*\*\s*arg\s*\)")

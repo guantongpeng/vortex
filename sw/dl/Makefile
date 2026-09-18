@@ -44,16 +44,17 @@ KERNEL_META := [{"name": "sgemm_f32_kernel", "args_size": $(ARGS_SIZE), "static_
 # prim/norm arg-block sizes (device-width pointers; see prim_args.h).
 # reduce gained rows/cols/op/pad when it became row-wise: 2 ptr + 4 u32.
 # layernorm gained mean/rstd as optional outputs: 6 ptr + 4 u32.
+# rowargs gained an op selector when softmax became a family: 2 ptr + 4 u32.
 ifeq ($(XLEN),64)
 PRIM_UNARY_SIZE := 24
 PRIM_REDUCE_SIZE := 32
-PRIM_ROWARGS_SIZE := 24
+PRIM_ROWARGS_SIZE := 32
 PRIM_NORM_SIZE := 64
 PRIM_RMSNORM_SIZE := 40
 else
 PRIM_UNARY_SIZE := 16
 PRIM_REDUCE_SIZE := 24
-PRIM_ROWARGS_SIZE := 16
+PRIM_ROWARGS_SIZE := 24
 PRIM_NORM_SIZE := 40
 PRIM_RMSNORM_SIZE := 28
 endif

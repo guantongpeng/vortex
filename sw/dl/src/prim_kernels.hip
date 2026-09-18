@@ -198,7 +198,13 @@ __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Softmax: one 16-thread CTA per row.
+// The softmax family: one 16-thread CTA per row.
+//
+// softmax, log_softmax and logsumexp differ only in what pass 3 writes:
+// a normalised distribution, its logarithm, or the single log-sum-exp per row.
+// The max shift in pass 1 is what keeps them stable, and it is the same shift
+// for all three, so they are one kernel with a selector rather than three
+// copies of the same two passes.
 // ---------------------------------------------------------------------------
 
 __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
@@ -231,11 +237,13 @@ __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
     __syncthreads();
     m = tbuf[8];
 
-    // pass 2: exp(x - max) and sum
+    // pass 2: exp(x - max) and its sum. logsumexp keeps no per-element values,
+    // so it does not write here at all -- and its `out` is rows floats, not
+    // rows*cols, so writing would run off the end of the buffer.
     float s = 0.0f;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
         float e = expf(in[j] - m);
-        out[j] = e;
+        if (arg->op != VX_PRIM_ROW_LOGSUMEXP) out[j] = e;
         s += e;
     }
     s = warp_sum(s);
@@ -251,7 +259,29 @@ __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
     __syncthreads();
     s = tbuf[8];
 
-    // pass 3: scale
+    // pass 3: what this op is for
+    if (arg->op == VX_PRIM_ROW_LOGSUMEXP) {
+        // log(sum) + max, the inverse of the shift.
+        //
+        // An infinite row max is the answer itself: every element is that
+        // infinity or below it, so the log-sum-exp of the row is it. The
+        // general path gives NaN here instead -- the shift inf - inf is NaN
+        // and it poisons the sum -- and torch returns the infinity, so the
+        // two disagree on exactly the rows where the answer is trivial.
+        if (threadIdx.x == 0) {
+            ((float*)(uintptr_t)arg->out)[row] = isinf(m) ? m : logf(s) + m;
+        }
+        return;
+    }
+    if (arg->op == VX_PRIM_ROW_LOG_SOFTMAX) {
+        // (x - max) - log(sum). Subtracting in this order rather than taking
+        // log(softmax) keeps the small values that softmax would round away.
+        const float ls = logf(s);
+        for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
+            out[j] = (in[j] - m) - ls;
+        }
+        return;
+    }
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
         out[j] /= s;
     }

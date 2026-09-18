@@ -38,23 +38,65 @@ inline double gelu_erf(double x) {
 
 inline double silu(double x) { return x / (1.0 + std::exp(-x)); }
 
+// log(sum(exp(x))), computed with the max shift the kernel uses. Shared with
+// softmax and log_softmax below so the three cannot drift apart in the test
+// any more than they can in the kernel.
+inline double logsumexp_row(const float* row, uint32_t cols) {
+    double m = -INFINITY;
+    for (uint32_t j = 0; j < cols; ++j) {
+        m = std::max(m, (double)row[j]);
+    }
+    double s = 0.0;
+    for (uint32_t j = 0; j < cols; ++j) {
+        s += std::exp((double)row[j] - m);
+    }
+    return std::log(s) + m;
+}
+
 inline void softmax(const std::vector<float>& in, uint32_t rows,
                     uint32_t cols, std::vector<double>& out) {
     out.assign((size_t)rows * cols, 0.0);
     for (uint32_t r = 0; r < rows; ++r) {
+        const float* row = in.data() + (size_t)r * cols;
         double m = -INFINITY;
         for (uint32_t j = 0; j < cols; ++j) {
-            m = std::max(m, (double)in[(size_t)r * cols + j]);
+            m = std::max(m, (double)row[j]);
         }
         double s = 0.0;
         for (uint32_t j = 0; j < cols; ++j) {
-            double e = std::exp((double)in[(size_t)r * cols + j] - m);
+            double e = std::exp((double)row[j] - m);
             out[(size_t)r * cols + j] = e;
             s += e;
         }
         for (uint32_t j = 0; j < cols; ++j) {
             out[(size_t)r * cols + j] /= s;
         }
+    }
+}
+
+// (x - max) - log(sum), not log(softmax(x)): the two differ in float32
+// wherever softmax underflows.
+inline void log_softmax(const std::vector<float>& in, uint32_t rows,
+                        uint32_t cols, std::vector<double>& out) {
+    out.assign((size_t)rows * cols, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        const float* row = in.data() + (size_t)r * cols;
+        double m = -INFINITY;
+        for (uint32_t j = 0; j < cols; ++j) m = std::max(m, (double)row[j]);
+        double s = 0.0;
+        for (uint32_t j = 0; j < cols; ++j) s += std::exp((double)row[j] - m);
+        const double ls = std::log(s);
+        for (uint32_t j = 0; j < cols; ++j) {
+            out[(size_t)r * cols + j] = ((double)row[j] - m) - ls;
+        }
+    }
+}
+
+inline void logsumexp(const std::vector<float>& in, uint32_t rows,
+                      uint32_t cols, std::vector<double>& out) {
+    out.assign(rows, 0.0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        out[r] = logsumexp_row(in.data() + (size_t)r * cols, cols);
     }
 }
 

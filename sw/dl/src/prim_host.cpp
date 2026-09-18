@@ -180,8 +180,12 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
     return launch(q, g_prim.reduce, &args, sizeof(args), rows, 16, 256);
 }
 
-vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
-                               uint32_t rows, uint32_t cols) {
+// The softmax family, one row entry per op. They share a kernel, so the only
+// difference between the three is the selector and -- for logsumexp -- that
+// `out` holds one float per row rather than cols of them.
+static vx_prim_status row_entry(vx_queue_h q, vx_prim_row_op_e op,
+                                uint64_t in, uint64_t out, uint32_t rows,
+                                uint32_t cols) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_rowargs_t args = {};
@@ -189,7 +193,24 @@ vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
     args.out = (vx_dl_ptr_t)out;
     args.rows = rows;
     args.cols = cols;
+    args.op = (uint32_t)op;
     return launch(q, g_prim.softmax, &args, sizeof(args), rows, 16, 256);
+}
+
+vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
+                               uint32_t rows, uint32_t cols) {
+    return row_entry(q, VX_PRIM_ROW_SOFTMAX, in, out, rows, cols);
+}
+
+// out is rows floats: log(sum(exp(x - max))) + max, one per row.
+vx_prim_status vx_prim_logsumexp(vx_queue_h q, uint64_t in, uint64_t out,
+                                 uint32_t rows, uint32_t cols) {
+    return row_entry(q, VX_PRIM_ROW_LOGSUMEXP, in, out, rows, cols);
+}
+
+vx_prim_status vx_prim_log_softmax(vx_queue_h q, uint64_t in, uint64_t out,
+                                   uint32_t rows, uint32_t cols) {
+    return row_entry(q, VX_PRIM_ROW_LOG_SOFTMAX, in, out, rows, cols);
 }
 
 vx_prim_status vx_prim_layernorm(vx_queue_h q, uint64_t in, uint64_t gamma,

@@ -78,6 +78,14 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
 vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,
                                uint32_t rows, uint32_t cols);
 
+// The same two passes, written as log(x - max) - log(sum); out is rows x cols.
+vx_prim_status vx_prim_log_softmax(vx_queue_h q, uint64_t in, uint64_t out,
+                                   uint32_t rows, uint32_t cols);
+
+// log(sum(exp(x - max))) + max, one value per row rather than cols of them.
+vx_prim_status vx_prim_logsumexp(vx_queue_h q, uint64_t in, uint64_t out,
+                                 uint32_t rows, uint32_t cols);
+
 // LayerNorm, one CTA per row; gamma/beta are cols-length. Either both are 0
 // (no affine) or both are addresses -- one of the two is a caller error.
 //

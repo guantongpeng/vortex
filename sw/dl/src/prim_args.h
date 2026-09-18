@@ -83,12 +83,25 @@ typedef struct {
     uint32_t pad;
 } vx_prim_reduce_args_t;
 
-// Per-row softmax over rows x cols FP32 (row-major, one CTA per row).
+// The row-wise family over rows x cols FP32 (row-major, one CTA per row).
+// All three share a kernel because they share both passes: a row max, then a
+// sum of exponentials about it. What differs is only what is written out.
+//
+// LOGSUMEXP writes one float per row rather than cols of them, which is why
+// the caller passes a rows-length buffer for it.
+typedef enum {
+    VX_PRIM_ROW_SOFTMAX = 0,
+    VX_PRIM_ROW_LOG_SOFTMAX = 1,
+    VX_PRIM_ROW_LOGSUMEXP = 2,
+} vx_prim_row_op_e;
+
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;
     uint32_t rows;
     uint32_t cols;
+    uint32_t op;   // vx_prim_row_op_e
+    uint32_t pad;
 } vx_prim_rowargs_t;
 
 // LayerNorm: mean/var over the row, then scale/gamma + shift/beta.

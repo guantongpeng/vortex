@@ -84,15 +84,17 @@ the message. None of it falls back to the CPU.
 | reductions: `sum`/`mean`/`amax`/`max`, full or over one dim, with `keepdim` | |
 | `conv2d`, batch norm (inference), pooling, `mm`/`linear`/`addmm` | |
 | `layer_norm` (affine optional, with `mean`/`rstd`), `rms_norm` | |
+| `softmax`/`log_softmax` over any one dim, `logsumexp`, `nn.Softmax`/`nn.LogSoftmax` | |
 | streams and events (`torch.Stream`, `torch.Event`, `torch.accelerator.*`) | |
 | several kernel images in one process (`sw/common/module_slots.mk`) | |
 
 | Not supported yet | Owner |
 |---|---|
 | dtypes other than float32 (allocation is fine, compute is not) | W3.2 / W4.1 |
-| `cat`/`stack`/`gather`/`scatter`, `argmax`, `softmax`, `topk`, `logsumexp` | W3.2 |
+| `cat`/`stack`/`gather`/`scatter`, `argmax`, `topk` | W3.2 |
 | reductions over several dims at once, or a non-trailing dim without a copy | W3.2 |
 | norms on a non-contiguous input, or with a weight that is not `cols` long | W3.2 |
+| `softmax`/`log_softmax` on tensors above 4 dimensions (the write-back copy) | W3.2 |
 | batched `matmul` (`bmm`), `avg_pool2d` | W3.2/W3.3 |
 | dtype conversion in `copy_` | W3.2 |
 | elementwise ops on strided inputs (`x.t() + 1`): the kernels index linearly | W3.2 |

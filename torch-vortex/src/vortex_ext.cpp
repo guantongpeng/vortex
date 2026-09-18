@@ -1147,6 +1147,158 @@ static void check_reduce_dtype(std::optional<c10::ScalarType> dtype,
                 " is unsupported; only float32 is implemented (W3.2)");
 }
 
+// ---- softmax family -------------------------------------------------------
+//
+// softmax, log_softmax and logsumexp are one DL kernel with a selector: they
+// share the row max, the shifted exponentials and the sum, and differ only in
+// what is written. softmax and log_softmax keep every dimension, so unlike a
+// reduction they need the moved layout twice -- once to gather a row, once to
+// put the answer back.
+
+// softmax's dim is a bare int, not a list, and a 0-d tensor accepts only 0 and
+// -1 (torch: "dim 1 out of range [-1, 0]"). Everything else resolves against
+// the rank like every other dim in this file.
+static int64_t row_dim(const torch::Tensor& self, int64_t dim, const char* name) {
+    const int64_t nd = self.dim();
+    if (nd == 0) {
+        TORCH_CHECK(dim == 0 || dim == -1, "torch_vortex: ", name, " dim ", dim,
+                    " is out of range for a 0-D tensor, which takes 0 or -1");
+        return 0;
+    }
+    const int64_t d = dim < 0 ? dim + nd : dim;
+    TORCH_CHECK(d >= 0 && d < nd, "torch_vortex: ", name, " dim ", dim,
+                " is out of range for a ", nd, "-D tensor");
+    return d;
+}
+
+// The (rows, cols) view the DL row kernel takes, plus the way back.
+//
+// A trailing dim is already the view: the tensor is contiguous, so its rows
+// are the kernel's rows and the output is written in place. Any other dim has
+// to be moved to the end, which costs a copy in and a copy back; the write
+// back goes through launch_copy_strided, which is where the 4-dimension cap
+// comes from (the same one the reductions' layout has).
+struct RowLayout {
+    torch::Tensor in;     // contiguous (rows, cols)
+    torch::Tensor out;    // contiguous (rows, cols): what the kernel writes
+    torch::Tensor shaped; // the same storage as `out`, in the moved shape
+    int64_t rows = 0;
+    int64_t cols = 0;
+    bool moved = false;   // `shaped` has to be copied back into the result
+    int64_t dim = 0;
+};
+
+// `out` is the caller's result tensor, already allocated with the input's
+// shape. The kernel addresses elements, so the only question this answers is
+// which buffer those elements live in and in what order.
+static RowLayout row_layout(const torch::Tensor& self, torch::Tensor& out,
+                            int64_t d, const char* name) {
+    RowLayout L;
+    L.dim = d;
+    const int64_t nd = self.dim();
+    if (nd == 0) {
+        // A scalar is one row of one column, and it comes back a scalar:
+        // torch.softmax(tensor(3.0), 0) is 0-dimensional, not (1,1).
+        L.in = self.reshape({1, 1});
+        L.out = out;
+        L.rows = L.cols = 1;
+        return L;
+    }
+    TORCH_CHECK(nd <= 4, "torch_vortex: ", name, " supports at most 4 "
+                "dimensions in v1, got ", nd);
+    if (d == nd - 1) {
+        L.cols = self.size(nd - 1);
+        L.rows = L.cols == 0 ? 0 : self.numel() / L.cols;
+        L.in = self;
+        L.out = out;
+        return L;
+    }
+    auto moved = self.movedim(d, nd - 1).contiguous();
+    L.cols = moved.size(nd - 1);
+    L.rows = L.cols == 0 ? 0 : moved.numel() / L.cols;
+    L.in = moved.reshape({L.rows, L.cols});
+    // Two views of one buffer: the kernel addresses elements, the copy back
+    // needs the shape it is copying into.
+    L.shaped = torch::empty_like(moved);
+    L.out = L.shaped.reshape({L.rows, L.cols});
+    L.moved = true;
+    return L;
+}
+
+// The three DL row entries share a signature, so softmax and log_softmax run
+// through one body and differ by which one is passed in.
+using RowFn = vx_prim_status (*)(vx_queue_h, uint64_t, uint64_t, uint32_t,
+                                 uint32_t);
+
+static torch::Tensor softmax_op(const torch::Tensor& self, int64_t dim,
+                                RowFn fn, const char* name) {
+    check_vortex_f32(self, name);
+    const int64_t d = row_dim(self, dim, name);
+    auto out = torch::empty_like(self);
+    // Nothing to normalise, and the DL entry point refuses a zero shape rather
+    // than accepting an empty job.
+    if (self.numel() == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    RowLayout L = row_layout(self, out, d, name);
+    DL_LAUNCH(fn(current_queue(), (uint64_t)(uintptr_t)L.in.data_ptr(),
+                 (uint64_t)(uintptr_t)L.out.data_ptr(),
+                 u32_dim(L.rows, "softmax rows"),
+                 u32_dim(L.cols, "softmax cols")));
+    if (!L.moved) {
+        return out;
+    }
+    // The kernel wrote rows x cols in moved order; the answer has to go back
+    // to the caller's layout.
+    out.movedim(d, self.dim() - 1).copy_(L.shaped);
+    return out;
+}
+
+// half_to_float asks for the half-input/float-output form of the op, which
+// needs half support; the answer here is float32 either way.
+static void check_half_to_float(bool half_to_float, const char* name) {
+    TORCH_CHECK(!half_to_float, "torch_vortex: ", name, " half_to_float is "
+                "unsupported; the input must already be float32 (W3.2)");
+}
+
+static torch::Tensor softmax_impl(const torch::Tensor& self, int64_t dim,
+                                  bool half_to_float) {
+    check_half_to_float(half_to_float, "softmax");
+    return softmax_op(self, dim, &vx_prim_softmax, "softmax");
+}
+
+static torch::Tensor log_softmax_impl(const torch::Tensor& self, int64_t dim,
+                                      bool half_to_float) {
+    check_half_to_float(half_to_float, "log_softmax");
+    return softmax_op(self, dim, &vx_prim_log_softmax, "log_softmax");
+}
+
+static torch::Tensor logsumexp_impl(const torch::Tensor& self,
+                                    c10::IntArrayRef dim, bool keepdim) {
+    check_vortex_f32(self, "logsumexp");
+    check_reduce_dims(self, dim.size() == 0 ? std::nullopt
+                                            : std::make_optional(dim),
+                      "logsumexp");
+    c10::OptionalArrayRef<int64_t> d =
+        dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    auto out = torch::empty(reduced_shape(self, d, keepdim), self.options());
+    auto src = reduce_layout(self, d, "logsumexp");
+    TORCH_CHECK(out.numel() == src.size(0), "torch_vortex: logsumexp out has ",
+                out.numel(), " elements but the reduction produces ",
+                src.size(0));
+    if (src.size(0) == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    DL_LAUNCH(vx_prim_logsumexp(current_queue(),
+                                (uint64_t)(uintptr_t)src.data_ptr(),
+                                (uint64_t)(uintptr_t)out.data_ptr(),
+                                u32_dim(src.size(0), "logsumexp rows"),
+                                u32_dim(src.size(1), "logsumexp cols")));
+    return out;
+}
+
 // ---- elementwise ----------------------------------------------------------
 //
 // Op-code driven: one kernel per arity, with the operation selected by a field
@@ -2115,6 +2267,12 @@ void register_vortex_ops() {
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);
     VX_IMPL("native_layer_norm", &native_layer_norm_impl);
     VX_IMPL("rms_norm", &rms_norm_impl);
+    // _softmax and _log_softmax are the schemas; aten::softmax and
+    // aten::log_softmax are composites that call them, so the public spellings
+    // work without a registration of their own.
+    VX_IMPL("_softmax", &softmax_impl);
+    VX_IMPL("_log_softmax", &log_softmax_impl);
+    VX_IMPL("logsumexp", &logsumexp_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
     VX_IMPL("mm", &mm_impl_wrap);

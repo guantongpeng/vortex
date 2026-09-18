@@ -343,6 +343,62 @@ int main(int argc, char** argv) {
         ref::softmax(sin, R, C, sref);
         check("softmax", sgot, sref, 2e-5, 1e-6, &failures);
 
+        // log_softmax: same shape, logarithm of the same thing, computed as
+        // (x - max) - log(sum) rather than log(softmax(x))
+        CHECK(vx_prim_log_softmax(q, bin.addr, bout.addr, R, C));
+        CHECK(vx_queue_flush(q));
+        download(q, sgot.data(), bout, sgot.size() * 4);
+        ref::log_softmax(sin, R, C, sref);
+        check("log_softmax", sgot, sref, 2e-5, 1e-6, &failures);
+        // and it is the logarithm of the softmax already checked above
+        {
+            std::vector<double> base;
+            ref::softmax(sin, R, C, base);
+            bool ok = true;
+            for (size_t i = 0; i < base.size(); ++i) {
+                if (std::fabs(std::exp(sref[i]) - base[i]) > 1e-5) ok = false;
+            }
+            if (!ok) { fprintf(stderr, "  exp(log_softmax) != softmax\n"); ++failures; }
+        }
+
+        // logsumexp: one value per row, and exp of it is the softmax's
+        // denominator -- so the shapes and the values are both checked
+        DevBuf lout = make_buf(dev, R * 4);
+        CHECK(vx_prim_logsumexp(q, bin.addr, lout.addr, R, C));
+        CHECK(vx_queue_flush(q));
+        std::vector<float> lgot(R);
+        download(q, lgot.data(), lout, R * 4);
+        std::vector<double> lref;
+        ref::logsumexp(sin, R, C, lref);
+        check("logsumexp", lgot, lref, 2e-6, 1e-6, &failures);
+
+        // An infinite row max is the answer itself. The general path computes
+        // the shift inf - inf, which is NaN, so this is the one place where
+        // the two differ on a trivial row.
+        {
+            const std::vector<float> inf_rows = {INFINITY, 0.0f,
+                                                 -INFINITY, -INFINITY};
+            DevBuf ib = make_buf(dev, 4 * 4), lo = make_buf(dev, 2 * 4);
+            upload(q, ib, inf_rows.data(), 4 * 4);
+            CHECK(vx_prim_logsumexp(q, ib.addr, lo.addr, 2, 2));
+            CHECK(vx_queue_flush(q));
+            float lg[2] = {0.0f, 0.0f};
+            download(q, lg, lo, 2 * 4);
+            if (lg[0] != INFINITY) {
+                fprintf(stderr, "  logsumexp of a +inf row: got %g want inf\n",
+                        (double)lg[0]);
+                ++failures;
+            }
+            if (lg[1] != -INFINITY) {
+                fprintf(stderr, "  logsumexp of an all -inf row: got %g want -inf\n",
+                        (double)lg[1]);
+                ++failures;
+            }
+            vx_buffer_release(ib.h);
+            vx_buffer_release(lo.h);
+        }
+        vx_buffer_release(lout.h);
+
         // A NaN in a row makes the whole row NaN, and leaves its neighbours
         // alone. This is a contract, not a regression this kernel had: the
         // NaN travels through the exponential and the sum, so the row max
