@@ -219,9 +219,6 @@ vx_prim_status vx_prim_layernorm(vx_queue_h q, uint64_t in, uint64_t gamma,
                                  float eps) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
-    // Affine is all or nothing: the kernel reads gamma and beta together, so
-    // one without the other would silently ignore the one that was given.
-    if ((gamma == 0) != (beta == 0)) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_norm_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.gamma = (vx_dl_ptr_t)gamma;

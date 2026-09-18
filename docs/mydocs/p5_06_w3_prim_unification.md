@@ -126,12 +126,18 @@ op 号声明了两次:一次给调用方,一次给看不到公开头的设备编
 | DL 的 epoch 记账 | `immediate_frees == frees` |
 | 空张量的不 launch | DL 入口的 ERR_BAD_ARGS 抛出 |
 
-### 一处**没有**做的改动
+### 一处当时**没有**做的改动(P5.9 已推翻)
 
 softmax 的 row-max 原本也用 `fmaxf`。把它改成 NaN-aware 之后测试仍然通过——**因为它不
 改变任何结果**:NaN 是经由 pass 2 的指数与该 pass 的和走到输出的,row-max 是不是 NaN-aware
 无关。既然拿不出一个能失败的用例,就没有改,而是把原因写进 kernel 注释(「实测,不是假设」),
 并把「NaN 行输出全 NaN」留成契约测试而非回归测试。
+
+> **P5.9 更正**:这条结论只对 softmax 与 log_softmax 成立。P5.8 给 logsumexp 加了
+> 「行 max 是 ±inf 时答案就是它」的捷径,该捷径依赖 `isinf(m)` 能把无穷与 NaN 区分开,
+> 于是 NaN-blind 的 row max 立刻变成错误答案(`[NaN,+inf]` 返回 `+inf`,torch 返回 NaN)。
+> row max 现已改为 NaN-aware。详见 [p5_09](p5_09_review_findings.md) §2.1——
+> 「不改变结果就不改」只在**没有新增依赖**时成立。
 
 ## 6. 本轮验证结果(2026-09-18)
 

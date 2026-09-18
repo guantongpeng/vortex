@@ -38,14 +38,22 @@ inline double gelu_erf(double x) {
 
 inline double silu(double x) { return x / (1.0 + std::exp(-x)); }
 
-// log(sum(exp(x))), computed with the max shift the kernel uses. Shared with
-// softmax and log_softmax below so the three cannot drift apart in the test
-// any more than they can in the kernel.
+// log(sum(exp(x))) with the max shift, which is what torch returns -- the two
+// special cases below are measured from torch 2.14, not derived:
+//   [NaN, anything] -> NaN, whatever the other elements are
+//   a row whose max is +/-inf -> that infinity
+// The naive formula gives NaN for both of the infinite rows (the shift
+// inf - inf is NaN and poisons the sum) and would have quietly agreed with a
+// kernel that got them wrong.
 inline double logsumexp_row(const float* row, uint32_t cols) {
     double m = -INFINITY;
+    bool any_nan = false;
     for (uint32_t j = 0; j < cols; ++j) {
-        m = std::max(m, (double)row[j]);
+        if (std::isnan(row[j])) any_nan = true;
+        if ((double)row[j] > m) m = (double)row[j];
     }
+    if (any_nan) return NAN;
+    if (std::isinf(m)) return m;
     double s = 0.0;
     for (uint32_t j = 0; j < cols; ++j) {
         s += std::exp((double)row[j] - m);

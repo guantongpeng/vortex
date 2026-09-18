@@ -128,6 +128,20 @@ def test_dim_out_of_range_is_refused(backend):
         torch._softmax(scalar, 1, False)
 
 
+def test_logsumexp_of_an_empty_tensor_is_minus_inf(backend):
+    """A reduction that consumes nothing still has torch's answer.
+
+    torch.logsumexp of an empty tensor is -inf -- the log of an empty sum --
+    where sum gives 0 and mean gives NaN. The kernel refuses a zero shape, so
+    the value is written directly, as reduce_into does for the other two.
+    """
+    for t in (torch.empty(0, 4), torch.empty(2, 0), torch.empty(0)):
+        got = torch.logsumexp(t.to("vortex"), [])
+        want = torch.logsumexp(t, [])
+        assert got.shape == want.shape
+        torch.testing.assert_close(got.cpu(), want, rtol=0, atol=0)
+
+
 def test_several_dims_at_once_is_refused(backend):
     """logsumexp over two dims is refused rather than reduced one at a time.
 

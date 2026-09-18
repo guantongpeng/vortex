@@ -63,13 +63,16 @@ SUPPORTED                          UNSUPPORTED
 
 1. **`bmm` / batched matmul** —— host 侧按 batch 循环现有 mm kernel,成本低,transformer 必需。
 2. **`cat`/`stack`/`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
-3. **`softmax`/`log_softmax`/`logsumexp`** —— 归约已就位,再加一个 exp 归一化 pass。
-4. **`layer_norm`/`group_norm`** —— 需要 `var_mean`(归约 + 平方),然后 affine。
+3. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
+   [p5_08_softmax_family.md](p5_08_softmax_family.md)。三个算子共用一个 DL kernel。
+4. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
+   [p5_07_layer_norm_rms_norm.md](p5_07_layer_norm_rms_norm.md);`group_norm` 仍未做。
 5. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
 6. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
 7. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
 8. ~~**W3.1 与 `sw/dl` 统一**~~ —— **已完成**,见 §5 与 [p5_06](p5_06_w3_prim_unification.md)。`conv2d`、pooling、`mm/linear/addmm`、`batch norm`、一元与归约全部走 DL kernel,重复实现已删除。**例外**:二元 elementwise(`binary_op_kernel` 等)仍留在 torch 镜像,因为 DL 的 prim 只有一元;要统一需先给 prim 加二元入口。
-9. **`max(dim=)`/`argmax`/`topk`** —— 需要索引归约。
+9. **`max(dim=)`/`argmax`/`topk`** —— DL 的 row-wise ARGMAX 已修好(P5.7),差一个
+   uint32→int64 的加宽 kernel(torch 侧,不是 sw/dl)。
 
 ## 4. 本轮的一个实现教训
 

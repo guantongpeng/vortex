@@ -78,13 +78,28 @@ static int check(const char* name, const std::vector<float>& got,
     double max_rel = 0.0;
     uint32_t bad = 0;
     for (size_t i = 0; i < got.size(); ++i) {
-        double d = std::fabs((double)got[i] - ref[i]);
-        double r = d / (std::fabs(ref[i]) + atol);
+        const double g = (double)got[i];
+        // NaN is a category here, not a distance. |NaN - ref| is NaN and
+        // `NaN > rtol` is false, so a kernel that answered NaN where the
+        // reference is finite used to score as a pass -- which made every
+        // assertion built on this function blind to NaN in the low bits.
+        if (std::isnan(g) != std::isnan(ref[i])) {
+            if (bad < 3) {
+                fprintf(stderr, "  %s[%zu] got=%.6f ref=%.6f\n", name, i, g,
+                        ref[i]);
+            }
+            ++bad;
+            max_rel = INFINITY;
+            continue;
+        }
+        if (std::isnan(g)) continue;      // both NaN: they agree
+        const double d = std::fabs(g - ref[i]);
+        const double r = d / (std::fabs(ref[i]) + atol);
         if (r > max_rel) max_rel = r;
         if (r > rtol) {
             if (bad < 3) {
-                fprintf(stderr, "  %s[%zu] got=%.6f ref=%.6f\n", name, i,
-                        (double)got[i], ref[i]);
+                fprintf(stderr, "  %s[%zu] got=%.6f ref=%.6f\n", name, i, g,
+                        ref[i]);
             }
             ++bad;
         }
@@ -331,7 +346,12 @@ int main(int argc, char** argv) {
         const uint32_t R = 12, C = 65;  // C not a multiple of 16
         std::vector<float> sin((size_t)R * C);
         for (auto& x : sin) x = frand();
-        sin[0] = 50.0f;  // large value exercises the max-shift
+        // Past expf's range (float32 overflows at exp(88.7)). Without the max
+        // shift the exponential is inf, the sum is inf and every element is
+        // inf/inf = NaN -- so this is the value that makes the shift testable.
+        // 50, the previous value here, did not: the unshifted result is
+        // accurate to 1e-7 and the test passed with the shift removed.
+        sin[0] = 100.0f;
         DevBuf bin = make_buf(dev, sin.size() * 4);
         DevBuf bout = make_buf(dev, sin.size() * 4);
         upload(q, bin, sin.data(), sin.size() * 4);
@@ -344,21 +364,31 @@ int main(int argc, char** argv) {
         check("softmax", sgot, sref, 2e-5, 1e-6, &failures);
 
         // log_softmax: same shape, logarithm of the same thing, computed as
-        // (x - max) - log(sum) rather than log(softmax(x))
+        // (x - max) - log(sum) rather than log(softmax(x)).
+        //
+        // Keep the softmax the device produced first: the identity below has
+        // to relate the kernel's two outputs to each other. Comparing two host
+        // references would prove nothing about the kernel -- it passed even
+        // when log_softmax's pass 3 was replaced with a constant.
+        std::vector<float> softmax_dev = sgot;
         CHECK(vx_prim_log_softmax(q, bin.addr, bout.addr, R, C));
         CHECK(vx_queue_flush(q));
         download(q, sgot.data(), bout, sgot.size() * 4);
         ref::log_softmax(sin, R, C, sref);
         check("log_softmax", sgot, sref, 2e-5, 1e-6, &failures);
-        // and it is the logarithm of the softmax already checked above
+        // exp of the device's log_softmax is the device's softmax
         {
-            std::vector<double> base;
-            ref::softmax(sin, R, C, base);
             bool ok = true;
-            for (size_t i = 0; i < base.size(); ++i) {
-                if (std::fabs(std::exp(sref[i]) - base[i]) > 1e-5) ok = false;
+            for (size_t i = 0; i < softmax_dev.size(); ++i) {
+                if (std::fabs(std::exp((double)sgot[i]) - (double)softmax_dev[i]) > 1e-5) {
+                    ok = false;
+                    break;
+                }
             }
-            if (!ok) { fprintf(stderr, "  exp(log_softmax) != softmax\n"); ++failures; }
+            if (!ok) {
+                fprintf(stderr, "  exp(log_softmax) != softmax, on the device\n");
+                ++failures;
+            }
         }
 
         // logsumexp: one value per row, and exp of it is the softmax's
@@ -374,25 +404,37 @@ int main(int argc, char** argv) {
 
         // An infinite row max is the answer itself. The general path computes
         // the shift inf - inf, which is NaN, so this is the one place where
-        // the two differ on a trivial row.
+        // the two differ on a trivial row -- and the shortcut that answers it
+        // is only right if the max can tell an infinity from a NaN, which is
+        // why the row max is NaN-aware.
         {
-            const std::vector<float> inf_rows = {INFINITY, 0.0f,
-                                                 -INFINITY, -INFINITY};
-            DevBuf ib = make_buf(dev, 4 * 4), lo = make_buf(dev, 2 * 4);
-            upload(q, ib, inf_rows.data(), 4 * 4);
-            CHECK(vx_prim_logsumexp(q, ib.addr, lo.addr, 2, 2));
+            const std::vector<float> inf_rows = {
+                INFINITY, 0.0f,               // -> +inf
+                -INFINITY, -INFINITY,         // -> -inf
+                NAN, INFINITY,                // -> NaN, not +inf
+                INFINITY, NAN,                // -> NaN
+                NAN, -INFINITY,               // -> NaN, not -inf
+                NAN, 0.0f,                    // -> NaN
+            };
+            DevBuf ib = make_buf(dev, inf_rows.size() * 4);
+            DevBuf lo = make_buf(dev, 6 * 4);
+            upload(q, ib, inf_rows.data(), inf_rows.size() * 4);
+            CHECK(vx_prim_logsumexp(q, ib.addr, lo.addr, 6, 2));
             CHECK(vx_queue_flush(q));
-            float lg[2] = {0.0f, 0.0f};
-            download(q, lg, lo, 2 * 4);
-            if (lg[0] != INFINITY) {
-                fprintf(stderr, "  logsumexp of a +inf row: got %g want inf\n",
-                        (double)lg[0]);
-                ++failures;
-            }
-            if (lg[1] != -INFINITY) {
-                fprintf(stderr, "  logsumexp of an all -inf row: got %g want -inf\n",
-                        (double)lg[1]);
-                ++failures;
+            float lg[6] = {};
+            download(q, lg, lo, 6 * 4);
+            const char* names[6] = {"[+inf,0]", "[-inf,-inf]", "[NaN,+inf]",
+                                    "[+inf,NaN]", "[NaN,-inf]", "[NaN,0]"};
+            for (int i = 0; i < 6; ++i) {
+                const bool got_nan = std::isnan(lg[i]);
+                const bool want_nan = (i >= 2);
+                const bool ok = want_nan ? got_nan
+                                         : (lg[i] == (i == 0 ? INFINITY : -INFINITY));
+                if (!ok) {
+                    fprintf(stderr, "  logsumexp of %s: got %g\n", names[i],
+                            (double)lg[i]);
+                    ++failures;
+                }
             }
             vx_buffer_release(ib.h);
             vx_buffer_release(lo.h);
@@ -477,11 +519,31 @@ int main(int argc, char** argv) {
                        R, C, 1e-5, nref);
         check("layernorm_noaffine", ngot, nref, 2e-4, 1e-4, &failures);
 
-        // half an affine is a caller error, not a mode
-        if (vx_prim_layernorm(q, bin.addr, bg.addr, 0, bout.addr, 0, 0,
-                              R, C, 1e-5f) != VX_PRIM_ERR_BAD_ARGS) {
-            fprintf(stderr, "  layernorm accepted gamma without beta\n");
-            ++failures;
+        // gamma alone is a mode, not a caller error: torch takes either half
+        // of the affine independently and reads the absent one as its
+        // identity. It has to give the same answer as gamma with beta = 0.
+        {
+            std::vector<float> zeros(C, 0.0f);
+            DevBuf bz = make_buf(dev, C * 4);
+            upload(q, bz, zeros.data(), C * 4);
+            CHECK(vx_prim_layernorm(q, bin.addr, bg.addr, bz.addr, bout.addr,
+                                    0, 0, R, C, 1e-5f));
+            CHECK(vx_queue_flush(q));
+            std::vector<float> with_beta(nin.size());
+            download(q, with_beta.data(), bout, with_beta.size() * 4);
+            CHECK(vx_prim_layernorm(q, bin.addr, bg.addr, 0, bout.addr, 0, 0,
+                                    R, C, 1e-5f));
+            CHECK(vx_queue_flush(q));
+            download(q, ngot.data(), bout, ngot.size() * 4);
+            for (size_t i = 0; i < ngot.size(); ++i) {
+                if (ngot[i] != with_beta[i]) {
+                    fprintf(stderr, "  layernorm gamma-without-beta differs "
+                            "from beta=0 at %zu\n", i);
+                    ++failures;
+                    break;
+                }
+            }
+            vx_buffer_release(bz.h);
         }
 
         CHECK(vx_prim_rmsnorm(q, bin.addr, bg.addr, bout.addr, R, C, 1e-5f));
@@ -512,9 +574,18 @@ int main(int argc, char** argv) {
     // 1.25 and 0.894. The reference above uses the same one-pass formula in
     // double, so it agreed with the wrong kernel -- a defect written into its
     // own oracle, which is how it survived.
-    {
-        const std::vector<float> big = {1e6f, 1e6f + 1.0f, 1e6f + 2.0f,
-                                        1e6f + 3.0f};
+    //
+    // Two scales, because they fail for different reasons. At 1e6 the
+    // *one-pass* estimator cancels to zero. At 1e7 a two-pass estimator that
+    // measures its deviations from the rounded float32 mean also fails: the
+    // exact mean of these four values is 1e7+1.5, which is not representable
+    // at ulp 1, so the deviations come out [-2,-1,0,1] instead of
+    // [-1.5,-0.5,0.5,1.5] and the variance is 1.5 rather than 1.25 -- rstd
+    // 0.8165 against 0.8944. Only measuring from an element of the row fixes
+    // both.
+    for (const float scale : {1e6f, 1e7f}) {
+        const std::vector<float> big = {scale, scale + 1.0f, scale + 2.0f,
+                                        scale + 3.0f};
         const uint32_t C = (uint32_t)big.size(), R = 1;
         DevBuf bin = make_buf(dev, C * 4), bout = make_buf(dev, C * 4);
         DevBuf brstd = make_buf(dev, R * 4);
@@ -527,8 +598,8 @@ int main(int argc, char** argv) {
         // 1/sqrt(1.25 + 1e-5) at double precision, then rounded to float32
         const double want = 1.0 / std::sqrt(1.25 + 1e-5);
         if (std::fabs((double)rstd - want) > 1e-5) {
-            fprintf(stderr, "  rstd for 1e6-scale input: got %.7g want %.7g\n",
-                    (double)rstd, want);
+            fprintf(stderr, "  rstd for %.0e-scale input: got %.7g want %.7g\n",
+                    (double)scale, (double)rstd, want);
             ++failures;
         }
         vx_buffer_release(bin.h);
@@ -543,27 +614,45 @@ int main(int argc, char** argv) {
     // sent them down the greater-than branch, so the winner was whichever
     // candidate the tree happened to visit last.
     {
-        const std::vector<std::pair<std::vector<float>, uint32_t>> cases = {
-            {{1.0f, NAN, NAN, NAN}, 1},
-            {{NAN, 1.0f, NAN, NAN}, 0},
-            {{1.0f, 2.0f, 3.0f, 3.0f}, 2},
-            // 21 wide: thread 0 owns both index 0 and index 16, and the warp
-            // merge has to prefer the lower lane on a tie
-            {{NAN, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f,
-              11.0f, 12.0f, 13.0f, 14.0f, 15.0f, NAN, 17.0f, 18.0f, 19.0f,
-              20.0f}, 0},
-        };
-        for (const auto& c : cases) {
-            const uint32_t n = (uint32_t)c.first.size();
+        // Each case has to fail on the code it names, or it is decoration.
+        // The [NaN,1,NaN,NaN] case that used to sit here returned 0 both
+        // before and after the fix, so it exposed nothing.
+        std::vector<std::vector<float>> cases;
+        // the merge: two NaNs must tie-break on index, not on the value
+        // compare -- old code returned 2
+        cases.push_back({1.0f, NAN, NAN, NAN});
+        // a plain tie between finite values
+        cases.push_back({1.0f, 2.0f, 3.0f, 3.0f});
+        // the per-lane scan: 17 wide, so thread 0 owns index 0 AND index 16,
+        // and `x > seen || isnan(x)` makes it adopt the later NaN -- old code
+        // returned 16 here
+        {
+            std::vector<float> wide(17, 5.0f);
+            wide[0] = NAN;
+            wide[16] = NAN;
+            cases.push_back(wide);
+        }
+        // and two NaNs in the same lane's pair with a lower lane holding the
+        // first, which the warp merge has to resolve to the earliest
+        {
+            std::vector<float> wide(21, 5.0f);
+            wide[0] = NAN;
+            wide[16] = NAN;
+            cases.push_back(wide);
+        }
+        const std::vector<uint32_t> expected = {1, 2, 0, 0};
+        for (size_t ci = 0; ci < cases.size(); ++ci) {
+            const auto& c = cases[ci];
+            const uint32_t n = (uint32_t)c.size();
             DevBuf bin = make_buf(dev, n * 4), bout = make_buf(dev, 4);
-            upload(q, bin, c.first.data(), n * 4);
+            upload(q, bin, c.data(), n * 4);
             CHECK(vx_prim_reduce(q, VX_PRIM_OP_ARGMAX, bin.addr, bout.addr, 1, n));
             CHECK(vx_queue_flush(q));
             uint32_t got = ~0u;
             download(q, &got, bout, 4);
-            if (got != c.second) {
+            if (got != expected[ci]) {
                 fprintf(stderr, "  argmax of a %u-wide row: got %u want %u\n",
-                        n, got, c.second);
+                        n, got, expected[ci]);
                 ++failures;
             }
             vx_buffer_release(bin.h);

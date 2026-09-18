@@ -103,6 +103,31 @@ def test_free_is_deferred_while_a_dl_kernel_is_outstanding(backend, opus):
     gc.collect()
 
 
+def test_free_is_deferred_after_a_strided_copy(backend):
+    """A strided D2D copy enqueues a kernel; it does not drain the queue.
+
+    This branch used to end in a hipMemcpy, which enqueues and waits, so it
+    announced that the queue had drained. When the copy became a kernel launch
+    the announcement stayed, and it clears the allocator's epoch -- so the
+    source, which in a moved softmax is owned only by a C++ local, was freed
+    immediately while the copy was still queued to read it.
+    """
+    base = torch.randn(6, 4).to("vortex")
+    dst = torch.empty(4, 6, device="vortex")
+    torch.vortex.synchronize()
+    backend.reset_stats()
+    dst.copy_(base.t())            # strided on both sides: a kernel, not a memcpy
+    del base
+    gc.collect()
+    st = backend.stats()
+    assert st["launches"] > 0, "the strided copy did not launch: %r" % st
+    assert st["frees"] > 0, "nothing was freed; test is not measuring anything"
+    assert st["frees"] > st["immediate_frees"], (
+        "the free ran immediately despite the copy still being queued: %r" % st)
+    del dst
+    gc.collect()
+
+
 def test_free_is_immediate_once_the_queue_is_drained(backend):
     """The fast path: no outstanding work means no deferral is needed.
 

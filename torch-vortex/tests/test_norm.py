@@ -134,10 +134,16 @@ def test_rms_norm_weight_and_default_eps(backend):
     assert_matches_cpu(torch.rms_norm(v(x), [4]), torch.rms_norm(x, [4]),
                        rtol=1e-5, atol=1e-6)
     # "the default is the machine epsilon" is only worth saying if the default
-    # is distinguishable from something else: this is bitwise, so it does not
-    # depend on a tolerance being tight enough.
-    got = torch.rms_norm(v(x), [4]).cpu()
-    assert not torch.equal(got, torch.rms_norm(x, [4], None, eps=0.0)), (
+    # is distinguishable from something else -- and the comparison has to be
+    # device-against-device to be bitwise. Comparing the default against CPU
+    # let an eps=None -> 0 substitution through: the difference is 4.8e-07
+    # there, well inside any tolerance worth using.
+    eps0 = float(torch.finfo(torch.float32).eps)
+    # The copy down is exact for float32, so this stays bitwise.
+    default = torch.rms_norm(v(x), [4]).cpu()
+    assert torch.equal(default, torch.rms_norm(v(x), [4], None, eps=eps0).cpu()), (
+        "eps=None is not the machine epsilon")
+    assert not torch.equal(default, torch.rms_norm(v(x), [4], None, eps=0.0).cpu()), (
         "eps=None behaved like eps=0")
     assert_matches_cpu(torch.rms_norm(v(x), [4], None, eps=0.0),
                        torch.rms_norm(x, [4], None, eps=0.0), rtol=1e-5, atol=1e-6)
@@ -162,12 +168,54 @@ def test_normalized_shape_must_be_the_trailing_dims(backend):
         torch.rms_norm(flat, [4])
 
 
-def test_half_an_affine_is_refused(backend):
-    """weight without bias is a caller error, not a mode."""
-    x = v(torch.randn(2, 4))
-    w = v(torch.randn(4))
-    with pytest.raises(RuntimeError, match="together or not at all"):
-        torch.native_layer_norm(x, [4], w, None, 1e-5)
+def test_either_half_of_the_affine_alone(backend):
+    """torch takes weight without bias, and bias without weight.
+
+    The absent half means its identity -- gamma 1 or beta 0 -- rather than an
+    error, so refusing either alone would be a refusal where torch computes.
+    """
+    torch.manual_seed(17)
+    x = torch.randn(2, 3, 4)
+    w, b = torch.randn(4), torch.randn(4)
+    assert_matches_cpu(F.layer_norm(v(x), [4], v(w)), F.layer_norm(x, [4], w),
+                       rtol=1e-5, atol=1e-6)
+    assert_matches_cpu(F.layer_norm(v(x), [4], None, v(b)),
+                       F.layer_norm(x, [4], None, b), rtol=1e-5, atol=1e-6)
+    # and each alone is the same call with the other half's identity
+    torch.testing.assert_close(
+        F.layer_norm(v(x), [4], v(w)).cpu(),
+        F.layer_norm(v(x), [4], v(w), v(torch.zeros(4))).cpu(),
+        rtol=1e-6, atol=1e-7)
+    assert_matches_cpu(torch.native_layer_norm(v(x), [4], v(w), None, 1e-5)[0],
+                       torch.native_layer_norm(x, [4], w, None, 1e-5)[0],
+                       rtol=1e-5, atol=1e-6)
+
+
+def test_normalized_shape_must_not_be_empty(backend):
+    """torch refuses an empty normalized_shape; accepting it computes nonsense.
+
+    Every element becomes its own row, so the output is identically zero and
+    the statistics are the input -- a result rather than the mistake.
+    """
+    x = v(torch.randn(2, 3))
+    with assert_rejected("at least one dimension", backend):
+        torch.native_layer_norm(x, [], None, None, 1e-5)
+    with assert_rejected("at least one dimension", backend):
+        torch.rms_norm(x, [], None)
+
+
+def test_affine_shape_is_checked_not_just_its_size(backend):
+    """A (2,2) weight against normalized_shape [4] has 4 elements and is wrong.
+
+    torch names both shapes; counting elements accepts it and multiplies the
+    flattened storage instead.
+    """
+    x = v(torch.randn(2, 3, 4))
+    bad = v(torch.randn(2, 2))
+    with assert_rejected("normalized shape", backend):
+        F.layer_norm(x, [4], bad, bad)
+    with assert_rejected("normalized shape", backend):
+        torch.rms_norm(x, [4], bad)
 
 
 def test_dtype_is_float32_only(backend):

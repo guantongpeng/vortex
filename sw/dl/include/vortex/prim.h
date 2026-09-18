@@ -86,8 +86,9 @@ vx_prim_status vx_prim_log_softmax(vx_queue_h q, uint64_t in, uint64_t out,
 vx_prim_status vx_prim_logsumexp(vx_queue_h q, uint64_t in, uint64_t out,
                                  uint32_t rows, uint32_t cols);
 
-// LayerNorm, one CTA per row; gamma/beta are cols-length. Either both are 0
-// (no affine) or both are addresses -- one of the two is a caller error.
+// LayerNorm, one CTA per row; gamma/beta are cols-length. Each may be 0
+// independently: torch takes either alone, with the absent one meaning its
+// identity (gamma 1, beta 0). Both 0 is the no-affine mode.
 //
 // mean and rstd are rows-length outputs, one per row, and may each be 0 if the
 // caller does not want them. rstd is 1/sqrt(var + eps).

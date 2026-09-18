@@ -78,7 +78,7 @@ aten::rms_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None,
 在只注册 `native_layer_norm` 时都工作。测试因此调用**公开拼写**,不调用被注册的那个。
 
 分工与 conv 相同:**ATen 校验形状,DL 库计算**。`normalized_shape` 必须是输入的
-尾维,权重必须恰好 `cols` 长;两者都给不满足时报出两个形状。
+尾维,权重必须**形状**等于 normalized_shape,且不能为空——两者都给不满足时报出两个形状。
 
 ### 2.1 实测出来的三件事
 
@@ -99,7 +99,8 @@ aten::rms_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None,
 
 - 非连续输入**拒绝**:`aten::layer_norm` 的 composite 把跨步张量原样交下来,所以这与
   归约族是同一条边界(`check_vortex_f32` 要求连续),不是新的限制。
-- 权重不是恰好 `cols` 长(例如只按尾维广播)**拒绝**,属 W3.2 后续。
+- 权重的**形状**必须等于 normalized_shape:元素数对而形状错(例如 `(2,2)` 配 `[4]`)
+  **拒绝**。只给 weight 或只给 bias 是**支持**的,另一半按单位元处理(P5.9 §3)。
 - fp16/fp64 **拒绝**(分配可以,计算不行)。
 
 ## 3. 验收
@@ -112,6 +113,11 @@ aten::rms_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None,
 - **数值与 ABI**:`tests/dl/prim` 覆盖 4 个新用例;
 
 **每条新测试都先确认能抓住原缺陷**:
+
+> **P5.9 更正**:下表里的 layernorm 一条只钉住了**一遍式**。两遍式若不减去行首元素,
+> 在 1e7 一档仍然错 8%(rstd 0.8165 vs 0.8944)——见
+> [p5_09](p5_09_review_findings.md) §2.2,那里补了 1e7 用例,并改正了下表里 argmax
+> 那条:4 宽的 `[NaN,1,NaN,NaN]` 用例修前修后同解,已换成 17 宽的行。
 
 | 回退什么 | 失败信息 |
 |---|---|
@@ -129,18 +135,23 @@ build_dl64/tests/dl/prim: make run-simx               -> PASSED
 `--tier=full` 含 MiniResNet 模型门槛。259 = 上一轮的 238 + 本轮 21 条
 (`test_norm.py` 14 条 + `test_dl_bridge.py` 2 条 + `tests/dl/prim` 的 4 条在另一棵树)。
 
-## 4. 一个**没有**做的改动
+## 4. 一个**没有**做的改动(P5.9 已推翻)
 
 `vx_prim_softmax` 经查**不需要改**:它的 row-max 用 `fmaxf`(不传播 NaN),但 softmax
 的 NaN 是经由 pass 2 的指数与该 pass 的和走到输出的,row-max 是不是 NaN-aware 无关。
 p5_06 §5 已经量过这一点;本轮再次确认后没有动它。softmax 族留在下一轮,那时的
 DL 侧工作只有 `log_softmax`/`logsumexp` 两个新入口。
 
+> **P5.9 更正**:P5.8 给 logsumexp 加的「行 max 是 ±inf 时答案就是它」的捷径依赖
+> `isinf(m)` 能把无穷与 NaN 区分开,于是 NaN-blind 的 row max 立刻变成错误答案。
+> row max 现已改为 NaN-aware,这条「不改变结果就不改」的判断随之失效——见
+> [p5_09](p5_09_review_findings.md) §2.1。
+
 ## 5. 仍未完成
 
-- **softmax / log_softmax / logsumexp**:`vx_prim_softmax` 就绪;`log_softmax` 与
-  `logsumexp` 需要新的行入口(`vx_prim_rowargs_t` 要加 `op`,尺寸 24→32/16→20)。
-  注意 `logsumexp` **不**经过 `_softmax`,它是 amax/exp/sum/log(实测)。
+- ~~**softmax / log_softmax / logsumexp**~~ —— **P5.8 已做**,见
+  [p5_08_softmax_family.md](p5_08_softmax_family.md)。注意 `logsumexp` **不**经过
+  `_softmax`,它是 amax/exp/sum/log(实测)。
 - **argmax / `max(dim=)`**:DL 的 row-wise ARGMAX 已修好且就绪,但写出的是 uint32,
   而 ATen 要 int64——需要一个 torch 侧的小 kernel 做加宽(不是 sw/dl 的改动)。
 - **norms 的更多形态**:非连续输入、按尾维广播的权重、`group_norm`。

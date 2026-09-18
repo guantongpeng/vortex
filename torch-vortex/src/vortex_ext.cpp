@@ -891,7 +891,13 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
 
     launch_copy_strided(self, device_src);
     g_stats.d2d_bytes += (uint64_t)bytes;
-    note_default_queue_barrier();
+    // No note_default_queue_barrier here. It sat here while this branch ended
+    // in a hipMemcpy, which enqueues and then waits, so everything before it
+    // had retired; launch_copy_strided only *enqueues*. Saying the queue had
+    // drained cleared the allocator's epoch, so the next free took the
+    // immediate hipFree path even though the copy was still queued to read
+    // the source -- and this is now the shape softmax's moved path hands it.
+    // launch() already recorded the work.
     return self;
 }
 
@@ -1277,20 +1283,30 @@ static torch::Tensor log_softmax_impl(const torch::Tensor& self, int64_t dim,
 static torch::Tensor logsumexp_impl(const torch::Tensor& self,
                                     c10::IntArrayRef dim, bool keepdim) {
     check_vortex_f32(self, "logsumexp");
-    check_reduce_dims(self, dim.size() == 0 ? std::nullopt
-                                            : std::make_optional(dim),
-                      "logsumexp");
     c10::OptionalArrayRef<int64_t> d =
         dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    check_reduce_dims(self, d, "logsumexp");
     auto out = torch::empty(reduced_shape(self, d, keepdim), self.options());
+
+    // A reduction that consumes no elements has an answer here, and it is not
+    // the kernel's: sum writes its identity and mean writes NaN, and this
+    // writes -inf -- the log of an empty sum -- which is what torch returns.
+    // Checked before the layout, which refuses a zero row length outright.
+    if (self.numel() == 0) {
+        if (out.numel() > 0) {
+            fill_args_t f = {(uint64_t)(uintptr_t)out.data_ptr(),
+                             u32_numel(out, "logsumexp"), (float)-INFINITY, 0};
+            launch(h_fill_kernel, f, (uint32_t)((out.numel() + 3) / 4));
+        } else {
+            ++g_stats.skipped_launches;
+        }
+        return out;
+    }
+
     auto src = reduce_layout(self, d, "logsumexp");
     TORCH_CHECK(out.numel() == src.size(0), "torch_vortex: logsumexp out has ",
                 out.numel(), " elements but the reduction produces ",
                 src.size(0));
-    if (src.size(0) == 0) {
-        ++g_stats.skipped_launches;
-        return out;
-    }
     DL_LAUNCH(vx_prim_logsumexp(current_queue(),
                                 (uint64_t)(uintptr_t)src.data_ptr(),
                                 (uint64_t)(uintptr_t)out.data_ptr(),
@@ -1898,10 +1914,16 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
 // both shapes.
 static void check_norm_shape(const torch::Tensor& input,
                              c10::SymIntArrayRef normalized_shape,
-                             const char* name, int64_t& rows, int64_t& cols) {
-    const auto ns = sym_to_vec(normalized_shape);
+                             const char* name, std::vector<int64_t>& ns,
+                             int64_t& rows, int64_t& cols) {
+    ns = sym_to_vec(normalized_shape);
     const int64_t nd = input.dim();
     const int64_t k = (int64_t)ns.size();
+    // Not zero: torch refuses it ("Expected normalized_shape to be at least
+    // 1-dimensional"), and accepting it would make every element its own row,
+    // which computes a result rather than reporting the mistake.
+    TORCH_CHECK(k > 0, "torch_vortex: ", name, " needs a normalized_shape of "
+                "at least one dimension");
     TORCH_CHECK(k <= nd, "torch_vortex: ", name, " normalized_shape has ", k,
                 " dimensions but the input has ", nd);
     for (int64_t i = 0; i < k; ++i) {
@@ -1917,12 +1939,17 @@ static void check_norm_shape(const torch::Tensor& input,
     for (int64_t d = nd - k; d < nd; ++d) cols *= input.size(d);
 }
 
-// A norm's affine parameter: cols values on this device, in this dtype. It is
-// never broadcast here -- torch requires it to be exactly the normalized shape
-// (or the leading dims, which this refuses for now).
+// A norm's affine parameter: the normalized shape, on this device, in this
+// dtype. The shape is checked rather than the element count -- a (2,2) weight
+// against a normalized_shape of [4] has the right number of elements and is
+// still a mistake, and torch refuses it by naming both shapes.
 static uint64_t norm_affine_addr(const std::optional<torch::Tensor>& t,
+                                 const std::vector<int64_t>& ns,
                                  int64_t cols, const char* what) {
     check_vortex_f32(*t, what);
+    TORCH_CHECK(t->sizes().vec() == ns, "torch_vortex: ", what, " must have the "
+                "normalized shape; torch expects ", ns, " but got ",
+                t->sizes());
     TORCH_CHECK(t->numel() == cols, "torch_vortex: ", what, " has ",
                 t->numel(), " elements but the normalized shape has ", cols);
     return (uint64_t)(uintptr_t)t->data_ptr();
@@ -1939,7 +1966,22 @@ native_layer_norm_impl(const torch::Tensor& input,
                        const std::optional<torch::Tensor>& bias, double eps) {
     check_vortex_f32(input, "layer_norm.input");
     int64_t rows = 0, cols = 0;
-    check_norm_shape(input, normalized_shape, "layer_norm", rows, cols);
+    std::vector<int64_t> ns;
+    check_norm_shape(input, normalized_shape, "layer_norm", ns, rows, cols);
+
+    // Optional affine, each half independent: torch takes either alone and
+    // treats the absent one as its identity (gamma 1, beta 0). F.layer_norm(x,
+    // shape, weight=w) is how a weight without a bias arrives.
+    //
+    // Validated before anything is allocated, so a rejected call leaves
+    // nothing behind rather than three device blocks.
+    uint64_t gaddr = 0, baddr = 0;
+    if (is_defined(weight)) {
+        gaddr = norm_affine_addr(weight, ns, cols, "layer_norm.weight");
+    }
+    if (is_defined(bias)) {
+        baddr = norm_affine_addr(bias, ns, cols, "layer_norm.bias");
+    }
 
     // mean and rstd keep the input's rank with the normalized dims as 1s,
     // which is what torch returns: (2,3,4) with shape [4] gives (2,3,1).
@@ -1951,17 +1993,6 @@ native_layer_norm_impl(const torch::Tensor& input,
     auto out = torch::empty_like(input);
     auto mean = torch::empty(stat_shape, input.options());
     auto rstd = torch::empty(stat_shape, input.options());
-
-    // Optional affine: both or neither. Torch treats the absent case as
-    // gamma=1, beta=0 rather than as an error, and F.layer_norm(x, shape) is
-    // how that arrives.
-    TORCH_CHECK(is_defined(weight) == is_defined(bias), "torch_vortex: "
-                "layer_norm needs weight and bias together or not at all");
-    uint64_t gaddr = 0, baddr = 0;
-    if (is_defined(weight)) {
-        gaddr = norm_affine_addr(weight, cols, "layer_norm.weight");
-        baddr = norm_affine_addr(bias, cols, "layer_norm.bias");
-    }
 
     // A batch of zero rows is not a launch: the statistics outputs are empty
     // too, so there is nothing to write and nothing to compute.
@@ -1997,11 +2028,12 @@ static torch::Tensor rms_norm_impl(const torch::Tensor& input,
                                    std::optional<double> eps) {
     check_vortex_f32(input, "rms_norm.input");
     int64_t rows = 0, cols = 0;
-    check_norm_shape(input, normalized_shape, "rms_norm", rows, cols);
+    std::vector<int64_t> ns;
+    check_norm_shape(input, normalized_shape, "rms_norm", ns, rows, cols);
 
     uint64_t gaddr = 0;
     if (is_defined(weight)) {
-        gaddr = norm_affine_addr(weight, cols, "rms_norm.weight");
+        gaddr = norm_affine_addr(weight, ns, cols, "rms_norm.weight");
     }
 
     auto out = torch::empty_like(input);

@@ -214,15 +214,18 @@ __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
     float* out = (float*)(uintptr_t)arg->out + (size_t)row * arg->cols;
     const uint32_t cols = arg->cols;
 
-    // pass 1: row max. Unlike the reductions this does not need to be
-    // NaN-aware. A NaN in the row reaches the output through pass 2's
-    // exponential and the sum that divides by it, whatever this max was, so a
-    // row holding a NaN comes out NaN either way -- measured, not assumed:
-    // spelling this max with the reductions' NaN-aware combine changes no
-    // result.
+    // pass 1: row max, NaN-aware.
+    //
+    // For softmax and log_softmax the NaN-ness of this value does not matter:
+    // a NaN in the row reaches the output through pass 2's exponential and the
+    // sum whatever the max was. It matters for logsumexp, whose pass 3 takes
+    // an infinite max as the answer itself -- `isinf(m)` has to mean "the row
+    // really is infinite", and a NaN-blind max reports +inf for [NaN, inf],
+    // where torch answers NaN. Making the max NaN-aware is what keeps that
+    // test meaningful, and it changes no result for the other two.
     float m = -INFINITY;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-        m = fmaxf(m, in[j]);
+        m = nan_max(m, in[j]);
     }
     m = warp_max(m);
     if (threadIdx.x % warpSize == 0) {
@@ -231,7 +234,9 @@ __global__ void prim_softmax_kernel(vx_prim_rowargs_t* arg) {
     __syncthreads();
     if (threadIdx.x == 0) {
         float v = tbuf[0];
-        for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) v = fmaxf(v, tbuf[w]);
+        for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) {
+            v = nan_max(v, tbuf[w]);
+        }
         tbuf[8] = v;  // broadcast slot
     }
     __syncthreads();
@@ -300,10 +305,23 @@ __global__ void prim_layernorm_kernel(vx_prim_norm_args_t* arg) {
     float* out = (float*)(uintptr_t)arg->out + (size_t)row * arg->cols;
     const uint32_t cols = arg->cols;
 
-    // pass 1: the mean
+    // Both passes work in coordinates shifted by the row's first element.
+    //
+    // The deviations have to be measured from something that can represent
+    // them. For a row of large values the mean cannot: [1e7, 1e7+1, 1e7+2,
+    // 1e7+3] has an exact mean of 1e7+1.5, which is not a float32 at ulp 1,
+    // so the deviations from the rounded mean are [-2,-1,0,1] instead of
+    // [-1.5,-0.5,0.5,1.5] and the variance comes out 1.5 where it is 1.25 --
+    // an 8% error in rstd, and worse as the spread shrinks relative to the
+    // magnitude. Subtracting one element first is exact, because the shifted
+    // values are small, so the sums are conditioned on the row's spread
+    // rather than on its magnitude.
+    const float anchor = in[0];
+
+    // pass 1: the mean, in shifted coordinates
     float s1 = 0.0f;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-        s1 += in[j];
+        s1 += in[j] - anchor;
     }
     s1 = warp_sum(s1);
     if (threadIdx.x % warpSize == 0) {
@@ -313,23 +331,22 @@ __global__ void prim_layernorm_kernel(vx_prim_norm_args_t* arg) {
     if (threadIdx.x == 0) {
         float v1 = 0.0f;
         for (uint32_t w = 0; w < PRIM_BLOCK / warpSize; ++w) v1 += tbuf[w];
-        tbuf[16] = v1 / (float)cols;              // mean
+        tbuf[16] = v1 / (float)cols;              // mean, shifted
     }
     __syncthreads();
-    const float mean = tbuf[16];
+    const float mean_shift = tbuf[16];
 
-    // pass 2: the variance, as the mean squared deviation from the mean.
+    // pass 2: the variance, as the mean squared deviation from that mean.
     //
     // It used to be E[x^2] - mean^2 in one pass, which is the same number in
-    // exact arithmetic and a different one in float32: for a row of values
-    // around 1e6 both terms are ~1e12 and their difference is ~1, so every
-    // significant digit cancels and the result clamps to 0 (rstd then comes
-    // out as 1/sqrt(eps) = 316.2 where the answer is 0.894). Two passes cost
-    // one more read of a row that is already in cache, and Welford -- what
-    // ATen uses -- is not available without a cross-thread recurrence.
+    // exact arithmetic and a different one in float32: for a row around 1e6
+    // both terms are ~1e12 and their difference is ~1, so every significant
+    // digit cancels and the result clamps to 0. Two passes cost one more read
+    // of a row that is already in cache, and Welford -- what ATen uses -- is
+    // not available without a cross-thread recurrence.
     float s2 = 0.0f;
     for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-        const float d = in[j] - mean;
+        const float d = (in[j] - anchor) - mean_shift;
         s2 += d * d;
     }
     s2 = warp_sum(s2);
@@ -337,6 +354,7 @@ __global__ void prim_layernorm_kernel(vx_prim_norm_args_t* arg) {
         tbuf[threadIdx.x / warpSize] = s2;
     }
     __syncthreads();
+    const float mean = anchor + mean_shift;
     if (threadIdx.x == 0) {
         float v2 = 0.0f;
         for (uint32_t w = 0; w < PRIM_BLOCK / warpSize; ++w) v2 += tbuf[w];
@@ -349,13 +367,21 @@ __global__ void prim_layernorm_kernel(vx_prim_norm_args_t* arg) {
     __syncthreads();
     const float rstd = tbuf[17];
 
-    if (gamma && beta) {
+    // The affine is applied in shifted coordinates too: (x - anchor) -
+    // mean_shift is the deviation, and it is the accurate one. gamma and beta
+    // are independent options -- torch takes either alone, with the other
+    // standing for its identity -- so each is tested where it is read.
+    if (gamma) {
         for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-            out[j] = (in[j] - mean) * rstd * gamma[j] + beta[j];
+            const float d = (in[j] - anchor) - mean_shift;
+            const float s = d * rstd * gamma[j];
+            out[j] = beta ? s + beta[j] : s;
         }
     } else {
         for (uint32_t j = threadIdx.x; j < cols; j += PRIM_BLOCK) {
-            out[j] = (in[j] - mean) * rstd;
+            const float d = (in[j] - anchor) - mean_shift;
+            const float s = d * rstd;
+            out[j] = beta ? s + beta[j] : s;
         }
     }
 }
