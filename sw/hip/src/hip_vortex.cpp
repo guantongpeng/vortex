@@ -686,6 +686,48 @@ hipError_t hipModuleGetFunction(hipFunction_t* function, hipModule_t module,
     return hipSuccess;
 }
 
+hipError_t hipFuncGetAttribute(int* value, hipFunction_attribute attrib,
+                               hipFunction_t function) {
+    if (!value || !function) return RET(hipErrorInvalidValue);
+    auto* fn = (FuncState*)function;
+    vx_kernel_info_t info = {};
+    info.struct_size = sizeof(info);
+    vx_result_t r = vx_kernel_get_info(fn->k, &info);
+    if (r != VX_SUCCESS) return RET_VX(r);
+
+    uint64_t threads = 0, warps = 0, local_mem = 0;
+    switch (attrib) {
+    case hipFuncAttributeMaxThreadsPerBlock:
+        if (vx_device_query(g_device.dev, VX_CAPS_NUM_THREADS, &threads) != VX_SUCCESS ||
+            vx_device_query(g_device.dev, VX_CAPS_NUM_WARPS, &warps) != VX_SUCCESS)
+            return RET(hipErrorUnknown);
+        *value = (int)(threads * warps);
+        return hipSuccess;
+    case hipFuncAttributeSharedSizeBytes:
+        *value = (int)info.static_lmem_bytes;
+        return hipSuccess;
+    case hipFuncAttributeLocalSizeBytes:
+        return RET(hipErrorNotSupported);
+    case hipFuncAttributeNumRegs:
+        *value = (int)info.registers;
+        return hipSuccess;
+    case hipFuncAttributeMaxDynamicSharedSizeBytes:
+        if (vx_device_query(g_device.dev, VX_CAPS_LOCAL_MEM_SIZE, &local_mem) != VX_SUCCESS)
+            return RET(hipErrorUnknown);
+        if (local_mem < info.static_lmem_bytes)
+            return RET(hipErrorInvalidValue);
+        *value = (int)(local_mem - info.static_lmem_bytes);
+        return hipSuccess;
+    case hipFuncAttributeConstSizeBytes:
+    case hipFuncAttributePtxVersion:
+    case hipFuncAttributeBinaryVersion:
+    case hipFuncAttributeCacheModeCA:
+    case hipFuncAttributePreferredSharedMemoryCarveout:
+    default:
+        return RET(hipErrorNotSupported);
+    }
+}
+
 hipError_t hipModuleLaunchKernel(hipFunction_t f,
                                  uint32_t gridDimX, uint32_t gridDimY, uint32_t gridDimZ,
                                  uint32_t blockDimX, uint32_t blockDimY, uint32_t blockDimZ,

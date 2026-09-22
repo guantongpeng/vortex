@@ -84,6 +84,24 @@ int main(int argc, char** argv) {
     HIP_CHECK(hipModuleLoad(&module, vxbin));
     HIP_CHECK(hipModuleGetFunction(&func, module, "vecadd_kernel"));
 
+    int max_threads = 0, shared_bytes = -1, dynamic_bytes = 0;
+    HIP_CHECK(hipFuncGetAttribute(&max_threads,
+                                  hipFuncAttributeMaxThreadsPerBlock, func));
+    HIP_CHECK(hipFuncGetAttribute(&shared_bytes,
+                                  hipFuncAttributeSharedSizeBytes, func));
+    HIP_CHECK(hipFuncGetAttribute(&dynamic_bytes,
+                                  hipFuncAttributeMaxDynamicSharedSizeBytes, func));
+    if (max_threads <= 0 || shared_bytes != 0 || dynamic_bytes <= 0) {
+        fprintf(stderr, "FAILED: function attributes max=%d shared=%d dynamic=%d\n",
+                max_threads, shared_bytes, dynamic_bytes);
+        return 1;
+    }
+    if (hipFuncGetAttribute(&shared_bytes, hipFuncAttributeLocalSizeBytes, func) !=
+        hipErrorNotSupported) {
+        fprintf(stderr, "FAILED: unsupported local-size attribute must be diagnosed\n");
+        return 1;
+    }
+
     hipStream_t stream = nullptr;
     HIP_CHECK(hipStreamCreate(&stream));
     hipEvent_t ev_start = nullptr, ev_stop = nullptr;

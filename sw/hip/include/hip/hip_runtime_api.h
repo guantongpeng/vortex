@@ -66,6 +66,21 @@ typedef struct _hipEvent_t* hipEvent_t;
 typedef struct _hipModule_t* hipModule_t;
 typedef struct _hipFunction_t* hipFunction_t;
 
+// Function attributes exposed by the native HIP module path. Values follow
+// the HIP runtime ABI so callers can use the same enum with autotuners.
+typedef enum hipFunction_attribute {
+    hipFuncAttributeMaxThreadsPerBlock = 0,
+    hipFuncAttributeSharedSizeBytes = 1,
+    hipFuncAttributeConstSizeBytes = 2,
+    hipFuncAttributeLocalSizeBytes = 3,
+    hipFuncAttributeNumRegs = 4,
+    hipFuncAttributePtxVersion = 5,
+    hipFuncAttributeBinaryVersion = 6,
+    hipFuncAttributeCacheModeCA = 7,
+    hipFuncAttributeMaxDynamicSharedSizeBytes = 8,
+    hipFuncAttributePreferredSharedMemoryCarveout = 9,
+} hipFunction_attribute;
+
 typedef struct hipDeviceProp_t {
     char name[64];
     int multiProcessorCount;   // VX_CAPS_NUM_CORES
@@ -147,6 +162,8 @@ hipError_t hipModuleLoad(hipModule_t* module, const char* fname);
 hipError_t hipModuleUnload(hipModule_t module);
 hipError_t hipModuleGetFunction(hipFunction_t* function, hipModule_t module,
                                 const char* kname);
+hipError_t hipFuncGetAttribute(int* value, hipFunction_attribute attrib,
+                               hipFunction_t function);
 hipError_t hipModuleLaunchKernel(hipFunction_t f,
                                  uint32_t gridDimX, uint32_t gridDimY, uint32_t gridDimZ,
                                  uint32_t blockDimX, uint32_t blockDimY, uint32_t blockDimZ,
