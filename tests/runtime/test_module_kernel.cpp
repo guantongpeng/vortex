@@ -70,7 +70,10 @@ std::string find_test_vxbin(const char* override_path) {
 // Append a minimal VXKMDATA footer to a test image. The metadata deliberately
 // omits device requirements so launch validation can isolate argument checks.
 std::vector<uint8_t> make_args_metadata_vxbin(const std::string& vxbin,
-                                              uint32_t args_size) {
+                                              uint32_t args_size,
+                                              uint32_t max_block_x = 1,
+                                              uint32_t static_lmem = 0,
+                                              uint64_t required_isa = 0) {
     std::ifstream ifs(vxbin, std::ios::binary);
     ifs.seekg(0, ifs.end);
     auto sz = (size_t)ifs.tellg();
@@ -83,12 +86,14 @@ std::vector<uint8_t> make_args_metadata_vxbin(const std::string& vxbin,
     uint8_t rec[52] = {};
     uint32_t name_off = 0;
     uint16_t name_len = 4;
-    uint32_t block_x = 1, block_y = 1, block_z = 1;
+    uint32_t block_x = max_block_x, block_y = 1, block_z = 1;
     std::memcpy(rec + 0, &name_off, 4);
     std::memcpy(rec + 4, &name_len, 2);
     std::memcpy(rec + 8, &block_x, 4);
     std::memcpy(rec + 12, &block_y, 4);
     std::memcpy(rec + 16, &block_z, 4);
+    std::memcpy(rec + 20, &static_lmem, 4);
+    std::memcpy(rec + 28, &required_isa, 8);
     std::memcpy(rec + 44, &args_size, 4);
     buf.insert(buf.end(), rec, rec + sizeof(rec));
     uint32_t n = 1;
@@ -427,6 +432,94 @@ int test_launch_args_size_limit(vx_device_h dev, const std::string& vxbin) {
     return 0;
 }
 
+int expect_metadata_launch_rejected(vx_device_h dev,
+                                    const std::vector<uint8_t>& buf,
+                                    uint32_t block_x, uint32_t lmem_size,
+                                    bool batch = false) {
+    vx_module_h mod = nullptr;
+    CHECK_VX(vx_module_load_bytes(dev, buf.data(), buf.size(), &mod));
+    vx_kernel_h k = nullptr;
+    CHECK_VX(vx_module_get_kernel(mod, "main", &k));
+
+    vx_queue_info_t qi = {};
+    qi.struct_size = sizeof(qi);
+    vx_queue_h q = nullptr;
+    CHECK_VX(vx_queue_create(dev, &qi, &q));
+
+    vx_launch_info_t li = {};
+    li.struct_size = sizeof(li);
+    li.kernel = k;
+    li.ndim = 1;
+    li.grid_dim[0] = 1;
+    li.block_dim[0] = block_x;
+    li.lmem_size = lmem_size;
+
+    vx_event_h ev = nullptr;
+    vx_result_t r;
+    if (batch) {
+        vx_command_t command = {};
+        command.type = VX_COMMAND_LAUNCH;
+        command.data.launch = &li;
+        r = vx_enqueue_commands(q, &command, 1, 0, nullptr, &ev);
+    } else {
+        r = vx_enqueue_launch(q, &li, 0, nullptr, &ev);
+    }
+    EXPECT(r == VX_ERR_INVALID_VALUE,
+           "metadata resource mismatch must fail before enqueue");
+    EXPECT(ev == nullptr, "metadata rejection must not return an event");
+
+    CHECK_VX(vx_queue_release(q));
+    CHECK_VX(vx_kernel_release(k));
+    CHECK_VX(vx_module_release(mod));
+    return 0;
+}
+
+// Compiler-published max_block, static LMEM, and ISA requirements are launch
+// contracts. Each mismatch must fail before a queue event is created.
+int test_launch_metadata_constraints(vx_device_h dev,
+                                     const std::string& vxbin) {
+    if (vxbin.empty()) {
+        printf("       (skipped — no .vxbin available)\n");
+        return 0;
+    }
+
+    auto block_meta = make_args_metadata_vxbin(vxbin, 0, 1);
+    if (expect_metadata_launch_rejected(dev, block_meta, 2, 0) != 0)
+        return 1;
+    if (expect_metadata_launch_rejected(dev, block_meta, 2, 0, true) != 0)
+        return 1;
+
+    uint64_t local_mem = 0;
+    CHECK_VX(vx_device_query(dev, VX_CAPS_LOCAL_MEM_SIZE, &local_mem));
+    auto lmem_meta = make_args_metadata_vxbin(
+        vxbin, 0, 1, static_cast<uint32_t>(local_mem));
+    if (expect_metadata_launch_rejected(dev, lmem_meta, 1, 1) != 0)
+        return 1;
+
+    uint64_t available_isa = 0;
+    CHECK_VX(vx_device_query(dev, VX_CAPS_ISA_FLAGS, &available_isa));
+    const uint64_t candidates[] = {
+        VX_ISA_STD_A, VX_ISA_STD_C, VX_ISA_STD_D, VX_ISA_STD_F,
+        VX_ISA_EXT_TCU, VX_ISA_EXT_DXA, VX_ISA_EXT_TEX,
+    };
+    uint64_t missing_isa = 0;
+    for (auto candidate : candidates) {
+        if ((available_isa & candidate) == 0) {
+            missing_isa = candidate;
+            break;
+        }
+    }
+    if (missing_isa != 0) {
+        auto isa_meta = make_args_metadata_vxbin(vxbin, 0, 1, 0,
+                                                 missing_isa);
+        if (expect_metadata_launch_rejected(dev, isa_meta, 1, 0) != 0)
+            return 1;
+    } else {
+        printf("       (ISA mismatch skipped — all test extensions enabled)\n");
+    }
+    return 0;
+}
+
 #define RUN(section)                                                     \
     do {                                                                  \
         printf("[RUN ] %s\n", #section);                                  \
@@ -458,6 +551,7 @@ int main(int argc, char** argv) {
     RUN(test_kernel_metadata);
     RUN(test_launch_args_size_mismatch);
     RUN(test_launch_args_size_limit);
+    RUN(test_launch_metadata_constraints);
     RUN(test_launch_via_kernel_handle);
 
     CHECK_VX(vx_device_release(dev));

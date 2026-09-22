@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 
 namespace vx {
 
@@ -31,6 +32,45 @@ vx_result_t validate_kernel_args(Kernel* kernel, size_t args_size) {
     if (r != VX_SUCCESS) return r;
     if (info.args_size != 0 && args_size != info.args_size)
         return VX_ERR_INVALID_VALUE;
+    return VX_SUCCESS;
+}
+
+// Validate compiler-published resource requirements before retaining the
+// kernel or placing a command on the queue. Metadata is advisory only when a
+// field is zero; non-zero limits are hard ABI contracts.
+vx_result_t validate_kernel_resources(Kernel* kernel, Device* device,
+                                      uint32_t ndim,
+                                      const std::array<uint32_t, 3>& block,
+                                      uint32_t lmem_size) {
+    if (ndim == 0 || !kernel) return VX_SUCCESS;
+
+    vx_kernel_info_t info = {};
+    info.struct_size = sizeof(info);
+    auto r = kernel->get_info(&info);
+    if (r != VX_SUCCESS) return r;
+
+    for (uint32_t i = 0; i < ndim; ++i) {
+        if (block[i] == 0) return VX_ERR_INVALID_VALUE;
+        if (info.max_block[i] != 0 && block[i] > info.max_block[i])
+            return VX_ERR_INVALID_VALUE;
+    }
+
+    if (info.required_isa != 0) {
+        uint64_t available_isa = 0;
+        r = device->query_caps(VX_CAPS_ISA_FLAGS, &available_isa);
+        if (r != VX_SUCCESS) return r;
+        if ((info.required_isa & ~available_isa) != 0)
+            return VX_ERR_INVALID_VALUE;
+    }
+
+    if (info.static_lmem_bytes != 0 || lmem_size != 0) {
+        uint64_t local_mem_size = 0;
+        r = device->query_caps(VX_CAPS_LOCAL_MEM_SIZE, &local_mem_size);
+        if (r != VX_SUCCESS) return r;
+        if (uint64_t(info.static_lmem_bytes) + uint64_t(lmem_size) >
+            local_mem_size)
+            return VX_ERR_INVALID_VALUE;
+    }
     return VX_SUCCESS;
 }
 
@@ -331,6 +371,10 @@ vx_result_t Queue::enqueue_launch(const vx_launch_info_t* info,
     // multiple of cluster_dim along each in-use axis.
     std::array<uint32_t, 3> lg_in = {1, 1, 1};
     for (uint32_t i = 0; i < ndim; ++i) {
+        if (grid_in[i] == 0 || block_in[i] == 0) {
+            if (kernel) kernel->release();
+            return VX_ERR_INVALID_VALUE;
+        }
         uint32_t lg = info->cluster_dim[i];
         if (lg == 0) lg = 1;
         if (grid_in[i] % lg != 0) {
@@ -354,14 +398,21 @@ vx_result_t Queue::enqueue_launch(const vx_launch_info_t* info,
             if (kernel) kernel->release();
             return r;
         }
-        uint32_t block_size = 1;
+        uint64_t block_size = 1;
         for (uint32_t i = 0; i < ndim; ++i) {
             block_size *= block_in[i];
         }
-        if (block_size > (uint32_t)(nt * nw)) {
+        if (block_size > nt * nw || block_size > std::numeric_limits<uint32_t>::max()) {
             if (kernel) kernel->release();
             return VX_ERR_INVALID_VALUE;
         }
+    }
+
+    auto resource_r = validate_kernel_resources(kernel, device_, ndim,
+                                                block_in, lmem_size);
+    if (resource_r != VX_SUCCESS) {
+        if (kernel) kernel->release();
+        return resource_r;
     }
 
     Command cmd;
@@ -570,6 +621,8 @@ vx_result_t cmd_build_recs(const vx_command_t* commands, uint32_t count,
             r.ndim      = info->ndim;
             r.lmem_size = info->lmem_size;
             for (uint32_t d = 0; d < info->ndim; ++d) {
+                if (info->grid_dim[d] == 0 || info->block_dim[d] == 0)
+                    return fail(VX_ERR_INVALID_VALUE);
                 r.grid [d] = info->grid_dim [d];
                 r.block[d] = info->block_dim[d];
             }
@@ -579,6 +632,10 @@ vx_result_t cmd_build_recs(const vx_command_t* commands, uint32_t count,
                 if (r.grid[d] % lg != 0) return fail(VX_ERR_INVALID_VALUE);
                 r.cluster[d] = lg;
             }
+            auto resource_r = validate_kernel_resources(
+                r.kernel, r.kernel ? r.kernel->module()->device() : nullptr,
+                r.ndim, r.block, r.lmem_size);
+            if (resource_r != VX_SUCCESS) return fail(resource_r);
         } else {
             return fail(VX_ERR_INVALID_VALUE);
         }

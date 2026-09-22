@@ -85,7 +85,8 @@
 - [ ] 将所有 `args_size`、`alignof`、`offsetof`、ISA、TCU/DXA、block/LMEM 校验改为单一来源。
 - [x] 对超过 `VX_KERNEL_ARGS_MAX_BYTES`（4 KiB）的参数块返回明确错误，不允许静默截断。
 - [x] 在 `vx_enqueue_launch`/批量命令构建前校验已发布的 `args_size` 和参数块边界。
-- [ ] 在提交前继续补齐 metadata、XLEN、ISA、配置和 block/LMEM 的全量校验。
+- [~] 在提交前继续补齐 metadata、XLEN、ISA、配置和 block/LMEM 的全量校验；当前已拒绝 metadata `max_block`、`static_lmem_bytes`、`required_isa` 不匹配及零维度/零 block，XLEN/配置/features 仍待。
+- [x] runtime 已将 metadata 资源约束统一应用于单次和批量 launch，并补充提交前失败、无 event 的回归；详见 [`p1_05_metadata_resource_validation.md`](p1_05_metadata_resource_validation.md)。
 - [ ] 为 HIP `hipFuncGetAttribute`、Triton autotune 和 PyTorch loader 提供 metadata 映射。
 - [ ] 补齐 RV32 metadata 全量漂移测试；现有测试不能只解析 `ARGS_SIZE` 一列。
 
