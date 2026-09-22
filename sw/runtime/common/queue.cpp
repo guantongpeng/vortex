@@ -15,6 +15,27 @@
 
 namespace vx {
 
+namespace {
+
+// Validate the host-side argument blob before it is copied or queued. A zero
+// metadata size preserves legacy images without VXKMDATA; images that publish
+// a size must receive exactly that layout, otherwise the device would read
+// fields at offsets the caller did not provide.
+vx_result_t validate_kernel_args(Kernel* kernel, size_t args_size) {
+    if (args_size > VX_MAX_KERNEL_ARGS_SIZE) return VX_ERR_INVALID_VALUE;
+    if (!kernel) return VX_SUCCESS;
+
+    vx_kernel_info_t info = {};
+    info.struct_size = sizeof(info);
+    auto r = kernel->get_info(&info);
+    if (r != VX_SUCCESS) return r;
+    if (info.args_size != 0 && args_size != info.args_size)
+        return VX_ERR_INVALID_VALUE;
+    return VX_SUCCESS;
+}
+
+} // namespace
+
 // ============================================================================
 // Construction / destruction
 // ============================================================================
@@ -279,6 +300,8 @@ vx_result_t Queue::enqueue_launch(const vx_launch_info_t* info,
     // derived from this handle inside the work lambda, so it is the only
     // kernel-state we capture.
     Kernel* kernel = (info->kernel != nullptr) ? to_kernel(info->kernel) : nullptr;
+    auto args_r = validate_kernel_args(kernel, info->args_size);
+    if (args_r != VX_SUCCESS) return args_r;
     if (kernel) kernel->retain();
 
     // Copy the args block now so the caller can free/reuse `info` (and the
@@ -537,6 +560,8 @@ vx_result_t cmd_build_recs(const vx_command_t* commands, uint32_t count,
                 return fail(VX_ERR_INVALID_VALUE);
             r.is_launch = true;
             r.kernel = (info->kernel != nullptr) ? to_kernel(info->kernel) : nullptr;
+            auto args_r = validate_kernel_args(r.kernel, info->args_size);
+            if (args_r != VX_SUCCESS) return fail(args_r);
             if (r.kernel) { r.kernel->retain(); retained.push_back(r.kernel); }
             if (info->args_host && info->args_size > 0) {
                 const uint8_t* p = static_cast<const uint8_t*>(info->args_host);

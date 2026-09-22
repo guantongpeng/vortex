@@ -82,8 +82,9 @@
 
 - [x] host/device 共用参数结构，基础 `sizeof`、RV32/RV64 对齐和 VXKMDATA 已落地。
 - [ ] 将所有 `args_size`、`alignof`、`offsetof`、ISA、TCU/DXA、block/LMEM 校验改为单一来源。
-- [ ] 对超过 4 KiB 的参数块返回明确错误，不允许静默截断。
-- [ ] 在 `vx_enqueue_launch` 提交前校验 metadata、XLEN、配置和参数块边界。
+- [x] 对超过 `VX_KERNEL_ARGS_MAX_BYTES`（4 KiB）的参数块返回明确错误，不允许静默截断。
+- [x] 在 `vx_enqueue_launch`/批量命令构建前校验已发布的 `args_size` 和参数块边界。
+- [ ] 在提交前继续补齐 metadata、XLEN、ISA、配置和 block/LMEM 的全量校验。
 - [ ] 为 HIP `hipFuncGetAttribute`、Triton autotune 和 PyTorch loader 提供 metadata 映射。
 - [ ] 补齐 RV32 metadata 全量漂移测试；现有测试不能只解析 `ARGS_SIZE` 一列。
 

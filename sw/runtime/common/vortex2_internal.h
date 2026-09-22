@@ -68,6 +68,11 @@
 
 namespace vx {
 
+// Kernel argument blobs are copied into a fixed-size launch scratch slot.
+// Keeping this limit explicit makes an oversized host parameter block fail at
+// enqueue time instead of silently selecting a different allocation path.
+constexpr uint64_t VX_MAX_KERNEL_ARGS_SIZE = VX_KERNEL_ARGS_MAX_BYTES;
+
 class Device;
 class Buffer;
 class Queue;
@@ -329,9 +334,9 @@ public:
     vx_result_t drain_cout();
 
     // Acquire a device-memory slot to stage a kernel-args blob of `size`
-    // bytes. Slots <= ARGS_SLOT_SIZE come from a recycled free-list (the
-    // common case — kernel arg blocks are small); oversized requests get
-    // a one-off allocation. `*out_pooled` reports which, so the matching
+    // bytes. Slots come from a recycled free-list and requests above
+    // ARGS_SLOT_SIZE are rejected. `*out_pooled` reports the slot kind, so
+    // the matching
     // args_slot_release frees correctly. Because vx_enqueue_launch holds
     // a slot only for the duration of one synchronous CP launch, the
     // free-list naturally settles at the count of concurrent launches.
@@ -502,8 +507,9 @@ private:
     std::string                    cout_line_     [VX_MEM_IO_COUT_SLOTS];
 
     // Kernel-args scratch pool. Free-list of recycled fixed-size device slots;
-    // ARGS_SLOT_SIZE covers typical kernel arg blocks. Drained in ~Device.
-    static constexpr uint64_t      ARGS_SLOT_SIZE = 4096;
+    // oversized blobs are rejected before a command is queued. Drained in
+    // ~Device.
+    static constexpr uint64_t      ARGS_SLOT_SIZE = VX_MAX_KERNEL_ARGS_SIZE;
     std::mutex                     args_pool_mu_;
     std::vector<uint64_t>          args_pool_free_;
 };

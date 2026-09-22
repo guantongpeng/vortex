@@ -177,11 +177,7 @@ Device::~Device() {
 vx_result_t Device::args_slot_acquire(uint64_t size, uint64_t* out_addr,
                                       bool* out_pooled) {
     if (!out_addr || !out_pooled) return VX_ERR_INVALID_VALUE;
-    if (size > ARGS_SLOT_SIZE) {
-        // Oversized args block — one-off allocation, not pooled.
-        *out_pooled = false;
-        return this->mem_alloc(size, /*VX_MEM_READ*/ 0x1, out_addr);
-    }
+    if (size > ARGS_SLOT_SIZE) return VX_ERR_INVALID_VALUE;
     *out_pooled = true;
     {
         std::lock_guard<std::mutex> g(args_pool_mu_);

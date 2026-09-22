@@ -216,6 +216,10 @@ typedef struct {
     uint32_t            flags;
 } vx_queue_info_t;
 
+// Maximum host-side argument blob copied into a device launch scratch slot.
+// Keep this public so host launchers and the runtime reject the same limit.
+#define VX_KERNEL_ARGS_MAX_BYTES 4096u
+
 typedef struct {
     size_t       struct_size;
     const void*  next;
@@ -229,7 +233,8 @@ typedef struct {
     // staging. Buffers passed as kernel args appear as their uint64_t
     // device addresses inline in the blob (see vx_buffer_address).
     //
-    // args_host may be NULL (args_size 0) — the legacy escape hatch: the
+    // The runtime accepts at most VX_KERNEL_ARGS_MAX_BYTES bytes. args_host may be NULL
+    // (args_size 0) — the legacy escape hatch: the
     // caller is expected to have programmed the ARG DCRs itself via prior
     // vx_dcr_write calls (matches the ndim==0 convention).
     const void*  args_host;
