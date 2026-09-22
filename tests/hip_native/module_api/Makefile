@@ -30,10 +30,12 @@ HIP_LIB := $(ROOT_DIR)/sw/hip
 
 CXX := g++
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wfatal-errors -Werror
-CXXFLAGS += -I$(HIP_INC) -DHIP_TEST_DEV_PTR_WIDTH=$(XLEN)
+CXXFLAGS += -I$(HIP_INC) -I$(VORTEX_HOME)/sw/runtime/include
+CXXFLAGS += -DHIP_TEST_DEV_PTR_WIDTH=$(XLEN)
 
 LDFLAGS += -L$(HIP_LIB) -lhip_vortex
 LDFLAGS += -L$(ROOT_DIR)/sw/runtime
+LDFLAGS += -lvortex
 LDFLAGS += -Wl,-rpath,$(HIP_LIB) -Wl,-rpath,$(ROOT_DIR)/sw/runtime
 
 VORTEX_DRIVER ?= simx

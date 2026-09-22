@@ -61,3 +61,11 @@ tests:
   drivers:
   - simx
   - rtlsim
+- id: parity_module_api
+  check: model_parity
+  via: make-run
+  dir: tests/hip_native/module_api
+  target: run-{driver}
+  xlen:
+  - 32
+  tolerance: 0.05

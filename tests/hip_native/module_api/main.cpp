@@ -7,6 +7,7 @@
 // creation + record + synchronize + elapsed, and error surfaces.
 
 #include <hip/hip_runtime_api.h>
+#include <vortex2.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -141,6 +142,13 @@ int main(int argc, char** argv) {
             }
             ++errors;
         }
+    }
+
+    void* vx_dev_raw = nullptr;
+    HIP_CHECK(hipGetVxDevice(&vx_dev_raw));
+    if (vx_device_dump_perf((vx_device_h)vx_dev_raw, stdout) != VX_SUCCESS) {
+        fprintf(stderr, "FAILED: vx_device_dump_perf\n");
+        return 1;
     }
 
     HIP_CHECK(hipEventDestroy(ev_start));

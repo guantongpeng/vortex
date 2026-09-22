@@ -162,7 +162,7 @@ class Spec:
                 argv += self.flags.split()
             return argv, env
         if self.via == "make-run":
-            target = self.target.format(driver=self.driver, xlen=xlen)
+            target = self.target.format(driver=(driver or self.driver), xlen=xlen)
             argv = ["make", "-C", self.dir, target]
             argv += ["{}={}".format(k, v) for k, v in self.vars.items()]
             return argv, env
@@ -475,8 +475,8 @@ def cmd_lint(args):
         if c.check:
             if c.check not in VALID_CHECK:
                 errors.append("{}: invalid check {!r}".format(c.id, c.check))
-            if c.via != "blackbox":
-                errors.append("{}: check cases must be via blackbox".format(c.id))
+            if c.via not in ("blackbox", "make-run"):
+                errors.append("{}: check cases must be via blackbox or make-run".format(c.id))
             if c.authored_drivers:
                 errors.append("{}: check cases must not set driver/drivers "
                               "(the runner drives simx and rtlsim)".format(c.id))
