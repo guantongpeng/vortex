@@ -67,6 +67,38 @@ std::string find_test_vxbin(const char* override_path) {
     return "";
 }
 
+// Append a minimal VXKMDATA footer to a test image. The metadata deliberately
+// omits device requirements so launch validation can isolate argument checks.
+std::vector<uint8_t> make_args_metadata_vxbin(const std::string& vxbin,
+                                              uint32_t args_size) {
+    std::ifstream ifs(vxbin, std::ios::binary);
+    ifs.seekg(0, ifs.end);
+    auto sz = (size_t)ifs.tellg();
+    ifs.seekg(0, ifs.beg);
+    std::vector<uint8_t> buf(sz);
+    ifs.read(reinterpret_cast<char*>(buf.data()), sz);
+
+    const char name[] = "main";
+    buf.insert(buf.end(), name, name + sizeof(name) - 1);
+    uint8_t rec[52] = {};
+    uint32_t name_off = 0;
+    uint16_t name_len = 4;
+    uint32_t block_x = 1, block_y = 1, block_z = 1;
+    std::memcpy(rec + 0, &name_off, 4);
+    std::memcpy(rec + 4, &name_len, 2);
+    std::memcpy(rec + 8, &block_x, 4);
+    std::memcpy(rec + 12, &block_y, 4);
+    std::memcpy(rec + 16, &block_z, 4);
+    std::memcpy(rec + 44, &args_size, 4);
+    buf.insert(buf.end(), rec, rec + sizeof(rec));
+    uint32_t n = 1;
+    buf.insert(buf.end(), reinterpret_cast<uint8_t*>(&n),
+               reinterpret_cast<uint8_t*>(&n) + 4);
+    const char magic[] = "VXKMDATA";
+    buf.insert(buf.end(), magic, magic + 8);
+    return buf;
+}
+
 // vx_module_load_file with single-`main` fallback.
 // Loads a .vxbin (no symbol footer → fallback path), resolves "main",
 // and verifies that a bogus name returns an error.
@@ -314,6 +346,87 @@ int test_kernel_metadata(vx_device_h dev, const std::string& vxbin) {
     return 0;
 }
 
+// A VXKMDATA args_size is an ABI contract: a launch must provide exactly that
+// many bytes when the image publishes a non-zero value. The check belongs at
+// enqueue time so no queue event or device scratch allocation is left behind.
+int test_launch_args_size_mismatch(vx_device_h dev, const std::string& vxbin) {
+    if (vxbin.empty()) {
+        printf("       (skipped — no .vxbin available)\n");
+        return 0;
+    }
+    auto buf = make_args_metadata_vxbin(vxbin, 64);
+    vx_module_h mod = nullptr;
+    CHECK_VX(vx_module_load_bytes(dev, buf.data(), buf.size(), &mod));
+    vx_kernel_h k = nullptr;
+    CHECK_VX(vx_module_get_kernel(mod, "main", &k));
+
+    vx_queue_info_t qi = {};
+    qi.struct_size = sizeof(qi);
+    vx_queue_h q = nullptr;
+    CHECK_VX(vx_queue_create(dev, &qi, &q));
+
+    uint8_t args_blob[32] = {};
+    vx_launch_info_t li = {};
+    li.struct_size = sizeof(li);
+    li.kernel = k;
+    li.args_host = args_blob;
+    li.args_size = sizeof(args_blob);
+    li.ndim = 1;
+    li.grid_dim[0] = 1;
+    li.block_dim[0] = 1;
+
+    vx_event_h ev = nullptr;
+    auto r = vx_enqueue_launch(q, &li, 0, nullptr, &ev);
+    EXPECT(r == VX_ERR_INVALID_VALUE,
+           "launch args_size mismatch must be rejected at enqueue");
+    EXPECT(ev == nullptr, "rejected launch must not return an event");
+
+    CHECK_VX(vx_queue_release(q));
+    CHECK_VX(vx_kernel_release(k));
+    CHECK_VX(vx_module_release(mod));
+    return 0;
+}
+
+// The argument staging slot is fixed at 4 KiB. A request above that limit is
+// rejected before copying the host blob or allocating device scratch memory.
+int test_launch_args_size_limit(vx_device_h dev, const std::string& vxbin) {
+    if (vxbin.empty()) {
+        printf("       (skipped — no .vxbin available)\n");
+        return 0;
+    }
+    auto buf = make_args_metadata_vxbin(vxbin, 0);
+    vx_module_h mod = nullptr;
+    CHECK_VX(vx_module_load_bytes(dev, buf.data(), buf.size(), &mod));
+    vx_kernel_h k = nullptr;
+    CHECK_VX(vx_module_get_kernel(mod, "main", &k));
+
+    vx_queue_info_t qi = {};
+    qi.struct_size = sizeof(qi);
+    vx_queue_h q = nullptr;
+    CHECK_VX(vx_queue_create(dev, &qi, &q));
+
+    std::vector<uint8_t> args_blob(4097, 0);
+    vx_launch_info_t li = {};
+    li.struct_size = sizeof(li);
+    li.kernel = k;
+    li.args_host = args_blob.data();
+    li.args_size = args_blob.size();
+    li.ndim = 1;
+    li.grid_dim[0] = 1;
+    li.block_dim[0] = 1;
+
+    vx_event_h ev = nullptr;
+    auto r = vx_enqueue_launch(q, &li, 0, nullptr, &ev);
+    EXPECT(r == VX_ERR_INVALID_VALUE,
+           "launch args_size above 4 KiB must be rejected");
+    EXPECT(ev == nullptr, "rejected launch must not return an event");
+
+    CHECK_VX(vx_queue_release(q));
+    CHECK_VX(vx_kernel_release(k));
+    CHECK_VX(vx_module_release(mod));
+    return 0;
+}
+
 #define RUN(section)                                                     \
     do {                                                                  \
         printf("[RUN ] %s\n", #section);                                  \
@@ -343,6 +456,8 @@ int main(int argc, char** argv) {
     RUN(test_refcount);
     RUN(test_multi_symbol_footer);
     RUN(test_kernel_metadata);
+    RUN(test_launch_args_size_mismatch);
+    RUN(test_launch_args_size_limit);
     RUN(test_launch_via_kernel_handle);
 
     CHECK_VX(vx_device_release(dev));
