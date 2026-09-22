@@ -1,8 +1,3 @@
-// P1-03 follow-up: >4 KiB kernel argument blocks. The arg struct embeds
-// 1200 floats (4800 B inline payload) so the staged block is ~4.7 KiB —
-// beyond the 4 KiB boundary the plan calls out. The kernel consumes the
-// tail of the inline array to prove the whole blob reaches the device.
-
 #include <hip/hip_runtime.h>
 #include <stdint.h>
 

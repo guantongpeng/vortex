@@ -33,6 +33,12 @@ struct scale_args_t {
     uint32_t pad;
 };
 
+#if HIP_TEST_DEV_PTR_WIDTH == 32
+static_assert(sizeof(scale_args_t) == 20, "RV32 launch ABI drift");
+#else
+static_assert(sizeof(scale_args_t) == 32, "RV64 launch ABI drift");
+#endif
+
 int main(int argc, char** argv) {
     const char* vxbin = (argc > 1) ? argv[1] : "kernel.vxbin";
 

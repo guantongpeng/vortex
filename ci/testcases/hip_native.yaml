@@ -46,16 +46,18 @@ tests:
   target: run-{driver}
   drivers:
   - simx
-  - rtlsim
   configs: -DVX_CFG_EXT_A_ENABLE
   tier: full
 - id: rtc_stub
   via: make-run
   dir: tests/hip_native/rtc_stub
+  target: run-{driver}
   drivers:
   - simx
 - id: bigargs
   via: make-run
   dir: tests/hip_native/bigargs
+  target: run-{driver}
   drivers:
   - simx
+  - rtlsim

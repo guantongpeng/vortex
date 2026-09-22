@@ -40,7 +40,7 @@ VORTEX_DRIVER ?= simx
 
 all: $(PROJECT) kernel.vxbin
 
-kernel.vxbin: kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
+kernel.vxbin: $(SRC_DIR)/kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
 	echo '[{"name": "vecadd_kernel", "args_size": $(ARGS_SIZE)}]' > kernel_meta.json
 	VX_KERNEL_METADATA=$$PWD/kernel_meta.json \
 	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@

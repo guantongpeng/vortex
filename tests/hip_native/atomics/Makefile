@@ -2,6 +2,7 @@ ROOT_DIR := $(realpath ../../..)
 include $(ROOT_DIR)/config.mk
 
 PROJECT := atomics
+SRC_DIR := $(VORTEX_HOME)/tests/hip_native/$(PROJECT)
 
 HIPCC := python3 $(VORTEX_HOME)/ci/hipcc_vortex.py
 HIPCC_FLAGS := --tooldir=$(TOOLDIR) --build-dir=$(ROOT_DIR) --offload-arch=vortex$(XLEN)
@@ -14,7 +15,7 @@ RTLSIM_BIN := $(ROOT_DIR)/sim/rtlsim/rtlsim
 
 all: $(PROJECT).vxbin
 
-$(PROJECT).vxbin: $(PROJECT).hip $(VORTEX_HOME)/ci/hipcc_vortex.py
+$(PROJECT).vxbin: $(SRC_DIR)/$(PROJECT).hip $(VORTEX_HOME)/ci/hipcc_vortex.py
 	$(HIPCC) $(HIPCC_FLAGS) $< -o $@
 
 $(SIMX_BIN):

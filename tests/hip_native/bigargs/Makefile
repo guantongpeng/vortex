@@ -16,13 +16,13 @@ endif
 
 CXX := g++
 CXXFLAGS += -std=c++17 -Wall -Wextra -Wfatal-errors -Werror
-CXXFLAGS += -I$(VORTEX_HOME)/sw/hip/include
+CXXFLAGS += -I$(VORTEX_HOME)/sw/hip/include -DHIP_TEST_DEV_PTR_WIDTH=$(XLEN)
 LDFLAGS += -L$(ROOT_DIR)/sw/hip -lhip_vortex -L$(ROOT_DIR)/sw/runtime
 LDFLAGS += -Wl,-rpath,$(ROOT_DIR)/sw/hip -Wl,-rpath,$(ROOT_DIR)/sw/runtime
 
 all: main kernel.vxbin
 
-kernel.vxbin: kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
+kernel.vxbin: $(SRC_DIR)/kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
 	echo '[{"name": "bigargs_kernel", "args_size": $(ARGS_SIZE)}]' > meta.json
 	VX_KERNEL_METADATA=$$PWD/meta.json $(HIPCC) $(HIPCC_FLAGS) $< -o $@
 

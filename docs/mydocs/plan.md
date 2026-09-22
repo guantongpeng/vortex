@@ -68,8 +68,9 @@
 
 ### 0.3 测试分层、观测和 parity
 
-- [~] 将现有测试按 runtime、HIP、DL 算子、PyTorch eager、Triton 编译、模型、硬件集成分层，并为主要 pytest tier 设置超时；硬件集成入口和完整 `hip_native.yaml` 仍待收口。
-- [ ] 为 SimX、rtlsim、XRT 分别定义通过条件；补齐 `ci/testcases/hip_native.yaml` 和 DL parity case。
+- [~] 将现有测试按 runtime、HIP、DL 算子、PyTorch eager、Triton 编译、模型、硬件集成分层，并为主要 pytest tier 设置超时；native HIP 功能矩阵已收口，DL/硬件全集仍待。
+- [~] 已补齐并校准 `ci/testcases/hip_native.yaml` 的 native HIP 功能入口和后端标签；SimX、rtlsim、XRT 的统一通过条件及 DL parity case 仍待。
+- [x] native HIP 功能 case 已按真实证据登记：默认算子覆盖 SimX/rtlsim，A-extension atomic 保留 SimX，`bigargs` 验证 4 KiB 参数上限负向契约；详见 [`p0_03_hip_native_ci.md`](p0_03_hip_native_ci.md)。
 - [x] 记录基础 launch、H2D/D2H/D2D、同步、分配和 host 数值计算计数；完整 ATen op→kernel→queue/event、活跃/峰值内存关联仍待 W7.1。
 - [ ] 接入 profiler/trace，区分 Python/dispatcher、JIT、提交、DMA 和设备执行时间。
 - [ ] 完成 P0.2 中 rtlsim、chipStar、TCU、DXA 的基线；不能把 SimX 通过记为全部后端通过。

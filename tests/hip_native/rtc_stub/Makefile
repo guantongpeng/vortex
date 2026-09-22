@@ -2,6 +2,7 @@ ROOT_DIR := $(realpath ../../..)
 include $(ROOT_DIR)/config.mk
 
 PROJECT := rtc_stub
+SRC_DIR := $(VORTEX_HOME)/tests/hip_native/$(PROJECT)
 
 HIP_INC := $(VORTEX_HOME)/sw/hip/include
 HIP_LIB := $(ROOT_DIR)/sw/hip
@@ -13,7 +14,7 @@ LDFLAGS += -Wl,-rpath,$(HIP_LIB) -Wl,-rpath,$(ROOT_DIR)/sw/runtime
 
 all: $(PROJECT)
 
-$(PROJECT): main.cpp
+$(PROJECT): $(SRC_DIR)/main.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 run-simx: $(PROJECT)

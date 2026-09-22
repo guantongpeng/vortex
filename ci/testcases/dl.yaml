@@ -36,42 +36,49 @@ tests:
 - id: mxfp8
   via: make-run
   dir: tests/dl/mxfp8
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: nvfp4
   via: make-run
   dir: tests/dl/nvfp4
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: sparse24
   via: make-run
   dir: tests/dl/sparse24
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: attn
   via: make-run
   dir: tests/dl/attn
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: llm
   via: make-run
   dir: tests/dl/llm
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: mamba
   via: make-run
   dir: tests/dl/mamba
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim
 - id: rng
   via: make-run
   dir: tests/dl/rng
+  target: run-{driver}
   drivers:
   - simx
   - rtlsim

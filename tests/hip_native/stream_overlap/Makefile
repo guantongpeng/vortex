@@ -15,12 +15,12 @@ ifneq ($(strip $(CONFIGS)),)
 HIPCC_FLAGS += --configs='$(CONFIGS)'
 endif
 
-# scale_args_t: 3 device-width pointers + u32 + u32 + u32(+pad to align).
-# rv64: 8*3 + 4*3 = 33 -> 40 (align 8); rv32: 4*3 + 4*3 = 24 (align 4).
+# scale_args_t: 2 device-width pointers + three u32 values.
+# rv64: 8*2 + 4*3 = 28 -> 32 (align 8); rv32: 4*2 + 4*3 = 20 (align 4).
 ifeq ($(XLEN),64)
-ARGS_SIZE := 40
+ARGS_SIZE := 32
 else
-ARGS_SIZE := 24
+ARGS_SIZE := 20
 endif
 
 HIP_INC := $(VORTEX_HOME)/sw/hip/include
@@ -36,7 +36,7 @@ LDFLAGS += -Wl,-rpath,$(HIP_LIB) -Wl,-rpath,$(ROOT_DIR)/sw/runtime
 
 all: $(PROJECT) kernel.vxbin
 
-kernel.vxbin: kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
+kernel.vxbin: $(SRC_DIR)/kernel.hip $(VORTEX_HOME)/ci/hipcc_vortex.py
 	echo '[{"name": "scale_kernel", "args_size": $(ARGS_SIZE)}]' > kernel_meta.json
 	VX_KERNEL_METADATA=$$PWD/kernel_meta.json \
 	  $(HIPCC) $(HIPCC_FLAGS) $< -o $@
