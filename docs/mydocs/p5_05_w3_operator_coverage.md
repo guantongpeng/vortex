@@ -44,16 +44,17 @@ elementwise 原本一个算子一个 kernel。改成**按 arity 的 op-code 驱�
 
 ```
 SUPPORTED                          UNSUPPORTED
-  clone/contiguous                   cat/stack              aten::cat.out
+  clone/contiguous                   gather/scatter         aten::gather.out
   t/transpose/permute                softmax/log_softmax    aten::_softmax.out
   slice/index                        layer_norm             (BN training 分支)
-  as_strided                         group_norm             aten::var_mean.correction
+  cat/stack                          group_norm             aten::cat.out/stack.out
+  as_strided                         —                      aten::var_mean.correction
   mm/bmm/mv/linear/addmm             avg_pool2d             (参数解析)
   broadcast add/mul                  interpolate            aten::upsample_nearest2d.out
-  elementwise(sub/div/min/max/…)     gather/scatter         aten::gather.out
+  elementwise(sub/div/min/max/…)     topk/sort              aten::topk.values
   unary(exp/log/sqrt/…/silu/gelu)    randn/rand             aten::normal_
-  sum/mean/amax/max                  topk/sort              aten::topk.values
-  conv2d / BN(推理) / pool           cumsum                 aten::cumsum.out
+  sum/mean/amax/max                  cumsum                 aten::cumsum.out
+  conv2d / BN(推理) / pool           —                      —
   torch.Stream / torch.Event         —                      —
 ```
 
@@ -61,7 +62,7 @@ SUPPORTED                          UNSUPPORTED
 
 ## 3. W3 未完成的部分(按建议顺序)
 
-1. **`cat`/`stack`/`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
+1. **`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
 2. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
    [p5_08_softmax_family.md](p5_08_softmax_family.md)。三个算子共用一个 DL kernel。
 3. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
@@ -75,6 +76,9 @@ SUPPORTED                          UNSUPPORTED
    **`argmin`/`min(dim=)`/`amin` 未做**:曾尝试在 kernel 侧增加这组 op,但依赖
    `arg->op` 的累加器种子会触发 VOLT 误编译,所以当前 kernel 不含 min 归约(见
    p5_10 §3)。`topk` 仍未做。
+9. ~~**`cat`/`stack`**~~ —— **P5.12 已完成**,见
+   [p5_12_cat_stack.md](p5_12_cat_stack.md)。仅支持连续 FP32 输入和非 `out`
+   overload;`gather`/`scatter`/`index_add` 仍未做。
 
 ## 4. 本轮的一个实现教训
 

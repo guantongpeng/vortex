@@ -86,13 +86,14 @@ the message. None of it falls back to the CPU.
 | `conv2d`, batch norm (inference), pooling, `mm`/`bmm`/`linear`/`addmm` | |
 | `layer_norm` (affine optional, with `mean`/`rstd`), `rms_norm` | |
 | `softmax`/`log_softmax` over any one dim, `logsumexp`, `nn.Softmax`/`nn.LogSoftmax` | |
+| `cat` and `stack` for contiguous FP32 tensors | |
 | streams and events (`torch.Stream`, `torch.Event`, `torch.accelerator.*`) | |
 | several kernel images in one process (`sw/common/module_slots.mk`) | |
 
 | Not supported yet | Owner |
 |---|---|
 | dtypes other than float32 (allocation is fine, compute is not) | W3.2 / W4.1 |
-| `cat`/`stack`/`gather`/`scatter`, `topk` | W3.2 |
+| `gather`/`scatter`, `topk` | W3.2 |
 | `argmin`/`min(dim=)`/`amin` (the kernel has no min reduction yet) | W3.2 |
 | reductions over several dims at once, or a non-trailing dim without a copy | W3.2 |
 | `softmax`/`log_softmax` on tensors above 4 dimensions (the write-back copy) | W3.2 |

@@ -1041,6 +1041,111 @@ static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src) {
     launch(h_copy_strided_kernel, args, (args.total + 3) / 4);
 }
 
+static uint32_t checked_product(c10::IntArrayRef sizes, int64_t begin,
+                                int64_t end, const char* what) {
+    uint64_t product = 1;
+    for (int64_t i = begin; i < end; ++i) {
+        TORCH_CHECK(sizes[i] >= 0, "torch_vortex: ", what,
+                    " has a negative extent");
+        const uint64_t extent = (uint64_t)sizes[i];
+        TORCH_CHECK(extent == 0 || product <= UINT32_MAX / extent,
+                    "torch_vortex: ", what,
+                    " does not fit in uint32");
+        product *= extent;
+    }
+    return (uint32_t)product;
+}
+
+static void launch_cat_piece(const torch::Tensor& src, torch::Tensor& dst,
+                             uint32_t outer, uint32_t src_dim,
+                             uint32_t out_dim, uint32_t inner,
+                             uint32_t dst_offset) {
+    const uint32_t total = u32_numel(src, "cat input");
+    if (total == 0) {
+        ++g_stats.skipped_launches;
+        return;
+    }
+    cat_args_t args = {(uint64_t)(uintptr_t)dst.data_ptr(),
+                       (uint64_t)(uintptr_t)src.data_ptr(), outer, src_dim,
+                       out_dim, inner, dst_offset, total};
+    launch(h_cat_kernel, args, (total + 3) / 4);
+}
+
+static int64_t normalize_cat_dim(int64_t dim, int64_t ndim, const char* name,
+                                 bool allow_insert) {
+    const int64_t limit = allow_insert ? ndim + 1 : ndim;
+    TORCH_CHECK(ndim > 0, "torch_vortex: ", name,
+                " expects tensors with at least one dimension");
+    TORCH_CHECK(dim >= -limit && dim < limit, "torch_vortex: ", name,
+                " dim ", dim, " is out of range for ", ndim, "-D input");
+    return dim < 0 ? dim + limit : dim;
+}
+
+static torch::Tensor cat_impl(const at::ITensorListRef& tensors,
+                              int64_t dim) {
+    TORCH_CHECK(tensors.size() > 0, "torch_vortex: cat expects a non-empty list");
+    const auto materialized = tensors.materialize();
+    const torch::Tensor& first = materialized[0].get();
+    check_vortex_f32(first, "cat input");
+    const int64_t ndim = first.dim();
+    const int64_t d = normalize_cat_dim(dim, ndim, "cat", false);
+    std::vector<int64_t> out_sizes(first.sizes().begin(), first.sizes().end());
+    int64_t cat_size = first.size(d);
+    for (size_t i = 1; i < materialized.size(); ++i) {
+        const auto& t = materialized[i].get();
+        check_vortex_f32(t, "cat input");
+        TORCH_CHECK(t.dim() == ndim, "torch_vortex: cat inputs must have the same rank");
+        for (int64_t j = 0; j < ndim; ++j) {
+            TORCH_CHECK(j == d || t.size(j) == first.size(j),
+                        "torch_vortex: cat input shape mismatch at dimension ", j);
+        }
+        TORCH_CHECK(cat_size <= INT64_MAX - t.size(d),
+                    "torch_vortex: cat output dimension overflows int64");
+        cat_size += t.size(d);
+    }
+    out_sizes[d] = cat_size;
+    auto out = torch::empty(out_sizes, first.options());
+    u32_numel(out, "cat output");
+    const uint32_t outer = checked_product(first.sizes(), 0, d, "cat outer");
+    const uint32_t inner = checked_product(first.sizes(), d + 1, ndim, "cat inner");
+    const uint32_t out_dim = u32_dim(cat_size, "cat output dimension");
+    uint32_t offset = 0;
+    for (size_t i = 0; i < materialized.size(); ++i) {
+        const auto& t = materialized[i].get();
+        const uint32_t src_dim = u32_dim(t.size(d), "cat input dimension");
+        launch_cat_piece(t, out, outer, src_dim, out_dim, inner, offset);
+        TORCH_CHECK(offset <= UINT32_MAX - src_dim,
+                    "torch_vortex: cat offset does not fit in uint32");
+        offset += src_dim;
+    }
+    return out;
+}
+
+static torch::Tensor stack_impl(at::TensorList tensors, int64_t dim) {
+    TORCH_CHECK(tensors.size() > 0, "torch_vortex: stack expects a non-empty list");
+    const torch::Tensor& first = tensors[0];
+    check_vortex_f32(first, "stack input");
+    const int64_t ndim = first.dim();
+    const int64_t d = normalize_cat_dim(dim, ndim, "stack", true);
+    for (size_t i = 1; i < tensors.size(); ++i) {
+        check_vortex_f32(tensors[i], "stack input");
+        TORCH_CHECK(tensors[i].sizes() == first.sizes(),
+                    "torch_vortex: stack inputs must have the same shape");
+    }
+    std::vector<int64_t> out_sizes(first.sizes().begin(), first.sizes().end());
+    out_sizes.insert(out_sizes.begin() + d, (int64_t)tensors.size());
+    auto out = torch::empty(out_sizes, first.options());
+    u32_numel(out, "stack output");
+    const uint32_t outer = checked_product(first.sizes(), 0, d, "stack outer");
+    const uint32_t inner = checked_product(first.sizes(), d, ndim, "stack inner");
+    const uint32_t out_dim = u32_dim(tensors.size(), "stack count");
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        launch_cat_piece(tensors[i], out, outer, 1, out_dim, inner,
+                         u32_dim(i, "stack index"));
+    }
+    return out;
+}
+
 // ---- reductions -----------------------------------------------------------
 //
 // The kernel reduces the trailing dimension of a contiguous (rows, cols)
@@ -2439,6 +2544,8 @@ void register_vortex_ops() {
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
     VX_IMPL("as_strided", &as_strided_impl);
+    VX_IMPL("cat", &cat_impl);
+    VX_IMPL("stack", &stack_impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
     VX_IMPL("mean.dim", &mean_impl);

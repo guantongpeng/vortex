@@ -52,7 +52,7 @@ manifest 判定为 `supported`。首次编译遇到 `/home/guantp/.ccache` 只�
   `bmm.out` 仍拒绝。
 - 当前设计是 B 次 GEMM 提交，正确性优先；真正的 batched/tiled GEMM 可在
   后续 BLAS ABI 增加 batch stride 后合并发射。
-- `avg_pool2d`、`cat`/`stack`/`gather`/`scatter`、stride-aware elementwise
+- `avg_pool2d`、`gather`/`scatter`、stride-aware elementwise
   与归约、RNG 仍是 W3 缺口。
 
 ## 5. 工作记录

@@ -137,6 +137,20 @@ struct widen_args_t {
     uint32_t pad;
 };
 
+// cat/stack copy one contiguous input into a contiguous output. The logical
+// layout is outer x (out_dim) x inner; src_dim is the input extent at the
+// concatenation/stack dimension and dst_offset selects its output interval.
+struct cat_args_t {
+    uint64_t dst;
+    uint64_t src;
+    uint32_t outer;
+    uint32_t src_dim;
+    uint32_t out_dim;
+    uint32_t inner;
+    uint32_t dst_offset;
+    uint32_t total;
+};
+
 // ---- cnn ------------------------------------------------------------------
 
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
@@ -164,6 +178,7 @@ struct bias_args_t {
     X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
     X(widen_u32_i64_kernel, widen_args_t, 0, 0)                               \
+    X(cat_kernel, cat_args_t, 0, 0)                                           \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 

@@ -82,6 +82,23 @@ __global__ void widen_u32_i64_kernel(widen_args_t* arg) {
     }
 }
 
+// Copy one contiguous input into a concatenation or stack output. The host
+// supplies the logical extents so the kernel does not need tensor metadata.
+__global__ void cat_kernel(cat_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i;
+        const uint32_t inner = rem % arg->inner;
+        rem /= arg->inner;
+        const uint32_t coord = rem % arg->src_dim;
+        const uint32_t outer = rem / arg->src_dim;
+        const uint32_t dst_index =
+            ((outer * arg->out_dim) + arg->dst_offset + coord) * arg->inner + inner;
+        ((float*)(uintptr_t)arg->dst)[dst_index] =
+            ((const float*)(uintptr_t)arg->src)[i];
+    }
+}
+
 // Elementwise copy between two arbitrarily strided buffers. Handles the cases
 // hipMemcpy cannot: a transposed view on either side, a storage offset, and a
 // broadcast (stride 0). Dims are walked from the innermost out, so a
