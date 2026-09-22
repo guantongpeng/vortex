@@ -58,7 +58,7 @@ manifest 判定为 `supported`。首次编译暴露出 PyTorch 2.14 的 `ITensor
 - 仅支持连续 FP32 输入；dtype promotion、非连续输入和 `cat.out`/
   `stack.out` 尚未实现。
 - 输出和中间布局使用 uint32 元素索引；超过该范围的输入或输出在发射前拒绝。
-- `gather`、`scatter`、`index_add`、`topk` 仍是 W3 缺口；stride-aware
+- `index_add`、`topk` 仍是 W3 缺口；stride-aware
   elementwise/归约、`avg_pool2d` 与 RNG 也未在本节点处理。
 
 ## 5. 工作记录
@@ -70,4 +70,4 @@ manifest 判定为 `supported`。首次编译暴露出 PyTorch 2.14 的 `ITensor
 | 3 | 注册 ATen 实现并加入 shape/dtype/layout/uint32 校验 | 错误在设备提交前报告 |
 | 4 | 添加参数化 CPU 对比和边界测试 | 11 个用例覆盖轴、空维度、launch 计数和拒绝路径 |
 | 5 | 重新 configure、编译并运行正式环境测试 | 11/11 通过 |
-| 6 | 更新 README、W3 覆盖矩阵与路线图 | cat/stack 移入已支持，gather/scatter 保留为下一缺口 |
+| 6 | 更新 README、W3 覆盖矩阵与路线图 | cat/stack 移入已支持，index_add 保留为下一缺口 |

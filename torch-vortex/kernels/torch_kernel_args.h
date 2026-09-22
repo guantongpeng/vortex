@@ -151,6 +151,23 @@ struct cat_args_t {
     uint32_t total;
 };
 
+// gather/scatter index one contiguous logical tensor. `sizes` describes the
+// index/source shape, `strides` is the contiguous self/output stride, and
+// index_type is 0 for int32 or 1 for int64 indices.
+struct index_args_t {
+    uint64_t dst;
+    uint64_t src;
+    uint64_t index;
+    uint64_t invalid;
+    uint32_t ndim;
+    uint32_t dim;
+    uint32_t dim_size;
+    uint32_t index_type;
+    uint32_t total;
+    uint32_t sizes[4];
+    uint32_t strides[4];
+};
+
 // ---- cnn ------------------------------------------------------------------
 
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
@@ -179,6 +196,8 @@ struct bias_args_t {
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
     X(widen_u32_i64_kernel, widen_args_t, 0, 0)                               \
     X(cat_kernel, cat_args_t, 0, 0)                                           \
+    X(gather_kernel, index_args_t, 0, 0)                                      \
+    X(scatter_kernel, index_args_t, 0, 0)                                     \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 

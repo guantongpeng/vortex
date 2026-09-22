@@ -1146,6 +1146,139 @@ static torch::Tensor stack_impl(at::TensorList tensors, int64_t dim) {
     return out;
 }
 
+static uint32_t check_index_tensor(const torch::Tensor& index,
+                                   const char* name) {
+    TORCH_CHECK(index.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: ", name, " must be a vortex tensor");
+    TORCH_CHECK(index.scalar_type() == at::kInt || index.scalar_type() == at::kLong,
+                "torch_vortex: ", name, " must have int32 or int64 dtype, got ",
+                index.scalar_type());
+    TORCH_CHECK(index.is_contiguous(), "torch_vortex: ", name,
+                " must be contiguous in v1");
+    TORCH_CHECK(index.dim() <= 4, "torch_vortex: ", name,
+                " supports at most 4 dimensions, got ", index.dim());
+    return u32_numel(index, name);
+}
+
+static int64_t normalize_index_dim(int64_t dim, int64_t ndim,
+                                   const char* name) {
+    return normalize_cat_dim(dim, ndim, name, false);
+}
+
+static void check_index_shape(const torch::Tensor& self,
+                              const torch::Tensor& index, int64_t dim,
+                              const char* name) {
+    TORCH_CHECK(self.dim() == index.dim(), "torch_vortex: ", name,
+                " index must have the same number of dimensions as self");
+    for (int64_t d = 0; d < self.dim(); ++d) {
+        TORCH_CHECK(d == dim || index.size(d) <= self.size(d),
+                    "torch_vortex: ", name, " index shape exceeds self at dimension ", d);
+    }
+}
+
+static index_args_t make_index_args(const torch::Tensor& dst,
+                                    const torch::Tensor& src,
+                                    const torch::Tensor& index,
+                                    const torch::Tensor& invalid,
+                                    const torch::Tensor& layout,
+                                    int64_t dim, uint32_t total,
+                                    const char* name) {
+    index_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)dst.data_ptr();
+    args.src = (uint64_t)(uintptr_t)src.data_ptr();
+    args.index = (uint64_t)(uintptr_t)index.data_ptr();
+    args.invalid = (uint64_t)(uintptr_t)invalid.data_ptr();
+    args.ndim = u32_dim(index.dim(), name);
+    args.dim = u32_dim(dim, name);
+    args.dim_size = u32_dim(layout.size(dim), name);
+    args.index_type = index.scalar_type() == at::kInt ? 0 : 1;
+    args.total = total;
+    for (int64_t d = 0; d < index.dim(); ++d) {
+        args.sizes[d] = u32_dim(index.size(d), name);
+        args.strides[d] = u32_dim(layout.stride(d), name);
+    }
+    return args;
+}
+
+static torch::Tensor make_index_error_flag(const torch::Tensor& ref) {
+    auto flag = torch::empty({1}, ref.options().dtype(at::kInt));
+    VX_CHECK(hipMemsetAsync(flag.data_ptr(), 0, sizeof(int32_t),
+                            current_hip_stream()));
+    return flag;
+}
+
+static void check_index_error_flag(const torch::Tensor& flag, const char* name) {
+    int32_t invalid = 0;
+    VX_CHECK(hipMemcpy(&invalid, flag.data_ptr(), sizeof(invalid),
+                       hipMemcpyDeviceToHost));
+    g_stats.d2h_bytes += sizeof(invalid);
+    if (current_hip_stream() == nullptr) {
+        note_default_queue_barrier();
+    } else {
+        VX_CHECK(hipStreamSynchronize(current_hip_stream()));
+    }
+    TORCH_CHECK(invalid == 0, "torch_vortex: ", name,
+                " index contains an out-of-range value");
+}
+
+static torch::Tensor gather_impl(const torch::Tensor& self, int64_t dim,
+                                 const torch::Tensor& index, bool sparse_grad) {
+    check_vortex_f32(self, "gather input");
+    u32_numel(self, "gather input");
+    TORCH_CHECK(!sparse_grad, "torch_vortex: gather sparse_grad is unsupported");
+    TORCH_CHECK(self.dim() > 0,
+                "torch_vortex: gather expects a tensor with at least one dimension");
+    const int64_t d = normalize_index_dim(dim, self.dim(), "gather");
+    const uint32_t total = check_index_tensor(index, "gather index");
+    check_index_shape(self, index, d, "gather");
+    TORCH_CHECK(total == 0 || self.size(d) > 0,
+                "torch_vortex: gather index has no valid source dimension");
+    auto out = torch::empty(index.sizes(), self.options());
+    if (total == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    auto invalid = make_index_error_flag(self);
+    auto args = make_index_args(out, self, index, invalid, self, d, total,
+                                "gather");
+    launch(h_gather_kernel, args, (total + 3) / 4);
+    check_index_error_flag(invalid, "gather");
+    return out;
+}
+
+static torch::Tensor scatter_impl(const torch::Tensor& self, int64_t dim,
+                                  const torch::Tensor& index,
+                                  const torch::Tensor& src) {
+    check_vortex_f32(self, "scatter input");
+    check_vortex_f32(src, "scatter source");
+    TORCH_CHECK(self.dim() > 0,
+                "torch_vortex: scatter expects a tensor with at least one dimension");
+    const int64_t d = normalize_index_dim(dim, self.dim(), "scatter");
+    const uint32_t total = check_index_tensor(index, "scatter index");
+    check_index_shape(self, index, d, "scatter");
+    TORCH_CHECK(src.sizes() == index.sizes(),
+                "torch_vortex: scatter source and index must have the same shape");
+    u32_numel(self, "scatter input");
+    auto out = torch::empty(self.sizes(), self.options());
+    if (self.numel() != 0) {
+        const size_t bytes = (size_t)self.numel() * sizeof(float);
+        VX_CHECK(hipMemcpy(out.data_ptr(), self.data_ptr(), bytes,
+                           hipMemcpyDeviceToDevice));
+        g_stats.d2d_bytes += bytes;
+        note_default_queue_barrier();
+    }
+    if (total == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    auto invalid = make_index_error_flag(self);
+    auto args = make_index_args(out, src, index, invalid, self, d, total,
+                                "scatter");
+    launch(h_scatter_kernel, args, (total + 3) / 4);
+    check_index_error_flag(invalid, "scatter");
+    return out;
+}
+
 // ---- reductions -----------------------------------------------------------
 //
 // The kernel reduces the trailing dimension of a contiguous (rows, cols)
@@ -2546,6 +2679,8 @@ void register_vortex_ops() {
     VX_IMPL("as_strided", &as_strided_impl);
     VX_IMPL("cat", &cat_impl);
     VX_IMPL("stack", &stack_impl);
+    VX_IMPL("gather", &gather_impl);
+    VX_IMPL("scatter.src", &scatter_impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
     VX_IMPL("mean.dim", &mean_impl);

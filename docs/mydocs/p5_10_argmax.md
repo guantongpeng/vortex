@@ -142,7 +142,7 @@ pytest 默认不能在该环境直接声称通过：测试夹具依据 `torch_vo
   仍只包含 SUM/MEAN/MAX/ARGMAX,见 §3。
 - **`argmax` 的 `out=` 变体**、`topk`。
 - **`nll_loss_forward`**:`F.cross_entropy` 在 `log_softmax` 之后仍会在这一步拒绝。
-- **`avg_pool2d`**、`cat`/`gather`/`scatter`、stride-aware 的 elementwise 与归约、RNG。
+- **`avg_pool2d`**、`index_add`、stride-aware 的 elementwise 与归约、RNG。
 - **`bmm` 已在后续 P5.11 完成**，见 [p5_11_bmm.md](p5_11_bmm.md)。
 - **VOLT 误编译的根因**:§3 给了触发条件,没给机制。
 

@@ -263,7 +263,7 @@ F07 的静态审计示例：当前 `ConvArgs` 为 4 个 64 位地址加 14 个 u
 
 **W3.4 Transformer/LLM eager 基础**
 
-- [ ] 接入 layernorm/rmsnorm、embedding/gather、softmax、RoPE、GELU/SiLU/SwiGLU。（`bmm`/基础 `matmul` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)。）
+- [ ] 接入 layernorm/rmsnorm、embedding 及模型所需的高级 gather、softmax、RoPE、GELU/SiLU/SwiGLU。（基础 `gather`/`scatter.src` 已交付，见 [p5_13_gather_scatter.md](p5_13_gather_scatter.md)；`bmm`/基础 `matmul` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)。）
 - [ ] 将已有 attention/LLM 库桥接到 ATen 或有明确 schema 的自定义 op；先验证 mask、causal、scale、head layout，再补 GQA。
 - [ ] 完成 KV cache append/read、prefill 与逐 token decode；必要时增加采样/top-k，避免未经统计的 host 往返。
 - **验收**：小型 Transformer block 与 tiny decoder 的分层输出对齐；不同序列长度、mask 和位置；prefill 后连续 decode 与 CPU 参考一致。

@@ -99,6 +99,55 @@ __global__ void cat_kernel(cat_args_t* arg) {
     }
 }
 
+__device__ inline int64_t torch_index_value(index_args_t* arg, uint32_t i) {
+    return arg->index_type == 0
+               ? (int64_t)((const int32_t*)(uintptr_t)arg->index)[i]
+               : ((const int64_t*)(uintptr_t)arg->index)[i];
+}
+
+// Gather and scatter share the same coordinate walk. The invalid flag lets
+// the host report an out-of-range device index without reading the whole
+// index tensor back before the operation.
+__global__ void gather_kernel(index_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i;
+        uint32_t src_off = 0;
+        const int64_t index = torch_index_value(arg, i);
+        if (index < 0 || index >= (int64_t)arg->dim_size) {
+            *reinterpret_cast<uint32_t*>((uintptr_t)arg->invalid) = 1;
+            continue;
+        }
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t coord = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            src_off += (d == arg->dim ? (uint32_t)index : coord) * arg->strides[d];
+        }
+        ((float*)(uintptr_t)arg->dst)[i] =
+            ((const float*)(uintptr_t)arg->src)[src_off];
+    }
+}
+
+__global__ void scatter_kernel(index_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i;
+        uint32_t dst_off = 0;
+        const int64_t index = torch_index_value(arg, i);
+        if (index < 0 || index >= (int64_t)arg->dim_size) {
+            *reinterpret_cast<uint32_t*>((uintptr_t)arg->invalid) = 1;
+            continue;
+        }
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t coord = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            dst_off += (d == arg->dim ? (uint32_t)index : coord) * arg->strides[d];
+        }
+        ((float*)(uintptr_t)arg->dst)[dst_off] =
+            ((const float*)(uintptr_t)arg->src)[i];
+    }
+}
+
 // Elementwise copy between two arbitrarily strided buffers. Handles the cases
 // hipMemcpy cannot: a transposed view on either side, a storage offset, and a
 // broadcast (stride 0). Dims are walked from the innermost out, so a

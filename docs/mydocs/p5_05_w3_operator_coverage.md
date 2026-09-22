@@ -44,14 +44,15 @@ elementwise 原本一个算子一个 kernel。改成**按 arity 的 op-code 驱�
 
 ```
 SUPPORTED                          UNSUPPORTED
-  clone/contiguous                   gather/scatter         aten::gather.out
+  clone/contiguous                   topk/sort              aten::gather.out
   t/transpose/permute                softmax/log_softmax    aten::_softmax.out
   slice/index                        layer_norm             (BN training 分支)
   cat/stack                          group_norm             aten::cat.out/stack.out
+  gather/scatter.src                 —                      aten::gather.out/scatter.out
   as_strided                         —                      aten::var_mean.correction
   mm/bmm/mv/linear/addmm             avg_pool2d             (参数解析)
   broadcast add/mul                  interpolate            aten::upsample_nearest2d.out
-  elementwise(sub/div/min/max/…)     topk/sort              aten::topk.values
+  elementwise(sub/div/min/max/…)     —                      aten::topk.values
   unary(exp/log/sqrt/…/silu/gelu)    randn/rand             aten::normal_
   sum/mean/amax/max                  cumsum                 aten::cumsum.out
   conv2d / BN(推理) / pool           —                      —
@@ -62,7 +63,7 @@ SUPPORTED                          UNSUPPORTED
 
 ## 3. W3 未完成的部分(按建议顺序)
 
-1. **`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
+1. **`index_add`** —— 数据搬运,仍需处理重复索引和累加语义。
 2. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
    [p5_08_softmax_family.md](p5_08_softmax_family.md)。三个算子共用一个 DL kernel。
 3. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
@@ -78,7 +79,11 @@ SUPPORTED                          UNSUPPORTED
    p5_10 §3)。`topk` 仍未做。
 9. ~~**`cat`/`stack`**~~ —— **P5.12 已完成**,见
    [p5_12_cat_stack.md](p5_12_cat_stack.md)。仅支持连续 FP32 输入和非 `out`
-   overload;`gather`/`scatter`/`index_add` 仍未做。
+   overload;`index_add` 仍未做。
+10. ~~**`gather`/`scatter`**~~ —— **P5.13 已完成**,见
+    [p5_13_gather_scatter.md](p5_13_gather_scatter.md)。基础 `gather` 与
+    `scatter.src` 支持连续 FP32 数据、int32/int64 索引；`index_add`、reduce
+    和 in-place/out overload 仍未做。
 
 ## 4. 本轮的一个实现教训
 
@@ -176,3 +181,4 @@ F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条�
 - 三处重复的状态枚举(见 §5.6)没有机制保证一致。
 - `avg_pool2d` 未注册(`count_include_pad` 默认语义与 DL 的 in-bounds count 不同,属 W3.3)。
 - `bmm` 已注册；host 侧按 batch 循环现有 DL GEMM，每批次入同一有序队列。
+- `gather`/`scatter.src` 已注册；索引 kernel 只处理连续 FP32 数据，越界索引在设备端标记后报告。
