@@ -55,7 +55,7 @@ manifest 判定为 `supported`。首次测试发现 scatter 参数块必须分�
 - 当前只覆盖 `gather` 基础 schema 和 `scatter.src`；`gather.out`、
   `scatter_`、scalar/reduce overload 未实现。
 - 不支持 sparse gradient、dtype promotion、非连续数据或 rank 大于 4。
-- `index_add` 仍需处理重复索引的累加和原子语义；`topk`、`avg_pool2d`、
+- `index_add` 仍需处理重复索引的累加和原子语义；`topk`、`interpolate`、
   stride-aware elementwise/归约和 RNG 仍在后续节点。
 
 ## 5. 工作记录

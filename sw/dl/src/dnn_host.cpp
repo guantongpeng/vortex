@@ -153,7 +153,7 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
                             uint32_t op) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
     if (!in || !out || n == 0 || c == 0 || hi == 0 || wi == 0 || kh == 0 ||
-        kw == 0 || sh == 0 || sw == 0 || op > 1) {
+        kw == 0 || sh == 0 || sw == 0 || (op != 0 && op != 1 && op != 2)) {
         return VX_DNN_ERR_BAD_ARGS;
     }
     const uint32_t ho = (hi + 2 * ph - kh) / sh + 1;

@@ -289,6 +289,30 @@ def test_aten_adaptive_avg_pool_is_the_dl_kernel(backend, dl):
     assert torch.equal(direct, got)
 
 
+def test_dl_pool_count_include_pad_true(backend, dl):
+    """The shared DL pool kernel also implements the padded avg divisor."""
+    hip, _, pool = dl[0], dl[1], dl[2]
+    x = torch.arange(9, dtype=torch.float32).reshape(1, 1, 3, 3)
+    k = st = 3
+    pad = 1
+    want = F.avg_pool2d(x, k, st, pad, count_include_pad=True)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    n, c, hi, wi = x.shape
+    ho = (hi + 2 * pad - k) // st + 1
+    wo = (wi + 2 * pad - k) // st + 1
+    dx = _upload(hip, x.contiguous().numpy().tobytes())
+    dout = _upload(hip, b"\0" * (n * c * ho * wo * 4))
+    rc = pool(queue, dx.value, dout.value, n, c, hi, wi, k, k, pad, pad,
+              st, st, 2)
+    assert rc == 0, "vx_dnn_pool2d returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct = torch.frombuffer(bytearray(_download(hip, dout, n * c * ho * wo * 4)),
+                              dtype=torch.float32).reshape(n, c, ho, wo)
+    torch.testing.assert_close(direct, want, rtol=0, atol=0)
+
+
 def test_pool_special_values_are_the_dl_kernels(backend, dl):
     """-inf and NaN survive the trip through the shared kernel."""
     hip, _, pool = dl[0], dl[1], dl[2]

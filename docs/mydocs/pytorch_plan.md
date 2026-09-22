@@ -256,7 +256,7 @@ F07 的静态审计示例：当前 `ConvArgs` 为 4 个 64 位地址加 14 个 u
 **W3.3 CNN eager 可用性**
 
 - [ ] 扩展 conv 的 groups/depthwise、dilation、较大通道与 kernel；先用 trace 确定真实需要的变体。
-- [ ] 完善 max/avg/adaptive pool、BN optional affine、linear 前导 batch 维；支持 torchvision 实际触发的算子，如 relu_。
+- [ ] 完善 max/avg/adaptive pool、BN optional affine、linear 前导 batch 维；支持 torchvision 实际触发的算子，如 relu_。（`avg_pool2d` 的连续 FP32 基础路径已交付，见 [p5_14_avg_pool2d.md](p5_14_avg_pool2d.md)；ceil/divisor/interpolate 仍待补齐。）
 - [ ] 建立 MiniResNet→完整 ResNet-18 小输入→目标输入尺寸的分级模型测试；固定 torchvision 版本、权重和预处理。
 - **验收**：不同 batch、随机非默认 BN 参数的中间层与 logits 对齐；完整模型结构通过不能替代正式分辨率与数据集精度评估。
 - **依赖**：W1、W3.2；正式尺寸性能/资源由 W7 验收。

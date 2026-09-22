@@ -112,7 +112,13 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
                 ++count;
             }
         }
-        out_row[ox] = (arg->op == 0) ? acc : (count ? acc / (float)count : 0.0f);
+        if (arg->op == 0) {
+            out_row[ox] = acc;
+        } else if (arg->op == 1) {
+            out_row[ox] = count ? acc / (float)count : 0.0f;
+        } else {
+            out_row[ox] = acc / (float)(arg->kh * arg->kw);
+        }
     }
 }
 

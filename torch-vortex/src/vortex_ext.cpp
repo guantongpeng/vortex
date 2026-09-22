@@ -2205,6 +2205,19 @@ static torch::Tensor max_pool2d_impl(const torch::Tensor& self,
     return pool_impl(self, kernel, stride, padding, 0);
 }
 
+static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
+                                     c10::IntArrayRef kernel,
+                                     c10::IntArrayRef stride,
+                                     c10::IntArrayRef padding,
+                                     bool ceil_mode, bool count_include_pad,
+                                     std::optional<int64_t> divisor_override) {
+    TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
+    TORCH_CHECK(!divisor_override.has_value(),
+                "torch_vortex: avg_pool2d divisor_override unsupported in v1");
+    return pool_impl(self, kernel, stride, padding,
+                     count_include_pad ? 2u : 1u);
+}
+
 
 static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
                                               c10::SymIntArrayRef output_size) {
@@ -2739,6 +2752,7 @@ void register_vortex_ops() {
     VX_IMPL("argmax", &argmax_impl);
     VX_IMPL("max.dim", &max_dim_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
+    VX_IMPL("avg_pool2d", &avg_pool2d_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
 #endif

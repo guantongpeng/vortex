@@ -50,12 +50,12 @@ SUPPORTED                          UNSUPPORTED
   cat/stack                          group_norm             aten::cat.out/stack.out
   gather/scatter.src                 —                      aten::gather.out/scatter.out
   as_strided                         —                      aten::var_mean.correction
-  mm/bmm/mv/linear/addmm             avg_pool2d             (参数解析)
-  broadcast add/mul                  interpolate            aten::upsample_nearest2d.out
+  mm/bmm/mv/linear/addmm             interpolate            (参数解析)
+  broadcast add/mul                  —                      aten::upsample_nearest2d.out
   elementwise(sub/div/min/max/…)     —                      aten::topk.values
   unary(exp/log/sqrt/…/silu/gelu)    randn/rand             aten::normal_
   sum/mean/amax/max                  cumsum                 aten::cumsum.out
-  conv2d / BN(推理) / pool           —                      —
+  conv2d / BN(推理) / pool / avg      —                      —
   torch.Stream / torch.Event         —                      —
 ```
 
@@ -69,7 +69,7 @@ SUPPORTED                          UNSUPPORTED
 3. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
    [p5_07_layer_norm_rms_norm.md](p5_07_layer_norm_rms_norm.md);`group_norm` 仍未做。
 4. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
-5. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
+5. **`interpolate`**、`ceil_mode`、avg-pool `divisor_override` —— W3.3。
 6. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
 7. ~~**W3.1 与 `sw/dl` 统一**~~ —— **已完成**,见 §5 与 [p5_06](p5_06_w3_prim_unification.md)。`conv2d`、pooling、`mm/bmm/linear/addmm`、`batch norm`、一元与归约全部走 DL kernel,重复实现已删除。**例外**:二元 elementwise(`binary_op_kernel` 等)仍留在 torch 镜像,因为 DL 的 prim 只有一元;要统一需先给 prim 加二元入口。
 8. ~~**`max(dim=)`/`argmax`**~~ —— **P5.10 已完成**,见 [p5_10_argmax.md](p5_10_argmax.md)。
@@ -116,7 +116,7 @@ DL 库说的是 vortex2.h,需要**本进程的** device 和 queue——自己开
 
 ### 5.3 已迁移的算子与验收
 
-`conv2d`、`max_pool2d`/`adaptive_avg_pool2d` 已走 DL kernel,扩展里对应的 kernel、参数结构体与 launch 助手已删除。
+`conv2d`、`max_pool2d`/`avg_pool2d`/`adaptive_avg_pool2d` 已走 DL kernel,扩展里对应的 kernel、参数结构体与 launch 助手已删除。
 
 **验收按计划书的三条**:
 
@@ -179,6 +179,6 @@ F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条�
 - `mxfp8_args.h` 的尺寸未纳入漂移测试:它的头文件在 host 侧编不过(声明了设备侧辅助函数),
   探针无法包含它。
 - 三处重复的状态枚举(见 §5.6)没有机制保证一致。
-- `avg_pool2d` 未注册(`count_include_pad` 默认语义与 DL 的 in-bounds count 不同,属 W3.3)。
+- `avg_pool2d` 已注册基础路径；ceil_mode 与 divisor_override 仍拒绝。
 - `bmm` 已注册；host 侧按 batch 循环现有 DL GEMM，每批次入同一有序队列。
 - `gather`/`scatter.src` 已注册；索引 kernel 只处理连续 FP32 数据，越界索引在设备端标记后报告。

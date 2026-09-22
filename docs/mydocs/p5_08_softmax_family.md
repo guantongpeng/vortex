@@ -117,7 +117,7 @@ build_dl64/tests/dl/prim: make run-simx               -> PASSED
   [p5_10_argmax.md](p5_10_argmax.md)。DL 一次归约同时写 uint32 索引和极值,
   torch 侧只做表示转换为 ATen 要求的 int64。
 - **`index_add`**、`topk`。
-- **`avg_pool2d`**、stride-aware 的 elementwise 与归约、RNG(W3.5)。
+- **`interpolate`**、stride-aware 的 elementwise 与归约、RNG(W3.5)。
 - **`nll_loss_forward`**:`F.cross_entropy` 在 `log_softmax` 之后还会在这一步拒绝
   ——softmax 族的「动机消费者」不是 softmax 自己。
 - 多 dim 归约、非尾维归约的 stride-aware 版本。

@@ -50,7 +50,8 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
                             uint32_t co, uint32_t kh, uint32_t kw,
                             uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw);
 
-// op 0 = max, 1 = avg (count_include_pad = false).
+// op 0 = max, 1 = avg (count_include_pad = false),
+// op 2 = avg (count_include_pad = true).
 vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
                             uint32_t n, uint32_t c,
                             uint32_t hi, uint32_t wi,

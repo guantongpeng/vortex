@@ -170,11 +170,24 @@ def test_adaptive_avg_pool(backend):
                        rtol=1e-5, atol=1e-6)
 
 
-def test_avg_pool2d_is_not_registered(backend):
-    """A documented boundary: only adaptive_avg_pool2d(1) is in the v1 op set."""
-    x = torch.randn(2, 3, 4, 4).to("vortex")
-    with pytest.raises(RuntimeError, match="no vortex implementation"):
-        torch.nn.functional.avg_pool2d(x, 2)
+def test_avg_pool2d_matches_cpu(backend):
+    x = torch.randn(2, 3, 5, 7)
+    for count_include_pad in (True, False):
+        got = torch.nn.functional.avg_pool2d(
+            x.to("vortex"), 3, stride=2, padding=1,
+            count_include_pad=count_include_pad).cpu()
+        want = torch.nn.functional.avg_pool2d(
+            x, 3, stride=2, padding=1,
+            count_include_pad=count_include_pad)
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+
+def test_avg_pool2d_rejects_unimplemented_overloads(backend):
+    x = torch.randn(1, 2, 4, 4).to("vortex")
+    with assert_rejected("ceil_mode unsupported", backend):
+        torch.nn.functional.avg_pool2d(x, 2, ceil_mode=True)
+    with assert_rejected("divisor_override unsupported", backend):
+        torch.nn.functional.avg_pool2d(x, 2, divisor_override=3)
 
 
 def test_device_rng_is_refused_by_name(backend):

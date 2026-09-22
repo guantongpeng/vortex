@@ -41,8 +41,8 @@ typedef struct {
     uint32_t has_bias;
 } vx_dnn_conv_args_t;
 
-// Windowed pooling over HxW: op 0 = max, 1 = avg (count_include_pad=false
-// semantics: divisor counts in-bounds elements only when padding present).
+// Windowed pooling over HxW: op 0 = max, 1 = avg with count_include_pad=false,
+// 2 = avg with count_include_pad=true.
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;

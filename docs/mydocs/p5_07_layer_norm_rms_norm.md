@@ -156,7 +156,7 @@ DL 侧工作只有 `log_softmax`/`logsumexp` 两个新入口。
   [p5_10_argmax.md](p5_10_argmax.md)。DL 归约同时给出值和 uint32 索引,
   torch 侧加宽为 ATen 的 int64 索引。
 - **norms 的更多形态**:非连续输入、按尾维广播的权重、`group_norm`。
-- `avg_pool2d`、stride-aware 的 elementwise 与归约、RNG。
+- `interpolate`、stride-aware 的 elementwise 与归约、RNG。
 - 二元 elementwise 仍在 torch 镜像(DL 的 prim 没有二元入口)。
 
 ## 6. 本轮工作流发现的、计划书未记的
