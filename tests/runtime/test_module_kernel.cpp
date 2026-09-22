@@ -405,7 +405,7 @@ int test_launch_args_size_limit(vx_device_h dev, const std::string& vxbin) {
     vx_queue_h q = nullptr;
     CHECK_VX(vx_queue_create(dev, &qi, &q));
 
-    std::vector<uint8_t> args_blob(4097, 0);
+    std::vector<uint8_t> args_blob(VX_KERNEL_ARGS_MAX_BYTES + 1, 0);
     vx_launch_info_t li = {};
     li.struct_size = sizeof(li);
     li.kernel = k;
