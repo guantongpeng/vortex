@@ -92,7 +92,7 @@ static __device__ float warp_sum(float x) {
 // in the row used to reduce to whatever the other values were -- and both
 // torch.amax and torch.max propagate it.
 static __device__ float nan_max(float a, float b) {
-    return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
+    return (isnan(a) || isnan(b)) ? NAN : (a >= b ? a : b);
 }
 
 static __device__ float warp_max(float x) {
@@ -178,6 +178,10 @@ __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
                 }
             }
             ((uint32_t*)(uintptr_t)arg->out)[row] = bi;
+            // The extreme this pass already visited, which torch's max(dim=)
+            // returns alongside the index. Writing it here is what keeps that
+            // a single pass over the row.
+            if (arg->values) ((float*)(uintptr_t)arg->values)[row] = bv;
         }
         return;
     }

@@ -72,6 +72,16 @@ __global__ void fill_kernel(fill_args_t* arg) {
     }
 }
 
+// The index representation ATen wants, from the one the DL reduce produces.
+// Pure conversion: one thread per index, grid-stride like everything here.
+__global__ void widen_u32_i64_kernel(widen_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
+         i += blockDim.x * gridDim.x) {
+        ((int64_t*)(uintptr_t)arg->dst)[i] =
+            (int64_t)((const uint32_t*)(uintptr_t)arg->src)[i];
+    }
+}
+
 // Elementwise copy between two arbitrarily strided buffers. Handles the cases
 // hipMemcpy cannot: a transposed view on either side, a storage offset, and a
 // broadcast (stride 0). Dims are walked from the innermost out, so a

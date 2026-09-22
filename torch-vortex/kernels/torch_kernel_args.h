@@ -127,6 +127,16 @@ struct copy_strided_args_t {
     uint32_t src_strides[4];
 };
 
+// widen_u32_i64_kernel: the DL reduction produces indices as uint32 (that is
+// vx_prim_reduce's contract) and ATen's are int64. This is a representation
+// change, not a computation -- a second reduction pass would be one.
+struct widen_args_t {
+    uint64_t dst;   // int64 output
+    uint64_t src;   // uint32 input
+    uint32_t n;
+    uint32_t pad;
+};
+
 // ---- cnn ------------------------------------------------------------------
 
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
@@ -153,6 +163,7 @@ struct bias_args_t {
     X(broadcast_op_kernel, broadcast_op_args_t, 0, 0)                         \
     X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
+    X(widen_u32_i64_kernel, widen_args_t, 0, 0)                               \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 

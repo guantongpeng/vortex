@@ -35,6 +35,47 @@ def test_mm_rectangular(backend):
     assert_matches_cpu(torch.mm(v(a), v(b)), a @ b)
 
 
+@pytest.mark.parametrize("shape", [(2, 3, 4, 5), (3, 1, 7, 2), (1, 17, 5, 19)])
+def test_bmm_rectangular(backend, shape):
+    batch, m, k, n = shape
+    a = torch.randn(batch, m, k)
+    b = torch.randn(batch, k, n)
+    assert_matches_cpu(torch.bmm(v(a), v(b)), torch.bmm(a, b), rtol=1e-5,
+                       atol=1e-6)
+
+
+def test_bmm_queues_one_gemm_per_batch(backend):
+    batch, m, k, n = 4, 5, 7, 3
+    a = v(torch.randn(batch, m, k))
+    b = v(torch.randn(batch, k, n))
+    backend.reset_stats()
+    got = torch.bmm(a, b)
+    assert backend.stats()["launches"] == batch
+    assert_matches_cpu(got, torch.bmm(a.cpu(), b.cpu()), rtol=1e-5, atol=1e-6)
+
+
+def test_matmul_3d_reaches_bmm(backend):
+    a = torch.randn(2, 4, 3)
+    b = torch.randn(2, 3, 5)
+    backend.reset_stats()
+    got = torch.matmul(v(a), v(b))
+    assert backend.stats()["launches"] == 2
+    assert_matches_cpu(got, torch.matmul(a, b), rtol=1e-5, atol=1e-6)
+
+
+def test_bmm_zero_batch_and_contraction(backend):
+    a = torch.empty(0, 3, 4)
+    b = torch.empty(0, 4, 5)
+    got = torch.bmm(v(a), v(b))
+    assert got.shape == (0, 3, 5)
+
+    a = torch.empty(2, 3, 0)
+    b = torch.empty(2, 0, 5)
+    got = torch.bmm(v(a), v(b))
+    assert got.shape == (2, 3, 5)
+    assert torch.equal(got.cpu(), torch.zeros(2, 3, 5))
+
+
 @pytest.mark.parametrize("m,k,n", [(4, 4, 4), (8, 8, 8), (16, 16, 4), (17, 17, 17),
                                    (2, 3, 5), (1, 1, 1), (1, 16, 4), (5, 7, 15)])
 def test_mm_partial_tiles(backend, m, k, n):
@@ -145,6 +186,10 @@ def test_matmul_rejects_bad_input(backend):
     self21, m23, m32 = v(torch.randn(2, 1)), v(torch.randn(2, 3)), v(torch.randn(3, 2))
     self22, m3d, m22 = v(torch.randn(2, 2)), v(torch.randn(2, 2, 2)), v(torch.randn(2, 2))
     f64a, f64b = v(torch.randn(2, 2).double()), v(torch.randn(2, 2).double())
+    ba, bb = v(torch.randn(2, 3, 4)), v(torch.randn(3, 4, 5))
+    bc, bd = v(torch.randn(2, 3, 4)), v(torch.randn(2, 5, 6))
+    bmm_nc = v(torch.randn(2, 4, 3).transpose(1, 2))
+    bmm_rhs = v(torch.randn(2, 3, 5))
 
     with assert_rejected("contraction mismatch", backend):
         torch.mm(a23, b45)
@@ -154,3 +199,9 @@ def test_matmul_rejects_bad_input(backend):
         torch.addmm(self22, m3d, m22)
     with assert_rejected("float32", backend):
         torch.mm(f64a, f64b)
+    with assert_rejected("batch mismatch", backend):
+        torch.bmm(ba, bb)
+    with assert_rejected("contraction mismatch", backend):
+        torch.bmm(bc, bd)
+    with assert_rejected("contiguous", backend):
+        torch.bmm(bmm_nc, bmm_rhs)

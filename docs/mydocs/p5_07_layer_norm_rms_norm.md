@@ -152,10 +152,11 @@ DL 侧工作只有 `log_softmax`/`logsumexp` 两个新入口。
 - ~~**softmax / log_softmax / logsumexp**~~ —— **P5.8 已做**,见
   [p5_08_softmax_family.md](p5_08_softmax_family.md)。注意 `logsumexp` **不**经过
   `_softmax`,它是 amax/exp/sum/log(实测)。
-- **argmax / `max(dim=)`**:DL 的 row-wise ARGMAX 已修好且就绪,但写出的是 uint32,
-  而 ATen 要 int64——需要一个 torch 侧的小 kernel 做加宽(不是 sw/dl 的改动)。
+- ~~**argmax / `max(dim=)`**~~ —— **P5.10 已做**,见
+  [p5_10_argmax.md](p5_10_argmax.md)。DL 归约同时给出值和 uint32 索引,
+  torch 侧加宽为 ATen 的 int64 索引。
 - **norms 的更多形态**:非连续输入、按尾维广播的权重、`group_norm`。
-- `bmm`、`avg_pool2d`、`cat`/`gather`、stride-aware 的 elementwise 与归约、RNG。
+- `avg_pool2d`、`cat`/`gather`、stride-aware 的 elementwise 与归约、RNG。
 - 二元 elementwise 仍在 torch 镜像(DL 的 prim 没有二元入口)。
 
 ## 6. 本轮工作流发现的、计划书未记的
@@ -170,4 +171,5 @@ DL 侧工作只有 `log_softmax`/`logsumexp` 两个新入口。
 3. W3.4 还要 embedding/gather、RoPE、dropout(`F.dropout` 也未注册),本轮不宣称接近
    W3.4。
 4. `check_reduce_dims` 对 0 维输入的每个 dim 都判越界,而 torch 在 0 维上接受
-   `argmax(t, 0)`/`argmax(t, -1)`/`argmax(t, None)` 都返回 0。argmax 落地时要单独处理。
+   `argmax(t, 0)`/`argmax(t, -1)`/`argmax(t, None)` 都返回 0；P5.10 已在
+   `check_reduce_dims`/`reduce_layout` 中保留这个 0-D 特例，并有参数化测试。

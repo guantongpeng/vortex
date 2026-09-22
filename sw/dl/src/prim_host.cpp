@@ -165,15 +165,36 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
                   (n + 3) / 4, 4, 0);
 }
 
+static bool is_arg_op(vx_prim_op op) {
+    return op == VX_PRIM_OP_ARGMAX;
+}
+
 vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
                               uint64_t in, uint64_t out,
                               uint32_t rows, uint32_t cols) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
     if (op < VX_PRIM_OP_SUM || op > VX_PRIM_OP_MEAN) return VX_PRIM_ERR_BAD_ARGS;
+    if (is_arg_op(op)) return VX_PRIM_ERR_BAD_ARGS;   // use vx_prim_index_reduce
     vx_prim_reduce_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.out = (vx_dl_ptr_t)out;
+    args.rows = rows;
+    args.cols = cols;
+    args.op = (uint32_t)(op - VX_PRIM_OP_SUM);
+    return launch(q, g_prim.reduce, &args, sizeof(args), rows, 16, 256);
+}
+
+vx_prim_status vx_prim_index_reduce(vx_queue_h q, vx_prim_op op, uint64_t in,
+                                    uint64_t indices, uint64_t values,
+                                    uint32_t rows, uint32_t cols) {
+    if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
+    if (!in || !indices || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
+    if (!is_arg_op(op)) return VX_PRIM_ERR_BAD_ARGS;
+    vx_prim_reduce_args_t args = {};
+    args.in = (vx_dl_ptr_t)in;
+    args.out = (vx_dl_ptr_t)indices;   // uint32 per row
+    args.values = (vx_dl_ptr_t)values; // float per row, or 0
     args.rows = rows;
     args.cols = cols;
     args.op = (uint32_t)(op - VX_PRIM_OP_SUM);

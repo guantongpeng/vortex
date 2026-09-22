@@ -248,7 +248,7 @@ F07 的静态审计示例：当前 `ConvArgs` 为 4 个 64 位地址加 14 个 u
 **W3.2 通用 Tensor 与基础算子覆盖**
 
 - [ ] 按真实模型 op trace 制作 overload/dtype/layout/shape 支持矩阵；优先补 cast、clone/contiguous、transpose/permute、slice/select、cat/stack、expand、arange。
-- [ ] 补 broadcast add/mul/sub/div、标量 alpha、sum/mean/max/argmax、exp/log/rsqrt、GELU/SiLU，以及模型真正需要的 in-place/out overload。
+- [ ] 补 broadcast add/mul/sub/div、标量 alpha、sum/mean/max/argmax、exp/log/rsqrt、GELU/SiLU，以及模型真正需要的 in-place/out overload。（其中 `sum/mean/max/argmax` 的 FP32 基础路径已交付，见 [p5_10_argmax.md](p5_10_argmax.md)；`bmm` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)；其余 overload/dtype 仍待补齐。）
 - [ ] 同时支持 FP32 数据、bool mask、int64 索引等基础类型；对 unsupported schema 明确报错，不新增自动 CPU fallback。
 - **验收**：按目标算子抽取 OpInfo/参数化一致性测试；覆盖标量、broadcast、非连续、空维度及 dtype promotion。支持矩阵必须由测试支撑。
 - **依赖**：W1.4/W1.5/W1.8；可在 DL 统一过程中按族交付。
@@ -263,7 +263,7 @@ F07 的静态审计示例：当前 `ConvArgs` 为 4 个 64 位地址加 14 个 u
 
 **W3.4 Transformer/LLM eager 基础**
 
-- [ ] 接入 layernorm/rmsnorm、bmm/matmul、embedding/gather、softmax、RoPE、GELU/SiLU/SwiGLU。
+- [ ] 接入 layernorm/rmsnorm、embedding/gather、softmax、RoPE、GELU/SiLU/SwiGLU。（`bmm`/基础 `matmul` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)。）
 - [ ] 将已有 attention/LLM 库桥接到 ATen 或有明确 schema 的自定义 op；先验证 mask、causal、scale、head layout，再补 GQA。
 - [ ] 完成 KV cache append/read、prefill 与逐 token decode；必要时增加采样/top-k，避免未经统计的 host 往返。
 - **验收**：小型 Transformer block 与 tiny decoder 的分层输出对齐；不同序列长度、mask 和位置；prefill 后连续 decode 与 CPU 参考一致。

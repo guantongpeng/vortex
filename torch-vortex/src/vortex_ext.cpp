@@ -22,6 +22,7 @@
 //   - one device (hipInit/hipSetDevice(0) at import)
 
 #include <torch/extension.h>
+#include <torch/version.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -34,12 +35,21 @@
 #include <vector>
 
 #include <c10/core/Allocator.h>
+#if __has_include(<c10/core/CachingDeviceAllocator.h>)
 #include <c10/core/CachingDeviceAllocator.h>
+#define VX_HAS_DEVICE_ALLOCATOR 1
+#else
+// PyTorch 2.4 has the PrivateUse1 allocator ABI but predates the generic
+// DeviceAllocator/CachingDeviceAllocator interface. Keep the backend usable
+// on that baseline; newer releases still get the richer memory API.
+#define VX_HAS_DEVICE_ALLOCATOR 0
+#endif
 #include <ATen/EmptyTensor.h>
 #include <ATen/ops/as_strided_native.h>
 #include <ATen/ops/view_native.h>
 #include <c10/core/Device.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
+#include <c10/util/string_view.h>
 
 extern "C" {
 #include <hip/hip_runtime_api.h>
@@ -48,6 +58,21 @@ extern "C" {
 // The single definition of every kernel argument block, shared with the device
 // compiler. Never declare an argument struct in this file.
 #include "torch_kernel_args.h"
+
+// The generic accelerator capability and device-wide synchronization hooks
+// landed after the 2.4 PrivateUse1 ABI. Keep the older baseline buildable;
+// newer versions use the richer overrides below.
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 14)
+#define VX_HAS_ACCELERATOR_GUARD_API 1
+#else
+#define VX_HAS_ACCELERATOR_GUARD_API 0
+#endif
+
+#if VX_HAS_ACCELERATOR_GUARD_API
+using vx_schema_string_view = std::string_view;
+#else
+using vx_schema_string_view = c10::string_view;
+#endif
 
 // The device DL library (sw/dl). Ops that have an equivalent there call into
 // it rather than keeping a second copy of the same algorithm -- see W3.1 of
@@ -344,7 +369,11 @@ namespace {
 
 void vortex_free(void* ctx);
 
+#if VX_HAS_DEVICE_ALLOCATOR
 struct VortexAllocator final : public c10::DeviceAllocator {
+#else
+struct VortexAllocator final : public c10::Allocator {
+#endif
     c10::DataPtr allocate(size_t n) override {
         void* p = nullptr;
         if (n != 0) {
@@ -370,6 +399,7 @@ struct VortexAllocator final : public c10::DeviceAllocator {
         g_stats.d2d_bytes += count;
     }
 
+#if VX_HAS_DEVICE_ALLOCATOR
     // ---- c10::DeviceAllocator ----------------------------------------------
     //
     // torch calls these through getDeviceAllocator(), which dynamic_casts the
@@ -451,6 +481,7 @@ struct VortexAllocator final : public c10::DeviceAllocator {
         const size_t live = (size_t)g_live_bytes.load();
         return {total > live ? total - live : 0, total};
     }
+#endif
 };
 
 // The c10 deleter. It runs on whichever thread drops the last reference, and
@@ -553,6 +584,7 @@ struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
         t_current_device = (d.index() < 0) ? 0 : d.index();
     }
 
+#if VX_HAS_ACCELERATOR_GUARD_API
     // The default is "every scalar type is supported", which for this backend
     // would claim double, half, int and the quantized types. Only float32 is
     // implemented for compute in v1 (W3.2/W4.1), so say exactly that.
@@ -561,6 +593,7 @@ struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
         cap.capability_data.capability_bits = 1ULL << c10::kIndex_Float;
         return cap;
     }
+#endif
 
     c10::Stream getStream(c10::Device) const noexcept override {
         return t_current_stream;
@@ -588,9 +621,11 @@ struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
         // non-default flag.
         note_default_queue_barrier();
     }
+#if VX_HAS_ACCELERATOR_GUARD_API
     void synchronizeDevice(const c10::DeviceIndex) const override {
         device_synchronize_impl();
     }
+#endif
     // queryStream/queryEvent are deliberately not overridden: the runtime has
     // no non-blocking queue/event query (vx_queue_finish always enqueues a
     // barrier, so polling with it would grow the queue), and this increment
@@ -965,7 +1000,14 @@ static torch::Tensor view_impl(const torch::Tensor& self,
                                c10::SymIntArrayRef sym_sizes) {
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
                 "torch_vortex: view on non-vortex tensor");
+#if VX_HAS_ACCELERATOR_GUARD_API
     auto out = at::native::view_symint(self, sym_sizes);
+#else
+    std::vector<int64_t> sizes;
+    sizes.reserve(sym_sizes.size());
+    for (const auto& s : sym_sizes) sizes.push_back(s.expect_int());
+    auto out = at::native::view(self, c10::IntArrayRef(sizes));
+#endif
     TORCH_CHECK(out.device().type() == c10::DeviceType::PrivateUse1,
                 "torch_vortex: view produced a tensor on ", out.device());
     return out;
@@ -1062,6 +1104,12 @@ static void check_reduce_dims(const torch::Tensor& self,
     TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
                 "dimensions at once is unsupported in v1; reduce one at a "
                 "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+    if (nd == 0) {
+        TORCH_CHECK((*dim)[0] == 0 || (*dim)[0] == -1,
+                    "torch_vortex: ", name, " dim ", (*dim)[0],
+                    " is out of range for a 0-D tensor");
+        return;
+    }
     int64_t d = (*dim)[0];
     if (d < 0) d += nd;
     TORCH_CHECK(d >= 0 && d < nd, "torch_vortex: ", name, " dim ", (*dim)[0],
@@ -1084,6 +1132,12 @@ static torch::Tensor reduce_layout(const torch::Tensor& self,
     TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
                 "dimensions at once is unsupported in v1; reduce one at a "
                 "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+    if (nd == 0) {
+        const int64_t d = (*dim)[0];
+        TORCH_CHECK(d == 0 || d == -1, "torch_vortex: ", name, " dim ", d,
+                    " is out of range for a 0-D tensor");
+        return self.reshape({1, 1}).contiguous();
+    }
     int64_t d = (*dim)[0];
     if (d < 0) d += nd;
     TORCH_CHECK(d >= 0 && d < nd, "torch_vortex: ", name, " dim ", (*dim)[0],
@@ -1151,6 +1205,98 @@ static void check_reduce_dtype(std::optional<c10::ScalarType> dtype,
     TORCH_CHECK(!dtype.has_value() || *dtype == at::kFloat,
                 "torch_vortex: ", name, " dtype ", dtype.value(),
                 " is unsupported; only float32 is implemented (W3.2)");
+}
+
+// ---- index reductions: argmax and max(dim=) -------------------------------
+//
+// One DL pass produces both the index and the extreme it points at, so
+// max(dim=)'s pair costs no more than argmax's index alone. The index comes
+// back as uint32 -- that is vx_prim_reduce's contract -- and ATen wants int64,
+// which the widen kernel converts.
+
+static void launch_widen_u32_i64(uint64_t dst, uint64_t src, uint32_t n) {
+    // Nothing to widen is not a launch, and launch() would skip a zero grid
+    // anyway; this says so before allocating the argument block.
+    if (n == 0) {
+        ++g_stats.skipped_launches;
+        return;
+    }
+    widen_args_t args = {dst, src, n, 0};
+    launch(h_widen_u32_i64_kernel, args, (n + 3) / 4);
+}
+
+// `indices` is filled in the caller's shape; `values`, when given, receives the
+// extreme at each index and must already be shaped and float32.
+static void index_reduce(const torch::Tensor& self,
+                         c10::OptionalArrayRef<int64_t> dim,
+                         torch::Tensor& indices, torch::Tensor* values,
+                         const char* name) {
+    check_vortex_f32(self, name);
+    TORCH_CHECK(indices.scalar_type() == at::kLong && indices.is_contiguous(),
+                "torch_vortex: ", name, " indices must be contiguous int64");
+    // torch refuses both empty shapes rather than answering one, and with
+    // different messages: no dim at all wants a dim named, and an empty
+    // reduction dim wants a different input. The layout helper catches the
+    // second; the first is only reachable through the full-reduction form.
+    if (!dim.has_value() || dim->size() == 0) {
+        TORCH_CHECK(self.numel() > 0, "torch_vortex: ", name, " of a tensor with "
+                    "no elements has no index; torch requires a reduction dim "
+                    "for an empty input");
+    }
+    auto src = reduce_layout(self, dim, name);
+    const int64_t rows = src.size(0), cols = src.size(1);
+    TORCH_CHECK(indices.numel() == rows, "torch_vortex: ", name, " indices has ",
+                indices.numel(), " elements but the reduction produces ", rows);
+    if (values) {
+        TORCH_CHECK(values->numel() == rows && values->is_contiguous() &&
+                    values->scalar_type() == at::kFloat,
+                    "torch_vortex: ", name, " values must be contiguous float32 "
+                    "with one element per row");
+    }
+    if (rows == 0) {
+        ++g_stats.skipped_launches;
+        return;
+    }
+    auto stage = torch::empty({rows}, self.options().dtype(at::kInt));
+    DL_LAUNCH(vx_prim_index_reduce(
+        current_queue(), VX_PRIM_OP_ARGMAX, (uint64_t)(uintptr_t)src.data_ptr(),
+        (uint64_t)(uintptr_t)stage.data_ptr(),
+        values ? (uint64_t)(uintptr_t)values->data_ptr() : 0,
+        u32_dim(rows, "argmax rows"), u32_dim(cols, "argmax cols")));
+    launch_widen_u32_i64((uint64_t)(uintptr_t)indices.data_ptr(),
+                         (uint64_t)(uintptr_t)stage.data_ptr(),
+                         u32_dim(rows, "argmax rows"));
+}
+
+static torch::Tensor argmax_impl(const torch::Tensor& self,
+                                 std::optional<int64_t> dim, bool keepdim) {
+    check_vortex_f32(self, "argmax");
+    c10::OptionalArrayRef<int64_t> d;
+    std::vector<int64_t> one;
+    if (dim.has_value()) {
+        one = {*dim};
+        d = c10::OptionalArrayRef<int64_t>(one);
+    }
+    check_reduce_dims(self, d, "argmax");
+    // No dim flattens the tensor and answers with a 0-d index, which is what
+    // reduced_shape returns for an empty dim list.
+    auto out = torch::empty(reduced_shape(self, d, keepdim),
+                            self.options().dtype(at::kLong));
+    index_reduce(self, d, out, nullptr, "argmax");
+    return out;
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> max_dim_impl(
+    const torch::Tensor& self, int64_t dim, bool keepdim) {
+    check_vortex_f32(self, "max");
+    std::vector<int64_t> one = {dim};
+    c10::OptionalArrayRef<int64_t> d = c10::OptionalArrayRef<int64_t>(one);
+    check_reduce_dims(self, d, "max");
+    auto shape = reduced_shape(self, d, keepdim);
+    auto values = torch::empty(shape, self.options());
+    auto indices = torch::empty(shape, self.options().dtype(at::kLong));
+    index_reduce(self, d, indices, &values, "max");
+    return std::make_tuple(values, indices);
 }
 
 // ---- softmax family -------------------------------------------------------
@@ -1616,7 +1762,7 @@ static torch::Tensor& unary_op_(torch::Tensor& self, uint32_t op,
 // gelu takes a second parameter, so it does not fit the one-argument macro.
 // the default is the erf form; approximate="tanh" is a different function,
 // not a different spelling of the same one.
-static uint32_t gelu_op(const std::string_view& approximate, const char* name) {
+static uint32_t gelu_op(vx_schema_string_view approximate, const char* name) {
     if (approximate == "none") {
         return VX_PRIM_OP_GELU_ERF;
     }
@@ -1628,11 +1774,11 @@ static uint32_t gelu_op(const std::string_view& approximate, const char* name) {
 }
 
 static torch::Tensor gelu_impl(const torch::Tensor& self,
-                               std::string_view approximate) {
+                               vx_schema_string_view approximate) {
     return unary_op(self, gelu_op(approximate, "gelu"), "gelu");
 }
 static torch::Tensor& gelu__impl(torch::Tensor& self,
-                                 std::string_view approximate) {
+                                 vx_schema_string_view approximate) {
     return unary_op_(self, gelu_op(approximate, "gelu_"), "gelu_");
 }
 
@@ -2099,6 +2245,47 @@ static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b_in
     return out;
 }
 
+static torch::Tensor bmm_impl(const torch::Tensor& a,
+                               const torch::Tensor& b) {
+    check_cnn_f32(a, "bmm.mat1", 3);
+    check_cnn_f32(b, "bmm.mat2", 3);
+    const int64_t batch = a.size(0), m = a.size(1), k = a.size(2);
+    TORCH_CHECK(b.size(0) == batch, "torch_vortex: bmm batch mismatch: ",
+                batch, " vs ", b.size(0));
+    TORCH_CHECK(b.size(1) == k, "torch_vortex: bmm contraction mismatch: ",
+                k, " vs ", b.size(1));
+    const int64_t n = b.size(2);
+    const uint32_t um = u32_dim(m, "bmm m");
+    const uint32_t un = u32_dim(n, "bmm n");
+    const uint32_t uk = u32_dim(k, "bmm k");
+    // Fill and copy kernels carry element counts in uint32 fields.
+    TORCH_CHECK(m == 0 || n == 0 || batch <= UINT32_MAX / m / n,
+                "torch_vortex: bmm output element count does not fit in uint32");
+    auto out = torch::empty({batch, m, n}, a.options());
+    if (batch == 0 || m == 0 || n == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    if (k == 0) {
+        return out.zero_();
+    }
+
+    const uint64_t a_addr = (uint64_t)(uintptr_t)a.data_ptr();
+    const uint64_t b_addr = (uint64_t)(uintptr_t)b.data_ptr();
+    const uint64_t c_addr = (uint64_t)(uintptr_t)out.data_ptr();
+    const uint64_t a_stride = (uint64_t)m * k * sizeof(float);
+    const uint64_t b_stride = (uint64_t)k * n * sizeof(float);
+    const uint64_t c_stride = (uint64_t)m * n * sizeof(float);
+    auto queue = current_queue();
+    for (int64_t i = 0; i < batch; ++i) {
+        // beta=0 suppresses reads of the uninitialized output in the DL kernel.
+        DL_LAUNCH(vx_blas_gemm(queue, VX_BLAS_F32, um, un, uk, 1.0f, 0.0f,
+                               a_addr + i * a_stride, b_addr + i * b_stride,
+                               c_addr + i * c_stride));
+    }
+    return out;
+}
+
 static torch::Tensor mm_impl_wrap(const torch::Tensor& a,
                                   const torch::Tensor& b) {
     return mm_launch(a, b, 0, nullptr, 0, 1.0f, 0.0f);
@@ -2229,8 +2416,8 @@ static torch::Tensor& amax_out_impl(const torch::Tensor& self,
     return reduce_into(self, out, d, VX_PRIM_OP_MAX, "amax");
 }
 
-// aten::max with no dim is a full reduction. max(dim=...) also returns
-// indices, which needs an argmax kernel and is refused by name.
+// aten::max with no dim is a full reduction. max(dim=...) returns indices via
+// the index-reduction path above.
 static torch::Tensor max_impl(const torch::Tensor& self) {
     auto out = torch::empty({}, self.options());
     return reduce_into(self, out, std::nullopt, VX_PRIM_OP_MAX, "max");
@@ -2297,17 +2484,24 @@ void register_vortex_ops() {
 #undef VX_REGISTER_UNARY
     VX_IMPL("convolution", &convolution_impl);
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);
+#if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("native_layer_norm", &native_layer_norm_impl);
     VX_IMPL("rms_norm", &rms_norm_impl);
+#endif
     // _softmax and _log_softmax are the schemas; aten::softmax and
     // aten::log_softmax are composites that call them, so the public spellings
     // work without a registration of their own.
     VX_IMPL("_softmax", &softmax_impl);
     VX_IMPL("_log_softmax", &log_softmax_impl);
     VX_IMPL("logsumexp", &logsumexp_impl);
+    VX_IMPL("argmax", &argmax_impl);
+    VX_IMPL("max.dim", &max_dim_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
+#if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
+#endif
     VX_IMPL("mm", &mm_impl_wrap);
+    VX_IMPL("bmm", &bmm_impl);
     VX_IMPL("linear", &linear_impl);
     VX_IMPL("addmm", &addmm_impl);
 

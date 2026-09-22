@@ -57,8 +57,9 @@ typedef enum vx_prim_op {
     // VX_PRIM_RED_* numbering; prim_host.cpp pins that too.
     VX_PRIM_OP_SUM  = 13,
     VX_PRIM_OP_MAX  = 14,
-    VX_PRIM_OP_ARGMAX = 15,     // out is uint32
+    VX_PRIM_OP_ARGMAX = 15,     // index out; see vx_prim_index_reduce
     VX_PRIM_OP_MEAN = 16,
+    // No MIN/ARGMIN: see the note in src/prim_args.h.
 } vx_prim_op;
 
 vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path);
@@ -69,10 +70,21 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
                              uint64_t in, uint64_t out, uint32_t n);
 
 // Row-wise reduction over a rows x cols FP32 row-major buffer; out[r] is the
-// reduction of row r. A whole-vector reduction is rows = 1.
+// reduction of row r. A whole-vector reduction is rows = 1. `out` is rows
+// floats, and the op is one of SUM/MEAN/MAX -- the arg ops have their own
+// entry point because their output is not floats.
 vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
                               uint64_t in, uint64_t out,
                               uint32_t rows, uint32_t cols);
+
+// Row-wise maximum with its index, for VX_PRIM_OP_ARGMAX.
+// `indices` is rows uint32; `values` is rows floats and may be 0 if the caller
+// wants only the index. ARGMAX ties go to the earliest element and a NaN beats
+// every number, both of which match torch -- and because the value comes from
+// the same pass as the index, values[r] is in[indices[r]].
+vx_prim_status vx_prim_index_reduce(vx_queue_h q, vx_prim_op op, uint64_t in,
+                                    uint64_t indices, uint64_t values,
+                                    uint32_t rows, uint32_t cols);
 
 // Row-wise softmax over rows x cols.
 vx_prim_status vx_prim_softmax(vx_queue_h q, uint64_t in, uint64_t out,

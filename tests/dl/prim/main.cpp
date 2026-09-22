@@ -250,17 +250,38 @@ int main(int argc, char** argv) {
             check(rc.name, g, r, 1e-5, 1e-5, &failures);
         }
 
-        // argmax: plant a unique max so the result is deterministic
+        // argmax / argmin: plant a unique extreme so the result is
+        // deterministic, and a tie so the tie rule is exercised
         std::vector<float> vin = in;
         vin[123] = 100.0f;
-        vin[500] = 100.0f;  // tie: expect the FIRST index (123)
+        vin[500] = 100.0f;   // tie: expect the FIRST index (123)
         upload(q, din, vin.data(), N * 4);
-        uint32_t got_idx = ~0u;
-        CHECK(vx_prim_reduce(q, VX_PRIM_OP_ARGMAX, din.addr, dout4.addr, 1, N));
-        CHECK(vx_queue_flush(q));
-        download(q, &got_idx, dout4, 4);
-        printf("%-14s got=%u expect=123\n", "reduce_argmax", got_idx);
-        if (got_idx != 123) ++failures;
+        DevBuf dval = make_buf(dev, 4);
+        struct IdxCase {
+            const char* name;
+            vx_prim_op op;
+            uint32_t want_idx;
+            float want_val;
+        };
+        for (IdxCase ic : {IdxCase{"reduce_argmax", VX_PRIM_OP_ARGMAX, 123, 100.0f}}) {
+            uint32_t got_idx = ~0u;
+            float got_val = 0.0f;
+            CHECK(vx_prim_index_reduce(q, ic.op, din.addr, dout4.addr,
+                                       dval.addr, 1, N));
+            CHECK(vx_queue_flush(q));
+            download(q, &got_idx, dout4, 4);
+            download(q, &got_val, dval, 4);
+            printf("%-14s got=%u expect=%u\n", ic.name, got_idx, ic.want_idx);
+            if (got_idx != ic.want_idx) ++failures;
+            // the value has to be the one at the index it reports -- that is
+            // the property torch's max(dim=)/min(dim=) pair guarantees
+            if (got_val != ic.want_val || got_val != vin[got_idx]) {
+                fprintf(stderr, "  %s value %g is not in[%u] = %g\n", ic.name,
+                        (double)got_val, got_idx, (double)vin[got_idx]);
+                ++failures;
+            }
+        }
+        vx_buffer_release(dval.h);
         vx_buffer_release(dout4.h);
     }
 
@@ -285,7 +306,7 @@ int main(int argc, char** argv) {
             ++failures;
         }
         uint32_t gi = ~0u;
-        CHECK(vx_prim_reduce(q, VX_PRIM_OP_ARGMAX, dv.addr, dov.addr, 1, nv));
+        CHECK(vx_prim_index_reduce(q, VX_PRIM_OP_ARGMAX, dv.addr, dov.addr, 0, 1, nv));
         CHECK(vx_queue_flush(q));
         download(q, &gi, dov, 4);
         if (gi != 3) {
@@ -305,6 +326,59 @@ int main(int argc, char** argv) {
         }
         vx_buffer_release(dv.h);
         vx_buffer_release(dov.h);
+    }
+
+    // ---- reductions: ties, and which zero survives -------------------------
+    //
+    // A tie has to be resolved the same way by the value and by the index,
+    // because torch's max(dim=) returns the value *at the index it reports*.
+    // The extreme combine therefore keeps the left operand on an equality
+    // (`a >= b`, not `a > b`), which is also what decides the sign of a zero
+    // when a row holds both +0.0 and -0.0.
+    {
+        struct TieCase {
+            std::vector<float> row;
+            float want_max;
+        };
+        const std::vector<TieCase> ties = {
+            {{0.0f, -0.0f}, 0.0f},
+            {{-0.0f, 0.0f}, -0.0f},
+            {{-0.0f, -0.0f}, -0.0f},
+            {{1.0f, 1.0f, 1.0f}, 1.0f},
+        };
+        for (const TieCase& tc : ties) {
+            const uint32_t n = (uint32_t)tc.row.size();
+            DevBuf tb = make_buf(dev, n * 4), to = make_buf(dev, 4);
+            DevBuf ti = make_buf(dev, 4), tv = make_buf(dev, 4);
+            upload(q, tb, tc.row.data(), n * 4);
+            float got_mx = 0.0f;
+            CHECK(vx_prim_reduce(q, VX_PRIM_OP_MAX, tb.addr, to.addr, 1, n));
+            CHECK(vx_queue_flush(q));
+            download(q, &got_mx, to, 4);
+            if (got_mx != tc.want_max || std::signbit(got_mx) != std::signbit(tc.want_max)) {
+                fprintf(stderr, "  max of a tie gave %g, want %g\n",
+                        (double)got_mx, (double)tc.want_max);
+                ++failures;
+            }
+            // and the index half must point at that same element
+            uint32_t gi2 = ~0u;
+            float gv = 0.0f;
+            CHECK(vx_prim_index_reduce(q, VX_PRIM_OP_ARGMAX, tb.addr, ti.addr,
+                                       tv.addr, 1, n));
+            CHECK(vx_queue_flush(q));
+            download(q, &gi2, ti, 4);
+            download(q, &gv, tv, 4);
+            if (gi2 != 0 || gv != tc.row[gi2] ||
+                std::signbit(gv) != std::signbit(tc.row[gi2])) {
+                fprintf(stderr, "  argmax of a tie gave index %u value %g\n",
+                        gi2, (double)gv);
+                ++failures;
+            }
+            vx_buffer_release(tb.h);
+            vx_buffer_release(to.h);
+            vx_buffer_release(ti.h);
+            vx_buffer_release(tv.h);
+        }
     }
 
     // ---- reductions: several rows at once ---------------------------------
@@ -646,7 +720,7 @@ int main(int argc, char** argv) {
             const uint32_t n = (uint32_t)c.size();
             DevBuf bin = make_buf(dev, n * 4), bout = make_buf(dev, 4);
             upload(q, bin, c.data(), n * 4);
-            CHECK(vx_prim_reduce(q, VX_PRIM_OP_ARGMAX, bin.addr, bout.addr, 1, n));
+            CHECK(vx_prim_index_reduce(q, VX_PRIM_OP_ARGMAX, bin.addr, bout.addr, 0, 1, n));
             CHECK(vx_queue_flush(q));
             uint32_t got = ~0u;
             download(q, &got, bout, 4);

@@ -44,35 +44,37 @@ elementwise 原本一个算子一个 kernel。改成**按 arity 的 op-code 驱�
 
 ```
 SUPPORTED                          UNSUPPORTED
-  clone/contiguous                   bmm (batched)          aten::bmm.out
-  t/transpose/permute                cat/stack              aten::cat.out
-  slice/index                        softmax/log_softmax    aten::_softmax.out
-  as_strided                         layer_norm             (BN training 分支)
-  mm/mv/linear/addmm                 group_norm             aten::var_mean.correction
-  broadcast add/mul                  avg_pool2d             (参数解析)
-  elementwise(sub/div/min/max/…)     interpolate            aten::upsample_nearest2d.out
-  unary(exp/log/sqrt/…/silu/gelu)    gather/scatter         aten::gather.out
-  sum/mean/amax/max                  randn/rand             aten::normal_
-  conv2d / BN(推理) / pool           topk/sort              aten::topk.values
-  torch.Stream / torch.Event         cumsum                 aten::cumsum.out
+  clone/contiguous                   cat/stack              aten::cat.out
+  t/transpose/permute                softmax/log_softmax    aten::_softmax.out
+  slice/index                        layer_norm             (BN training 分支)
+  as_strided                         group_norm             aten::var_mean.correction
+  mm/bmm/mv/linear/addmm             avg_pool2d             (参数解析)
+  broadcast add/mul                  interpolate            aten::upsample_nearest2d.out
+  elementwise(sub/div/min/max/…)     gather/scatter         aten::gather.out
+  unary(exp/log/sqrt/…/silu/gelu)    randn/rand             aten::normal_
+  sum/mean/amax/max                  topk/sort              aten::topk.values
+  conv2d / BN(推理) / pool           cumsum                 aten::cumsum.out
+  torch.Stream / torch.Event         —                      —
 ```
 
 **MiniResNet 全前向仍然通过**(conv/bn/relu/maxpool/add/avgpool/linear/view),这是本轮之后的模型级门槛。
 
 ## 3. W3 未完成的部分(按建议顺序)
 
-1. **`bmm` / batched matmul** —— host 侧按 batch 循环现有 mm kernel,成本低,transformer 必需。
-2. **`cat`/`stack`/`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
-3. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
+1. **`cat`/`stack`/`gather`/`scatter`/`index_add`** —— 数据搬运,各自一个简单 kernel。
+2. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
    [p5_08_softmax_family.md](p5_08_softmax_family.md)。三个算子共用一个 DL kernel。
-4. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
+3. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
    [p5_07_layer_norm_rms_norm.md](p5_07_layer_norm_rms_norm.md);`group_norm` 仍未做。
-5. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
-6. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
-7. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
-8. ~~**W3.1 与 `sw/dl` 统一**~~ —— **已完成**,见 §5 与 [p5_06](p5_06_w3_prim_unification.md)。`conv2d`、pooling、`mm/linear/addmm`、`batch norm`、一元与归约全部走 DL kernel,重复实现已删除。**例外**:二元 elementwise(`binary_op_kernel` 等)仍留在 torch 镜像,因为 DL 的 prim 只有一元;要统一需先给 prim 加二元入口。
-9. **`max(dim=)`/`argmax`/`topk`** —— DL 的 row-wise ARGMAX 已修好(P5.7),差一个
-   uint32→int64 的加宽 kernel(torch 侧,不是 sw/dl)。
+4. **stride-aware 的 elementwise 与归约** —— 现在 `x.t() + 1` 与 `amax(dim=0)` 都要付一次拷贝。
+5. **`avg_pool2d`**、`interpolate`、`ceil_mode` —— W3.3。
+6. **`randn`/`rand`** —— 属 W3.5,需要 `c10::GeneratorImpl`;`sw/dl` 的 Philox kernel 已经存在且有测试,缺的是接到 PyTorch 的生成器接口。
+7. ~~**W3.1 与 `sw/dl` 统一**~~ —— **已完成**,见 §5 与 [p5_06](p5_06_w3_prim_unification.md)。`conv2d`、pooling、`mm/bmm/linear/addmm`、`batch norm`、一元与归约全部走 DL kernel,重复实现已删除。**例外**:二元 elementwise(`binary_op_kernel` 等)仍留在 torch 镜像,因为 DL 的 prim 只有一元;要统一需先给 prim 加二元入口。
+8. ~~**`max(dim=)`/`argmax`**~~ —— **P5.10 已完成**,见 [p5_10_argmax.md](p5_10_argmax.md)。
+   一次 DL 归约同时给出索引与极值;加宽 kernel 在 torch 镜像里。
+   **`argmin`/`min(dim=)`/`amin` 未做**:曾尝试在 kernel 侧增加这组 op,但依赖
+   `arg->op` 的累加器种子会触发 VOLT 误编译,所以当前 kernel 不含 min 归约(见
+   p5_10 §3)。`topk` 仍未做。
 
 ## 4. 本轮的一个实现教训
 
@@ -115,9 +117,9 @@ DL 库说的是 vortex2.h,需要**本进程的** device 和 queue——自己开
 
 分工由此明确:**ATen 校验,DL 计算**。边界检查(`window_out`、范围检查)留在扩展——它们会指名被拒的参数,而且是这条路径上唯一的带符号算术;DL 的形状算术是无符号无检查的。
 
-### 5.4 已完成的四个算子
+### 5.4 已完成的五个算子
 
-`conv2d`、`pooling`、`matmul`(mm/linear/addmm)、`batch norm` 全部走 DL kernel,扩展里对应的
+`conv2d`、`pooling`、`matmul`(mm/bmm/linear/addmm)、`batch norm` 全部走 DL kernel,扩展里对应的
 kernel、参数结构体与 launch 助手已删除。`batch norm` 是最后也是最关键的一个:审计发现的
 F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条同时证明了用的是**修好的那份**,
 而不是它的副本。
@@ -169,3 +171,4 @@ F03 就在它的 DL 实现里,所以「ATen 与 DL 直调逐位相同」这条�
   探针无法包含它。
 - 三处重复的状态枚举(见 §5.6)没有机制保证一致。
 - `avg_pool2d` 未注册(`count_include_pad` 默认语义与 DL 的 in-bounds count 不同,属 W3.3)。
+- `bmm` 已注册；host 侧按 batch 循环现有 DL GEMM，每批次入同一有序队列。

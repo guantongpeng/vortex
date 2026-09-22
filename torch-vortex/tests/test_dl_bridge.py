@@ -99,6 +99,7 @@ PRIM_OP_RELU = 0
 PRIM_OP_GELU_ERF = 12
 PRIM_OP_SUM = 13
 PRIM_OP_MAX = 14
+PRIM_OP_ARGMAX = 15
 PRIM_OP_MEAN = 16
 
 
@@ -115,7 +116,13 @@ def dl_prim():
     reduce_fn.restype = ctypes.c_int
     reduce_fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64,
                           ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32]
-    return unary, reduce_fn
+    index_reduce_fn = libdl.vx_prim_index_reduce
+    index_reduce_fn.restype = ctypes.c_int
+    index_reduce_fn.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                ctypes.c_uint64, ctypes.c_uint64,
+                                ctypes.c_uint64, ctypes.c_uint32,
+                                ctypes.c_uint32]
+    return unary, reduce_fn, index_reduce_fn
 
 
 def _upload(hip, data):
@@ -440,6 +447,34 @@ def test_aten_reduction_is_the_dl_prim_kernel(backend, dl, dl_prim, name, op, fn
         "the ATen %s path and a direct vx_prim_reduce call disagree; they are "
         "not the same kernel.\n  max |diff| = %g"
         % (name, (direct - aten).abs().max().item()))
+
+
+def test_aten_max_dim_is_the_dl_index_reduce_kernel(backend, dl, dl_prim):
+    """The value/index pair comes from the same one-pass DL reduction."""
+    hip, index_reduce_fn = dl[0], dl_prim[2]
+    torch.manual_seed(37)
+    x = torch.randn(5, 13)
+    aten = torch.max(x.to("vortex"), dim=1)
+
+    queue = ctypes.c_void_p()
+    assert hip.hipStreamGetQueue(None, ctypes.byref(queue)) == 0
+    dx = _upload(hip, x.contiguous().numpy().tobytes())
+    dindex = _upload(hip, b"\0" * (x.size(0) * 4))
+    dvalue = _upload(hip, b"\0" * (x.size(0) * 4))
+    rc = index_reduce_fn(queue, PRIM_OP_ARGMAX, dx.value, dindex.value,
+                          dvalue.value, x.size(0), x.size(1))
+    assert rc == 0, "vx_prim_index_reduce returned %d" % rc
+    assert hip.hipDeviceSynchronize() == 0
+    direct_index = torch.frombuffer(
+        bytearray(_download(hip, dindex, x.size(0) * 4)), dtype=torch.int32
+    ).to(torch.int64)
+    direct_value = torch.frombuffer(
+        bytearray(_download(hip, dvalue, x.size(0) * 4)), dtype=torch.float32
+    )
+
+    assert torch.equal(direct_index, aten.indices.cpu())
+    assert torch.equal(direct_value, aten.values.cpu())
+    assert torch.equal(direct_value, x.gather(1, direct_index[:, None]).squeeze(1))
 
 
 def test_the_reduction_kernel_propagates_nan(backend, dl, dl_prim):

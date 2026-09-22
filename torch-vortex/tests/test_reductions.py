@@ -81,6 +81,28 @@ def test_amax_all_neg_inf(backend, values, expected):
     assert_matches_cpu(torch.amax(v(t)), torch.amax(t))
 
 
+def test_amax_of_a_signed_zero_tie(backend):
+    """A tie between +0.0 and -0.0 resolves to the earlier element.
+
+    torch.amax of [0.0, -0.0] is +0.0 and of [-0.0, 0.0] is -0.0, so the
+    sign follows the first element and assert_close cannot see any of it. The
+    combine used `a > b`, which keeps the *later* operand on an equality, and
+    those are the only inputs where `>` and `>=` differ.
+    """
+    from helpers import signbit_of
+    for row, want_sign in (([0.0, -0.0], False), ([-0.0, 0.0], True),
+                           ([-0.0, -0.0], True)):
+        t = torch.tensor([row])
+        got = torch.amax(backend_amax(t), dim=1)
+        assert signbit_of(got)[0] is want_sign, (
+            "amax%r kept the wrong zero: %r" % (row, signbit_of(got)))
+        assert signbit_of(got) == signbit_of(torch.amax(t, dim=1))
+
+
+def backend_amax(t):
+    return t.to("vortex")
+
+
 def test_amax_propagates_nan(backend):
     t = torch.tensor([[1.0, float("nan")], [3.0, 2.0]])
     assert_matches_cpu(torch.amax(v(t), dim=1), torch.amax(t, dim=1))
@@ -110,8 +132,9 @@ def test_dim_out_of_range(backend):
         tensor.sum(dim=5)
 
 
-def test_max_with_dim_is_refused(backend):
-    """max(dim=) also returns indices, which needs an argmax kernel."""
-    tensor = v(X2)
-    with pytest.raises(RuntimeError):
-        tensor.max(dim=1)
+def test_max_with_dim(backend):
+    """max(dim=) returns the value/index pair from the argmax path."""
+    got = v(X2).max(dim=1)
+    want = X2.max(dim=1)
+    assert torch.equal(got.indices.cpu(), want.indices)
+    assert_matches_cpu(got.values, want.values, rtol=0, atol=0)

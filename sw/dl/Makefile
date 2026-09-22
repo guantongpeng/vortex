@@ -42,18 +42,19 @@ endif
 KERNEL_META := [{"name": "sgemm_f32_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "hgemm_f16_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "bgemm_bf16_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
 
 # prim/norm arg-block sizes (device-width pointers; see prim_args.h).
-# reduce gained rows/cols/op/pad when it became row-wise: 2 ptr + 4 u32.
+# reduce gained rows/cols/op/pad when it became row-wise, and `values` when
+# the arg ops started returning the extreme alongside the index: 3 ptr + 4 u32.
 # layernorm gained mean/rstd as optional outputs: 6 ptr + 4 u32.
 # rowargs gained an op selector when softmax became a family: 2 ptr + 4 u32.
 ifeq ($(XLEN),64)
 PRIM_UNARY_SIZE := 24
-PRIM_REDUCE_SIZE := 32
+PRIM_REDUCE_SIZE := 40
 PRIM_ROWARGS_SIZE := 32
 PRIM_NORM_SIZE := 64
 PRIM_RMSNORM_SIZE := 40
 else
 PRIM_UNARY_SIZE := 16
-PRIM_REDUCE_SIZE := 24
+PRIM_REDUCE_SIZE := 28
 PRIM_ROWARGS_SIZE := 24
 PRIM_NORM_SIZE := 40
 PRIM_RMSNORM_SIZE := 28

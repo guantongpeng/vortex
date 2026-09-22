@@ -161,4 +161,5 @@ build_dl64/tests/dl/prim: make run-simx                -> PASSED (23 项)
 - `mxfp8_args.h` 的尺寸未纳入漂移测试(头文件在 host 侧编不过)。
 - 三处重复的状态枚举(`mxfp8`/`nvfp4`/`rng`)没有机制保证一致。
 - `torch.empty(3, 0).sum(dim=1)` 被拒绝(见 §4.1)。
-- `avg_pool2d` 未注册;`max(dim=)`/`argmax` 到 ATen 的桥接(prim 侧已有行式 argmax)。
+- `avg_pool2d` 未注册;`max(dim=)`/`argmax` 的桥接已在 P5.10 完成（见
+  [p5_10_argmax.md](p5_10_argmax.md)），`avg_pool2d` 仍待 W3.3。

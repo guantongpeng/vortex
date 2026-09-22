@@ -68,18 +68,28 @@ typedef enum {
     VX_PRIM_RED_MAX = 1,
     VX_PRIM_RED_ARGMAX = 2,   // out is uint32
     VX_PRIM_RED_MEAN = 3,
+    // No MIN/ARGMIN yet. The kernel body for them is written, but seeding an
+    // accumulator from arg->op makes VOLT drop the LMEM store and every
+    // reduction in the image returns its seed -- measured, and reproduced by
+    // adding nothing but that seed. See docs/mydocs/p5_10_argmax.md.
 } vx_prim_reduce_op_e;
 
 // Row-wise reduce over rows x cols FP32 (row-major, one CTA per row); out[r]
 // is the reduction of row r. A reduction over a whole vector is rows = 1,
 // which is also the only shape the previous single-CTA version could express
 // -- hence the extra field rather than a second entry point.
+//
+// `values` is the extreme value for ARGMAX: the kernel already carries it
+// while looking for the index, and torch's max(dim=) returns the pair, so
+// writing it here is what keeps that one pass. Zero means the caller does not
+// want it.
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;
+    vx_dl_ptr_t values;   // arg ops only: rows floats, or 0
     uint32_t rows;
     uint32_t cols;
-    uint32_t op;   // vx_prim_reduce_op_e
+    uint32_t op;          // vx_prim_reduce_op_e
     uint32_t pad;
 } vx_prim_reduce_args_t;
 
