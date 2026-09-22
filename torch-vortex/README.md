@@ -89,6 +89,7 @@ the message. None of it falls back to the CPU.
 | `softmax`/`log_softmax` over any one dim, `logsumexp`, `nn.Softmax`/`nn.LogSoftmax` | |
 | `cat` and `stack` for contiguous FP32 tensors | |
 | `gather` and `scatter.src` with contiguous FP32 data and int32/int64 indices | |
+| `index_add` with contiguous FP32 data and int32/int64 indices | |
 | streams and events (`torch.Stream`, `torch.Event`, `torch.accelerator.*`) | |
 | several kernel images in one process (`sw/common/module_slots.mk`) | |
 

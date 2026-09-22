@@ -55,7 +55,7 @@ manifest 判定为 `supported`。首次测试发现 scatter 参数块必须分�
 - 当前只覆盖 `gather` 基础 schema 和 `scatter.src`；`gather.out`、
   `scatter_`、scalar/reduce overload 未实现。
 - 不支持 sparse gradient、dtype promotion、非连续数据或 rank 大于 4。
-- `index_add` 仍需处理重复索引的累加和原子语义；`topk`、`interpolate`、
+- `topk`、`interpolate`、
   stride-aware elementwise/归约和 RNG 仍在后续节点。
 
 ## 5. 工作记录
@@ -67,4 +67,4 @@ manifest 判定为 `supported`。首次测试发现 scatter 参数块必须分�
 | 3 | 增加 int32/int64 索引、shape、layout 和 uint32 边界检查 | 非法 schema 在提交前拒绝 |
 | 4 | 加入设备端越界标志和小范围同步校验 | 不回读整个 index，错误信息稳定 |
 | 5 | 添加 CPU 对比、空 index、launch 计数和错误测试 | 8/8 通过 |
-| 6 | 更新 README、覆盖矩阵与路线图 | gather/scatter 移入基础支持，index_add 保留为下一项 |
+| 6 | 更新 README、覆盖矩阵与路线图 | gather/scatter 移入基础支持，index_add 独立到后续节点 |

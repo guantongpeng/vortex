@@ -45,7 +45,7 @@ test_dl_bridge.py -k 'pool'                                -> 4 passed
   interpolate 仍未实现。
 - max pool、avg pool、adaptive_avg_pool2d(1) 共享 `vx_dnn_pool2d`，不会形成
   第二份 PyTorch kernel。
-- `index_add`、topk、stride-aware elementwise/归约和 RNG 仍是后续节点。
+- topk、stride-aware elementwise/归约和 RNG 仍是后续节点。
 
 ## 5. 工作记录
 

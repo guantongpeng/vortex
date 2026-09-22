@@ -148,6 +148,45 @@ __global__ void scatter_kernel(index_args_t* arg) {
     }
 }
 
+__global__ void index_add_kernel(index_add_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i;
+        uint32_t self_off = 0;
+        uint32_t row = 0;
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t coord = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            if (d == arg->dim) row = coord;
+            self_off += coord * arg->self_strides[d];
+        }
+
+        float acc = 0.0f;
+        for (uint32_t j = 0; j < arg->index_count; ++j) {
+            const int64_t index =
+                arg->index_type == 0
+                    ? (int64_t)((const int32_t*)(uintptr_t)arg->index)[j]
+                    : ((const int64_t*)(uintptr_t)arg->index)[j];
+            if (index < 0 || index >= (int64_t)arg->dim_size) {
+                *reinterpret_cast<uint32_t*>((uintptr_t)arg->invalid) = 1;
+                continue;
+            }
+            if ((uint32_t)index != row) continue;
+
+            uint32_t src_rem = i;
+            uint32_t src_off = 0;
+            for (uint32_t d = arg->ndim; d-- > 0;) {
+                const uint32_t coord = src_rem % arg->sizes[d];
+                src_rem /= arg->sizes[d];
+                src_off += (d == arg->dim ? j : coord) * arg->src_strides[d];
+            }
+            acc += ((const float*)(uintptr_t)arg->src)[src_off];
+        }
+        ((float*)(uintptr_t)arg->dst)[i] =
+            ((const float*)(uintptr_t)arg->self)[self_off] + arg->alpha * acc;
+    }
+}
+
 // Elementwise copy between two arbitrarily strided buffers. Handles the cases
 // hipMemcpy cannot: a transposed view on either side, a storage offset, and a
 // broadcast (stride 0). Dims are walked from the innermost out, so a

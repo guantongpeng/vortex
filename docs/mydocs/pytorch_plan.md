@@ -248,7 +248,7 @@ F07 的静态审计示例：当前 `ConvArgs` 为 4 个 64 位地址加 14 个 u
 **W3.2 通用 Tensor 与基础算子覆盖**
 
 - [ ] 按真实模型 op trace 制作 overload/dtype/layout/shape 支持矩阵；优先补 cast、clone/contiguous、transpose/permute、slice/select、expand、arange。（`cat`/`stack` 的连续 FP32 基础路径已交付，见 [p5_12_cat_stack.md](p5_12_cat_stack.md)。）
-- [ ] 补 broadcast add/mul/sub/div、标量 alpha、sum/mean/max/argmax、exp/log/rsqrt、GELU/SiLU，以及模型真正需要的 in-place/out overload。（其中 `sum/mean/max/argmax` 的 FP32 基础路径已交付，见 [p5_10_argmax.md](p5_10_argmax.md)；`bmm` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)；`cat`/`stack` 已交付，见 [p5_12_cat_stack.md](p5_12_cat_stack.md)；其余 overload/dtype 仍待补齐。）
+- [ ] 补 broadcast add/mul/sub/div、标量 alpha、sum/mean/max/argmax、exp/log/rsqrt、GELU/SiLU，以及模型真正需要的 in-place/out overload。（其中 `sum/mean/max/argmax` 的 FP32 基础路径已交付，见 [p5_10_argmax.md](p5_10_argmax.md)；`bmm` 已交付，见 [p5_11_bmm.md](p5_11_bmm.md)；`cat`/`stack` 已交付，见 [p5_12_cat_stack.md](p5_12_cat_stack.md)；`gather`/`scatter`/`index_add` 基础路径已交付，见 [p5_13_gather_scatter.md](p5_13_gather_scatter.md) 与 [p5_15_index_add.md](p5_15_index_add.md)；其余 overload/dtype 仍待补齐。）
 - [ ] 同时支持 FP32 数据、bool mask、int64 索引等基础类型；对 unsupported schema 明确报错，不新增自动 CPU fallback。
 - **验收**：按目标算子抽取 OpInfo/参数化一致性测试；覆盖标量、broadcast、非连续、空维度及 dtype promotion。支持矩阵必须由测试支撑。
 - **依赖**：W1.4/W1.5/W1.8；可在 DL 统一过程中按族交付。

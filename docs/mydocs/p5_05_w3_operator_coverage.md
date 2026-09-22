@@ -63,7 +63,7 @@ SUPPORTED                          UNSUPPORTED
 
 ## 3. W3 未完成的部分(按建议顺序)
 
-1. **`index_add`** —— 数据搬运,仍需处理重复索引和累加语义。
+1. **`topk`/`sort`** —— 需要排序或选择网络，仍未实现。
 2. ~~**`softmax`/`log_softmax`/`logsumexp`**~~ —— **P5.8 已完成**,见
    [p5_08_softmax_family.md](p5_08_softmax_family.md)。三个算子共用一个 DL kernel。
 3. ~~**`layer_norm`/`group_norm`**~~ —— `layer_norm`/`rms_norm` **P5.7 已完成**,见
@@ -79,11 +79,14 @@ SUPPORTED                          UNSUPPORTED
    p5_10 §3)。`topk` 仍未做。
 9. ~~**`cat`/`stack`**~~ —— **P5.12 已完成**,见
    [p5_12_cat_stack.md](p5_12_cat_stack.md)。仅支持连续 FP32 输入和非 `out`
-   overload;`index_add` 仍未做。
+   overload。
 10. ~~**`gather`/`scatter`**~~ —— **P5.13 已完成**,见
     [p5_13_gather_scatter.md](p5_13_gather_scatter.md)。基础 `gather` 与
-    `scatter.src` 支持连续 FP32 数据、int32/int64 索引；`index_add`、reduce
+    `scatter.src` 支持连续 FP32 数据、int32/int64 索引；reduce
     和 in-place/out overload 仍未做。
+11. ~~**`index_add`**~~ —— **P5.15 已完成**,见
+    [p5_15_index_add.md](p5_15_index_add.md)。采用无原子确定性扫描以支持重复索引；
+    性能优化和 in-place/out overload 仍未做。
 
 ## 4. 本轮的一个实现教训
 

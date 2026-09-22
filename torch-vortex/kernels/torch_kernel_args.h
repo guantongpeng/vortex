@@ -168,6 +168,27 @@ struct index_args_t {
     uint32_t strides[4];
 };
 
+// index_add accumulates every source row into one output row. The kernel uses
+// a deterministic scan over index rather than float atomics, which keeps the
+// base configuration correct when ZACAS/float AMO is unavailable.
+struct index_add_args_t {
+    uint64_t dst;
+    uint64_t self;
+    uint64_t src;
+    uint64_t index;
+    uint64_t invalid;
+    uint32_t ndim;
+    uint32_t dim;
+    uint32_t dim_size;
+    uint32_t index_type;
+    uint32_t index_count;
+    uint32_t total;
+    float alpha;
+    uint32_t sizes[4];
+    uint32_t self_strides[4];
+    uint32_t src_strides[4];
+};
+
 // ---- cnn ------------------------------------------------------------------
 
 // tv_bias_add_kernel: out[i, j] += bias[j] (row broadcast)
@@ -198,6 +219,7 @@ struct bias_args_t {
     X(cat_kernel, cat_args_t, 0, 0)                                           \
     X(gather_kernel, index_args_t, 0, 0)                                      \
     X(scatter_kernel, index_args_t, 0, 0)                                     \
+    X(index_add_kernel, index_add_args_t, 0, 0)                               \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 

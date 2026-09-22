@@ -1279,6 +1279,66 @@ static torch::Tensor scatter_impl(const torch::Tensor& self, int64_t dim,
     return out;
 }
 
+static torch::Tensor index_add_impl(const torch::Tensor& self, int64_t dim,
+                                    const torch::Tensor& index,
+                                    const torch::Tensor& source,
+                                    const c10::Scalar& alpha) {
+    check_vortex_f32(self, "index_add input");
+    check_vortex_f32(source, "index_add source");
+    TORCH_CHECK(self.dim() > 0,
+                "torch_vortex: index_add expects a tensor with at least one dimension");
+    const int64_t d = normalize_index_dim(dim, self.dim(), "index_add");
+    const uint32_t index_count = check_index_tensor(index, "index_add index");
+    TORCH_CHECK(index.dim() == 1,
+                "torch_vortex: index_add index must be one-dimensional");
+    TORCH_CHECK(source.dim() == self.dim(),
+                "torch_vortex: index_add source must have the same rank as self");
+    for (int64_t j = 0; j < self.dim(); ++j) {
+        TORCH_CHECK(j == d || source.size(j) == self.size(j),
+                    "torch_vortex: index_add source shape mismatch at dimension ", j);
+    }
+    TORCH_CHECK(source.size(d) == (int64_t)index_count,
+                "torch_vortex: index_add source dimension must equal index length");
+    const uint32_t total = u32_numel(self, "index_add input");
+    auto out = torch::empty(self.sizes(), self.options());
+    if (index_count == 0) {
+        if (total != 0) {
+            const size_t bytes = (size_t)self.numel() * sizeof(float);
+            VX_CHECK(hipMemcpy(out.data_ptr(), self.data_ptr(), bytes,
+                               hipMemcpyDeviceToDevice));
+            g_stats.d2d_bytes += bytes;
+            note_default_queue_barrier();
+        }
+        ++g_stats.skipped_launches;
+        return out;
+    }
+
+    index_add_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
+    args.self = (uint64_t)(uintptr_t)self.data_ptr();
+    args.src = (uint64_t)(uintptr_t)source.data_ptr();
+    args.index = (uint64_t)(uintptr_t)index.data_ptr();
+    auto invalid = make_index_error_flag(self);
+    args.invalid = (uint64_t)(uintptr_t)invalid.data_ptr();
+    args.ndim = u32_dim(self.dim(), "index_add rank");
+    args.dim = u32_dim(d, "index_add dim");
+    args.dim_size = u32_dim(self.size(d), "index_add dimension");
+    args.index_type = index.scalar_type() == at::kInt ? 0 : 1;
+    args.index_count = index_count;
+    args.total = total;
+    args.alpha = alpha.to<float>();
+    for (int64_t j = 0; j < self.dim(); ++j) {
+        args.sizes[j] = u32_dim(self.size(j), "index_add size");
+        args.self_strides[j] = u32_dim(self.stride(j), "index_add stride");
+        args.src_strides[j] = u32_dim(source.stride(j), "index_add source stride");
+    }
+    if (total != 0) {
+        launch(h_index_add_kernel, args, (total + 3) / 4);
+        check_index_error_flag(invalid, "index_add");
+    }
+    return out;
+}
+
 // ---- reductions -----------------------------------------------------------
 //
 // The kernel reduces the trailing dimension of a contiguous (rows, cols)
@@ -2694,6 +2754,7 @@ void register_vortex_ops() {
     VX_IMPL("stack", &stack_impl);
     VX_IMPL("gather", &gather_impl);
     VX_IMPL("scatter.src", &scatter_impl);
+    VX_IMPL("index_add", &index_add_impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
     VX_IMPL("mean.dim", &mean_impl);

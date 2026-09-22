@@ -168,7 +168,7 @@ DL 侧工作只有 `log_softmax`/`logsumexp` 两个新入口。
    还会在下一步拒绝。softmax 族的「动机消费者」不是 softmax 自己。
 2. `aten::_to_copy` 未注册,`torch.softmax(x, dim, dtype=...)` 的 dtype 分支会死在
    `copy_` 的类型检查上——错误信息该指向 `copy_`,不是 `_to_copy`。
-3. W3.4 还要 embedding/gather、RoPE、dropout(`F.dropout` 也未注册),本轮不宣称接近
+3. W3.4 还要 embedding/高级 gather、RoPE、dropout(`F.dropout` 也未注册),本轮不宣称接近
    W3.4。
 4. `check_reduce_dims` 对 0 维输入的每个 dim 都判越界,而 torch 在 0 维上接受
    `argmax(t, 0)`/`argmax(t, -1)`/`argmax(t, None)` 都返回 0；P5.10 已在
