@@ -62,12 +62,36 @@ typedef enum vx_prim_op {
     // No MIN/ARGMIN: see the note in src/prim_args.h.
 } vx_prim_op;
 
+typedef enum vx_prim_binary_op {
+    VX_PRIM_BINARY_ADD = 0,
+    VX_PRIM_BINARY_SUB = 1,
+    VX_PRIM_BINARY_MUL = 2,
+    VX_PRIM_BINARY_DIV = 3,
+    VX_PRIM_BINARY_MAXIMUM = 4,
+    VX_PRIM_BINARY_MINIMUM = 5,
+} vx_prim_binary_op;
+
 vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path);
 vx_prim_status vx_prim_finalize(void);
 
 // Elementwise unary: out[i] = act(in[i]).
 vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
                              uint64_t in, uint64_t out, uint32_t n);
+
+vx_prim_status vx_prim_binary(vx_queue_h q, vx_prim_binary_op op,
+                              uint64_t dst, uint64_t a, uint64_t b,
+                              uint32_t n);
+
+vx_prim_status vx_prim_scalar(vx_queue_h q, vx_prim_binary_op op,
+                              uint64_t dst, uint64_t a, float value,
+                              uint32_t n, uint32_t reverse);
+
+vx_prim_status vx_prim_broadcast(vx_queue_h q, vx_prim_binary_op op,
+                                 uint64_t dst, uint64_t a, uint64_t b,
+                                 uint32_t total, uint32_t ndim,
+                                 const uint32_t sizes[4],
+                                 const uint32_t a_strides[4],
+                                 const uint32_t b_strides[4]);
 
 // Row-wise reduction over a rows x cols FP32 row-major buffer; out[r] is the
 // reduction of row r. A whole-vector reduction is rows = 1. `out` is rows

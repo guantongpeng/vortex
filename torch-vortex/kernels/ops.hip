@@ -32,40 +32,6 @@
 // second definition is exactly how the host/device layout drift started.
 #include "torch_kernel_args.h"
 
-__device__ inline float torch_binary_apply(float a, float b, uint32_t op) {
-    switch (op) {
-    case TORCH_BINARY_ADD:     return a + b;
-    case TORCH_BINARY_SUB:     return a - b;
-    case TORCH_BINARY_MUL:     return a * b;
-    case TORCH_BINARY_DIV:     return a / b;
-    // torch.maximum/minimum propagate NaN rather than ignoring it, unlike
-    // fmaxf/fminf. `a + b` is NaN whenever either side is.
-    case TORCH_BINARY_MAXIMUM: return (isnan(a) || isnan(b)) ? (a + b) : (a > b ? a : b);
-    case TORCH_BINARY_MINIMUM: return (isnan(a) || isnan(b)) ? (a + b) : (a < b ? a : b);
-    default:                   return a;
-    }
-}
-
-__global__ void binary_op_kernel(binary_args_t* arg) {
-    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
-         i += blockDim.x * gridDim.x) {
-        ((float*)(uintptr_t)arg->dst)[i] =
-            torch_binary_apply(((const float*)(uintptr_t)arg->a)[i],
-                               ((const float*)(uintptr_t)arg->b)[i], arg->op);
-    }
-}
-
-// dst = a <op> value, or value <op> a when `reverse` is set (scalar - tensor).
-__global__ void scalar_op_kernel(scalar_args_t* arg) {
-    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
-         i += blockDim.x * gridDim.x) {
-        const float a = ((const float*)(uintptr_t)arg->a)[i];
-        ((float*)(uintptr_t)arg->dst)[i] =
-            arg->reverse ? torch_binary_apply(arg->value, a, arg->op)
-                         : torch_binary_apply(a, arg->value, arg->op);
-    }
-}
-
 __global__ void fill_kernel(fill_args_t* arg) {
     for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
          i += blockDim.x * gridDim.x) {
@@ -254,24 +220,5 @@ __global__ void copy_strided_kernel(copy_strided_args_t* arg) {
         default:
             break;
         }
-    }
-}
-
-// a <op> b with broadcasting. Strides of 0 are the broadcast dimensions; the
-// output is contiguous, so its index is the linear one. Same decomposition as
-// the copy kernel, which is the shape VOLT handles correctly.
-__global__ void broadcast_op_kernel(broadcast_op_args_t* arg) {
-    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
-         i += blockDim.x * gridDim.x) {
-        uint32_t rem = i, a_off = 0, b_off = 0;
-        for (uint32_t d = arg->ndim; d-- > 0;) {
-            const uint32_t c = rem % arg->sizes[d];
-            rem /= arg->sizes[d];
-            a_off += c * arg->a_strides[d];
-            b_off += c * arg->b_strides[d];
-        }
-        ((float*)(uintptr_t)arg->dst)[i] =
-            torch_binary_apply(((const float*)(uintptr_t)arg->a)[a_off],
-                               ((const float*)(uintptr_t)arg->b)[b_off], arg->op);
     }
 }

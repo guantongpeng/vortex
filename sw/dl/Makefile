@@ -48,18 +48,24 @@ KERNEL_META := [{"name": "sgemm_f32_kernel", "args_size": $(ARGS_SIZE), "static_
 # rowargs gained an op selector when softmax became a family: 2 ptr + 4 u32.
 ifeq ($(XLEN),64)
 PRIM_UNARY_SIZE := 24
+PRIM_BINARY_SIZE := 32
+PRIM_SCALAR_SIZE := 40
+PRIM_BROADCAST_SIZE := 88
 PRIM_REDUCE_SIZE := 40
 PRIM_ROWARGS_SIZE := 32
 PRIM_NORM_SIZE := 64
 PRIM_RMSNORM_SIZE := 40
 else
 PRIM_UNARY_SIZE := 16
+PRIM_BINARY_SIZE := 20
+PRIM_SCALAR_SIZE := 28
+PRIM_BROADCAST_SIZE := 76
 PRIM_REDUCE_SIZE := 28
 PRIM_ROWARGS_SIZE := 24
 PRIM_NORM_SIZE := 40
 PRIM_RMSNORM_SIZE := 28
 endif
-PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
+PRIM_META := [{"name": "prim_unary_kernel", "args_size": $(PRIM_UNARY_SIZE)}, {"name": "prim_binary_kernel", "args_size": $(PRIM_BINARY_SIZE)}, {"name": "prim_scalar_kernel", "args_size": $(PRIM_SCALAR_SIZE)}, {"name": "prim_broadcast_kernel", "args_size": $(PRIM_BROADCAST_SIZE)}, {"name": "prim_reduce_kernel", "args_size": $(PRIM_REDUCE_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_softmax_kernel", "args_size": $(PRIM_ROWARGS_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_layernorm_kernel", "args_size": $(PRIM_NORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}, {"name": "prim_rmsnorm_kernel", "args_size": $(PRIM_RMSNORM_SIZE), "static_lmem_bytes": 256, "max_block": [16, 1, 1]}]
 
 include $(ROOT_DIR)/sw/common/module_slots.mk
 

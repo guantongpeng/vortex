@@ -50,7 +50,7 @@ from torch_vortex import _paths
 # The real guard is not this list: test_sidecar_matches_fresh_compiler_run
 # compares the image metadata against a fresh sizeof() from the host compiler
 # for every kernel, and that covers a struct nobody thought to pin.
-PINNED_SIZES = {"broadcast_op_kernel": 88, "tv_bias_add_kernel": 24}
+PINNED_SIZES = {"tv_bias_add_kernel": 24}
 
 
 @pytest.fixture(scope="module")
@@ -129,7 +129,7 @@ def test_stale_image_is_detected(backend, tmp_path, monkeypatch):
     vxbin = _paths.find_vxbin()
     with open(vxbin + ".meta.json") as f:
         meta = json.load(f)
-    meta["args_sizes"]["binary_op_kernel"] += 8
+    meta["args_sizes"]["tv_bias_add_kernel"] += 8
     bad = tmp_path / "bad.vxbin"
     bad.write_bytes(b"")
     sidecar_path = str(bad) + ".meta.json"

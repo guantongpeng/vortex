@@ -48,6 +48,17 @@ PRIM_UNARY_OP_IS(RECIPROCAL);
 PRIM_UNARY_OP_IS(GELU_ERF);
 #undef PRIM_UNARY_OP_IS
 
+#define PRIM_BINARY_OP_IS(name)                                               \
+    static_assert((int)VX_PRIM_BINARY_##name == (int)VX_PRIM_BIN_##name,      \
+                  "public and kernel binary op numbers disagree: " #name)
+PRIM_BINARY_OP_IS(ADD);
+PRIM_BINARY_OP_IS(SUB);
+PRIM_BINARY_OP_IS(MUL);
+PRIM_BINARY_OP_IS(DIV);
+PRIM_BINARY_OP_IS(MAXIMUM);
+PRIM_BINARY_OP_IS(MINIMUM);
+#undef PRIM_BINARY_OP_IS
+
 // The reductions cannot share the unary numbers -- both live in vx_prim_op --
 // so they are offset by VX_PRIM_OP_SUM and the host subtracts. These pin the
 // offset per op rather than the values, which is the property vx_prim_reduce
@@ -68,6 +79,9 @@ struct PrimState {
     vx_device_h dev = nullptr;
     vx_module_h module = nullptr;
     vx_kernel_h unary = nullptr;
+    vx_kernel_h binary = nullptr;
+    vx_kernel_h scalar = nullptr;
+    vx_kernel_h broadcast = nullptr;
     vx_kernel_h reduce = nullptr;
     vx_kernel_h softmax = nullptr;
     vx_kernel_h layernorm = nullptr;
@@ -121,6 +135,9 @@ vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
         vx_kernel_h* slot;
     } entries[] = {
         {"prim_unary_kernel", &g_prim.unary},
+        {"prim_binary_kernel", &g_prim.binary},
+        {"prim_scalar_kernel", &g_prim.scalar},
+        {"prim_broadcast_kernel", &g_prim.broadcast},
         {"prim_reduce_kernel", &g_prim.reduce},
         {"prim_softmax_kernel", &g_prim.softmax},
         {"prim_layernorm_kernel", &g_prim.layernorm},
@@ -139,7 +156,8 @@ vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
 
 vx_prim_status vx_prim_finalize(void) {
     if (!g_prim.module) return VX_PRIM_OK;
-    vx_kernel_h ks[] = {g_prim.unary, g_prim.reduce, g_prim.softmax,
+    vx_kernel_h ks[] = {g_prim.unary, g_prim.binary, g_prim.scalar,
+                        g_prim.broadcast, g_prim.reduce, g_prim.softmax,
                         g_prim.layernorm, g_prim.rmsnorm};
     for (vx_kernel_h k : ks) {
         if (k) vx_kernel_release(k);
@@ -163,6 +181,64 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
     // Single-warp CTAs for pure elementwise work (P2-03 constraint).
     return launch(q, g_prim.unary, &args, sizeof(args),
                   (n + 3) / 4, 4, 0);
+}
+
+vx_prim_status vx_prim_binary(vx_queue_h q, vx_prim_binary_op op,
+                              uint64_t dst, uint64_t a, uint64_t b,
+                              uint32_t n) {
+    if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
+    if (!dst || !a || !b || n == 0 || op > VX_PRIM_BINARY_MINIMUM) {
+        return VX_PRIM_ERR_BAD_ARGS;
+    }
+    vx_prim_binary_args_t args = {};
+    args.dst = (vx_dl_ptr_t)dst;
+    args.a = (vx_dl_ptr_t)a;
+    args.b = (vx_dl_ptr_t)b;
+    args.n = n;
+    args.op = (uint32_t)op;
+    return launch(q, g_prim.binary, &args, sizeof(args), (n + 3) / 4, 4, 0);
+}
+
+vx_prim_status vx_prim_scalar(vx_queue_h q, vx_prim_binary_op op,
+                              uint64_t dst, uint64_t a, float value,
+                              uint32_t n, uint32_t reverse) {
+    if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
+    if (!dst || !a || n == 0 || op > VX_PRIM_BINARY_MINIMUM || reverse > 1) {
+        return VX_PRIM_ERR_BAD_ARGS;
+    }
+    vx_prim_scalar_args_t args = {};
+    args.dst = (vx_dl_ptr_t)dst;
+    args.a = (vx_dl_ptr_t)a;
+    args.value = value;
+    args.n = n;
+    args.op = (uint32_t)op;
+    args.reverse = reverse;
+    return launch(q, g_prim.scalar, &args, sizeof(args), (n + 3) / 4, 4, 0);
+}
+
+vx_prim_status vx_prim_broadcast(vx_queue_h q, vx_prim_binary_op op,
+                                 uint64_t dst, uint64_t a, uint64_t b,
+                                 uint32_t total, uint32_t ndim,
+                                 const uint32_t sizes[4],
+                                 const uint32_t a_strides[4],
+                                 const uint32_t b_strides[4]) {
+    if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
+    if (!dst || !a || !b || total == 0 || ndim > 4 ||
+        op > VX_PRIM_BINARY_MINIMUM || !sizes || !a_strides || !b_strides) {
+        return VX_PRIM_ERR_BAD_ARGS;
+    }
+    vx_prim_broadcast_args_t args = {};
+    args.dst = (vx_dl_ptr_t)dst;
+    args.a = (vx_dl_ptr_t)a;
+    args.b = (vx_dl_ptr_t)b;
+    args.op = (uint32_t)op;
+    args.ndim = ndim;
+    args.total = total;
+    std::memcpy(args.sizes, sizes, sizeof(args.sizes));
+    std::memcpy(args.a_strides, a_strides, sizeof(args.a_strides));
+    std::memcpy(args.b_strides, b_strides, sizeof(args.b_strides));
+    return launch(q, g_prim.broadcast, &args, sizeof(args), (total + 3) / 4,
+                  4, 0);
 }
 
 static bool is_arg_op(vx_prim_op op) {

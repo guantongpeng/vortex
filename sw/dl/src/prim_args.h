@@ -59,6 +59,52 @@ typedef struct {
     uint32_t op;   // vx_prim_op_e
 } vx_prim_unary_args_t;
 
+// Binary elementwise operations over n FP32 values. The three addresses are
+// independent so in-place callers can use dst == a or dst == b safely.
+typedef enum {
+    VX_PRIM_BIN_ADD = 0,
+    VX_PRIM_BIN_SUB = 1,
+    VX_PRIM_BIN_MUL = 2,
+    VX_PRIM_BIN_DIV = 3,
+    VX_PRIM_BIN_MAXIMUM = 4,
+    VX_PRIM_BIN_MINIMUM = 5,
+} vx_prim_binary_op_e;
+
+typedef struct {
+    vx_dl_ptr_t dst;
+    vx_dl_ptr_t a;
+    vx_dl_ptr_t b;
+    uint32_t n;
+    uint32_t op;   // vx_prim_binary_op_e
+} vx_prim_binary_args_t;
+
+// Scalar elementwise operation. `reverse` selects value <op> a, which is
+// needed for scalar - tensor and scalar / tensor.
+typedef struct {
+    vx_dl_ptr_t dst;
+    vx_dl_ptr_t a;
+    float value;
+    uint32_t n;
+    uint32_t op;   // vx_prim_binary_op_e
+    uint32_t reverse;
+    uint32_t pad;
+} vx_prim_scalar_args_t;
+
+// Strided broadcast operation. The output is contiguous and the operand
+// strides are measured in FP32 elements; zero repeats a broadcast dimension.
+typedef struct {
+    vx_dl_ptr_t dst;
+    vx_dl_ptr_t a;
+    vx_dl_ptr_t b;
+    uint32_t op;   // vx_prim_binary_op_e
+    uint32_t ndim;
+    uint32_t total;
+    uint32_t pad;
+    uint32_t sizes[4];
+    uint32_t a_strides[4];
+    uint32_t b_strides[4];
+} vx_prim_broadcast_args_t;
+
 // Reduction operations, one row at a time. Append-only, same as the unary
 // numbering, and for the same reason: the host picks the kernel's op with a
 // subtraction, so a value that moved would select a different reduction

@@ -76,6 +76,58 @@ __global__ void prim_unary_kernel(vx_prim_unary_args_t* arg) {
     }
 }
 
+__device__ inline float prim_binary_apply(float a, float b, uint32_t op) {
+    switch (op) {
+    case VX_PRIM_BIN_ADD: return a + b;
+    case VX_PRIM_BIN_SUB: return a - b;
+    case VX_PRIM_BIN_MUL: return a * b;
+    case VX_PRIM_BIN_DIV: return a / b;
+    case VX_PRIM_BIN_MAXIMUM:
+        return (isnan(a) || isnan(b)) ? (a + b) : (a > b ? a : b);
+    case VX_PRIM_BIN_MINIMUM:
+        return (isnan(a) || isnan(b)) ? (a + b) : (a < b ? a : b);
+    default: return a;
+    }
+}
+
+__global__ void prim_binary_kernel(vx_prim_binary_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
+         i += blockDim.x * gridDim.x) {
+        ((float*)(uintptr_t)arg->dst)[i] =
+            prim_binary_apply(((const float*)(uintptr_t)arg->a)[i],
+                              ((const float*)(uintptr_t)arg->b)[i], arg->op);
+    }
+}
+
+__global__ void prim_scalar_kernel(vx_prim_scalar_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
+         i += blockDim.x * gridDim.x) {
+        const float a = ((const float*)(uintptr_t)arg->a)[i];
+        ((float*)(uintptr_t)arg->dst)[i] =
+            arg->reverse ? prim_binary_apply(arg->value, a, arg->op)
+                         : prim_binary_apply(a, arg->value, arg->op);
+    }
+}
+
+__global__ void prim_broadcast_kernel(vx_prim_broadcast_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->total;
+         i += blockDim.x * gridDim.x) {
+        uint32_t rem = i;
+        uint32_t a_offset = 0;
+        uint32_t b_offset = 0;
+        for (uint32_t d = arg->ndim; d-- > 0;) {
+            const uint32_t coord = rem % arg->sizes[d];
+            rem /= arg->sizes[d];
+            a_offset += coord * arg->a_strides[d];
+            b_offset += coord * arg->b_strides[d];
+        }
+        ((float*)(uintptr_t)arg->dst)[i] =
+            prim_binary_apply(((const float*)(uintptr_t)arg->a)[a_offset],
+                              ((const float*)(uintptr_t)arg->b)[b_offset],
+                              arg->op);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Row reduce: one 16-thread CTA per row, over that row's `cols` values.
 // Multi-warp CTA with LMEM staging; out[r] = f(row r).

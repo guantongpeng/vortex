@@ -683,9 +683,10 @@ C10_REGISTER_GUARD_IMPL(PrivateUse1, VortexGuardImpl);
 
 namespace {
 
-// The argument blocks (binary_args_t, fill_args_t, conv_args_t, ...) are
-// defined once in kernels/torch_kernel_args.h and shared verbatim with the
-// device compiler. Never declare one locally in this file.
+// The remaining torch-image argument blocks are defined once in
+// kernels/torch_kernel_args.h and shared verbatim with the device compiler.
+// Elementwise binary blocks live in sw/dl/src/prim_args.h and are submitted
+// through the prim API above.
 
 hipModule_t g_ops_module = nullptr;
 
@@ -706,8 +707,8 @@ vx_device_h g_dl_device = nullptr;
 
 void launch_binary_op(uint64_t dst, uint64_t a, uint64_t b, uint32_t n,
                       uint32_t op) {
-    binary_args_t args = {dst, a, b, n, op};
-    launch(h_binary_op_kernel, args, (n + 3) / 4);
+    DL_LAUNCH(vx_prim_binary(current_queue(), (vx_prim_binary_op)op,
+                             dst, a, b, n));
 }
 
 // The unary operations are sw/dl's prim kernel rather than one of ours (W3.1).
@@ -727,8 +728,8 @@ void launch_unary_op(uint64_t dst, uint64_t a, uint32_t n, uint32_t op) {
 
 void launch_scalar_op(uint64_t dst, uint64_t a, float value, uint32_t n,
                       uint32_t op, uint32_t reverse) {
-    scalar_args_t args = {dst, a, value, n, op, reverse, 0};
-    launch(h_scalar_op_kernel, args, (n + 3) / 4);
+    DL_LAUNCH(vx_prim_scalar(current_queue(), (vx_prim_binary_op)op,
+                             dst, a, value, n, reverse));
 }
 
 void check_vortex_f32(const torch::Tensor& t, const char* what) {
@@ -1835,17 +1836,19 @@ static bool broadcast_layout(const torch::Tensor& a, const torch::Tensor& b,
 
 static void launch_broadcast_op(const torch::Tensor& a, const torch::Tensor& b,
                                 torch::Tensor& out, uint32_t op) {
-    broadcast_op_args_t args = {};
-    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
-    args.a = (uint64_t)(uintptr_t)a.data_ptr();
-    args.b = (uint64_t)(uintptr_t)b.data_ptr();
-    args.op = op;
-    args.total = u32_numel(out, "elementwise output");
-    TORCH_CHECK(broadcast_layout(a, b, args.sizes, args.a_strides,
-                                 args.b_strides, args.ndim),
+    uint32_t sizes[4] = {};
+    uint32_t a_strides[4] = {};
+    uint32_t b_strides[4] = {};
+    uint32_t ndim = 0;
+    const uint32_t total = u32_numel(out, "elementwise output");
+    TORCH_CHECK(broadcast_layout(a, b, sizes, a_strides, b_strides, ndim),
                 "torch_vortex: shapes ", a.sizes(), " and ", b.sizes(),
                 " do not broadcast, or exceed 4 dimensions");
-    launch(h_broadcast_op_kernel, args, (args.total + 3) / 4);
+    DL_LAUNCH(vx_prim_broadcast(current_queue(), (vx_prim_binary_op)op,
+                                (uint64_t)(uintptr_t)out.data_ptr(),
+                                (uint64_t)(uintptr_t)a.data_ptr(),
+                                (uint64_t)(uintptr_t)b.data_ptr(), total, ndim,
+                                sizes, a_strides, b_strides));
 }
 
 static void launch_elementwise(const torch::Tensor& a, const torch::Tensor& b,

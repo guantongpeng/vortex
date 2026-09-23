@@ -39,8 +39,6 @@ from torch_vortex import _paths
 
 RNG_ARGS = "<QIIIII I"      # vx_rng_uniform_args_t: out, off_lo, off_hi, k0, k1, n, pad
 RNG_ARGS_SIZE = 32
-HIP_BINARY_ARGS = "<QQQII"  # torch-vortex binary_args_t
-HIP_BINARY_ARGS_SIZE = 32
 
 
 def _hip():

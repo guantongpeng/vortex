@@ -134,7 +134,7 @@
 ### 2.2 DL 与 torch-vortex 统一
 
 - [x] conv、pool、BN、GEMM、norm、一元和归约的主要路径已迁移到 `sw/dl`。
-- [ ] 给 `sw/dl` prim 增加二元 elementwise 入口，迁移 `binary_op`、scalar 和 broadcast kernel。
+- [x] 给 `sw/dl` prim 增加二元 elementwise 入口，迁移 `binary_op`、scalar 和 broadcast kernel；旧 torch 镜像入口已删除，详见 [`p2_04_prim_binary.md`](p2_04_prim_binary.md)。
 - [ ] 为 DL library 使用调用方 device/context/queue，消除新的全局 singleton。
 - [x] BLAS GEMM 增加 `transb`，linear 直接读取 `[N,K]` 权重，消除 `w.t().contiguous()` 临时拷贝；详见 [`p2_02_gemm_transb.md`](p2_02_gemm_transb.md)。
 - [x] `bmm` 已改为单次 grid-z batch-stride/tiled GEMM，按真实 Tensor batch stride 传参；addmm/linear epilogue 保持独立，详见 [`p2_03_batched_gemm.md`](p2_03_batched_gemm.md)。

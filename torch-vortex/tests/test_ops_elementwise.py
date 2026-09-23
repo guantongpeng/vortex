@@ -86,6 +86,13 @@ def test_add_and_mul(backend):
     assert_matches_cpu(a.to("vortex") * b.to("vortex"), a * b)
 
 
+def test_binary_family_is_owned_by_dl_prim(backend):
+    sizes = backend._ext.arg_sizes()
+    assert "binary_op_kernel" not in sizes
+    assert "scalar_op_kernel" not in sizes
+    assert "broadcast_op_kernel" not in sizes
+
+
 def test_scalar_and_inplace_operands_are_supported(backend):
     """`x + 1.0` used to be refused because it arrives as a 0-dim CPU tensor.
 

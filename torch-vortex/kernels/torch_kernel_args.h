@@ -48,8 +48,8 @@
 //
 // The unary operations are not here: they are sw/dl's (vx_prim_op), because
 // that library's prim module implements them and this image would only be a
-// second copy of the same switch. The binary and scalar forms stay, since the
-// DL library has no binary elementwise op.
+// second copy of the same switch. Binary operation labels remain here for the
+// dispatcher; their argument blocks and kernels live in sw/dl's prim image.
 
 enum TorchBinaryOp {
     TORCH_BINARY_ADD = 0,
@@ -69,47 +69,6 @@ enum TorchCopyDType {
     TORCH_COPY_I32,
     TORCH_COPY_I64,
     TORCH_COPY_BOOL,
-};
-
-// binary_op_kernel: dst = a <TorchBinaryOp> b. `op` was previously padding,
-// so this costs nothing in size or ABI.
-struct binary_args_t {
-    uint64_t dst;
-    uint64_t a;
-    uint64_t b;
-    uint32_t n;
-    uint32_t op;
-};
-
-// scalar_op_kernel: dst = a <TorchBinaryOp> value, value first if reverse.
-struct scalar_args_t {
-    uint64_t dst;
-    uint64_t a;
-    float value;
-    uint32_t n;
-    uint32_t op;
-    uint32_t reverse;
-    uint32_t pad;
-};
-
-// broadcast_op_kernel: dst = a <TorchBinaryOp> b for operands whose shapes
-// broadcast against each other, up to 4 dimensions. The output is contiguous,
-// so only the operands need strides; a broadcast dimension is a stride of 0,
-// which is what `x + bias` needs and what the copy kernel already relies on.
-//
-// The host is responsible for having already checked that the shapes
-// broadcast; this kernel computes offsets and nothing else.
-struct broadcast_op_args_t {
-    uint64_t dst;
-    uint64_t a;
-    uint64_t b;
-    uint32_t op;
-    uint32_t ndim;
-    uint32_t total;
-    uint32_t pad;
-    uint32_t sizes[4];
-    uint32_t a_strides[4];
-    uint32_t b_strides[4];
 };
 
 // fill_kernel: dst[i] = value
@@ -223,9 +182,6 @@ struct bias_args_t {
 // adding one row.
 
 #define TORCH_KERNEL_TABLE(X)                                                  \
-    X(binary_op_kernel, binary_args_t, 0, 0)                                   \
-    X(broadcast_op_kernel, broadcast_op_args_t, 0, 0)                         \
-    X(scalar_op_kernel, scalar_args_t, 0, 0)                                   \
     X(copy_strided_kernel, copy_strided_args_t, 0, 0)                         \
     X(widen_u32_i64_kernel, widen_args_t, 0, 0)                               \
     X(cat_kernel, cat_args_t, 0, 0)                                           \
