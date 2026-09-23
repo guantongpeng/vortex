@@ -816,13 +816,22 @@ static torch::Tensor empty_strided_impl(
     return torch::Tensor(std::move(base));
 }
 
-// copy_: same dtype, same shape, contiguous destination, offset 0, distinct
-// storage. Everything else is refused by name.
-//
-// The previous version memcpy'd self.nbytes() bytes whatever the source was:
-// a dtype change became a bit-pattern copy, a smaller source was over-read
-// (a host out-of-bounds read on H2D), and a non-contiguous tensor copied
-// storage order rather than its logical contents.
+static uint32_t copy_dtype(c10::ScalarType dtype) {
+    switch (dtype) {
+    case at::kFloat: return TORCH_COPY_F32;
+    case at::kHalf: return TORCH_COPY_F16;
+    case at::kBFloat16: return TORCH_COPY_BF16;
+    case at::kInt: return TORCH_COPY_I32;
+    case at::kLong: return TORCH_COPY_I64;
+    case at::kBool: return TORCH_COPY_BOOL;
+    default:
+        TORCH_CHECK(false, "torch_vortex: copy/to does not support dtype ", dtype);
+    }
+}
+
+// copy_: same and converted dtypes, broadcast-compatible shapes, and arbitrary
+// strides are handled by the device copy kernel. A linear hipMemcpy remains
+// the fast path for equal dtype and equal contiguous shapes.
 static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src);
 
 static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
@@ -849,15 +858,21 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
         kind = hipMemcpyDeviceToHost;
     }
 
-    TORCH_CHECK(self.scalar_type() == src.scalar_type(),
-                "torch_vortex: copy_ does not convert dtypes yet (",
-                src.scalar_type(), " -> ", self.scalar_type(),
-                "); casting is W3.2/W4.1 in docs/mydocs/pytorch_plan.md");
-    TORCH_CHECK(self.sizes() == src.sizes(), "torch_vortex: copy_ shape mismatch: ",
-                self.sizes(), " <- ", src.sizes());
+    copy_dtype(self.scalar_type());
+    copy_dtype(src.scalar_type());
+    TORCH_CHECK(src.dim() <= self.dim(),
+                "torch_vortex: copy_ source shape ", src.sizes(),
+                " cannot broadcast to destination ", self.sizes());
+    const int64_t rank_delta = self.dim() - src.dim();
+    for (int64_t d = 0; d < src.dim(); ++d) {
+        const int64_t source_extent = src.size(d);
+        const int64_t destination_extent = self.size(d + rank_delta);
+        TORCH_CHECK(source_extent == 1 || source_extent == destination_extent,
+                    "torch_vortex: copy_ shape mismatch: source ", src.sizes(),
+                    " cannot broadcast to destination ", self.sizes());
+    }
 
-    const int64_t bytes = self.numel() * self.element_size();
-    if (bytes == 0) {
+    if (self.numel() == 0) {
         return self;
     }
     if (non_blocking) {
@@ -875,8 +890,12 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
         ++g_stats.host_numeric_ops;
     }
 
-    if (self.is_contiguous() && self.storage_offset() == 0 &&
-        src_t.is_contiguous() && src_t.storage_offset() == 0) {
+    const bool same_dtype = self.scalar_type() == src.scalar_type();
+    const bool same_shape = self.sizes() == src_t.sizes();
+    if (same_dtype && same_shape && self.is_contiguous() &&
+        self.storage_offset() == 0 && src_t.is_contiguous() &&
+        src_t.storage_offset() == 0) {
+        const int64_t bytes = self.numel() * self.element_size();
         VX_CHECK(hipMemcpy(self.data_ptr(), src_t.data_ptr(), (size_t)bytes, kind));
         // hipMemcpy enqueues and then waits on its own completion event; the
         // queue is FIFO, so everything enqueued before it has retired by the
@@ -892,47 +911,41 @@ static torch::Tensor& copy_impl(torch::Tensor& self, const torch::Tensor& src,
         return self;
     }
 
-    // Strided on at least one side. The copy kernel runs on the device and
-    // addresses device memory, so *both* operands have to be there: a host
-    // source is staged up, and a host destination is gathered into a
-    // contiguous device buffer and copied down. Passing a CPU pointer to the
-    // kernel (as the first version of this did) writes zeros into the device
-    // and leaves the host buffer untouched.
+    // Conversion and strided addressing happen on device memory. Host inputs
+    // are staged with their original dtype, never with the destination dtype.
     torch::Tensor device_src = src_t;
     if (!src_dev) {
-        device_src = torch::empty(src_t.sizes(), self.options());
-        VX_CHECK(hipMemcpy(device_src.data_ptr(), src_t.data_ptr(), (size_t)bytes,
+        device_src = torch::empty(src_t.sizes(),
+                                  self.options().dtype(src.scalar_type()));
+        const int64_t src_bytes = src_t.numel() * src_t.element_size();
+        VX_CHECK(hipMemcpy(device_src.data_ptr(), src_t.data_ptr(),
+                           (size_t)src_bytes,
                            hipMemcpyHostToDevice));
-        g_stats.h2d_bytes += (uint64_t)bytes;
+        g_stats.h2d_bytes += (uint64_t)src_bytes;
         note_default_queue_barrier();
     }
 
+    torch::Tensor device_dst = self;
     if (!self_dev) {
-        // Staged with the DESTINATION's layout, not a contiguous one: .cpu()
-        // on a transposed tensor asks for a transposed CPU tensor
-        // (empty_like preserves strides), and the hipMemcpy below is linear.
-        // Staging contiguous and memcpy-ing into a strided host buffer lands
-        // every element in the wrong place -- the values are all there, which
-        // is what made it look like a kernel bug.
-        auto staged = at::empty_strided(self.sizes(), self.strides(),
-                                        device_src.options());
-        launch_copy_strided(staged, device_src);
-        VX_CHECK(hipMemcpy(self.data_ptr(), staged.data_ptr(), (size_t)bytes,
-                           hipMemcpyDeviceToHost));
-        g_stats.d2h_bytes += (uint64_t)bytes;
+        device_dst = torch::empty(self.sizes(),
+                                  self.options().device(c10::Device(
+                                      c10::DeviceType::PrivateUse1, 0)));
+    }
+    launch_copy_strided(device_dst, device_src);
+
+    if (!self_dev) {
+        const int64_t dst_bytes = device_dst.numel() * device_dst.element_size();
+        auto staged = torch::empty(self.sizes(),
+                                   torch::TensorOptions().dtype(self.scalar_type()));
+        VX_CHECK(hipMemcpy(staged.data_ptr(), device_dst.data_ptr(),
+                           (size_t)dst_bytes, hipMemcpyDeviceToHost));
+        g_stats.d2h_bytes += (uint64_t)dst_bytes;
         note_default_queue_barrier();
+        self.copy_(staged);
         return self;
     }
 
-    launch_copy_strided(self, device_src);
-    g_stats.d2d_bytes += (uint64_t)bytes;
-    // No note_default_queue_barrier here. It sat here while this branch ended
-    // in a hipMemcpy, which enqueues and then waits, so everything before it
-    // had retired; launch_copy_strided only *enqueues*. Saying the queue had
-    // drained cleared the allocator's epoch, so the next free took the
-    // immediate hipFree path even though the copy was still queued to read
-    // the source -- and this is now the shape softmax's moved path hands it.
-    // launch() already recorded the work.
+    g_stats.d2d_bytes += (uint64_t)(self.numel() * self.element_size());
     return self;
 }
 
@@ -1025,18 +1038,32 @@ static torch::Tensor view_impl(const torch::Tensor& self,
 // strided *destination*, which v1 used to refuse.
 
 static void launch_copy_strided(torch::Tensor& dst, const torch::Tensor& src) {
-    TORCH_CHECK(dst.dim() == src.dim(), "torch_vortex: copy rank mismatch");
     TORCH_CHECK(dst.dim() <= 4, "torch_vortex: copy supports at most 4 dims, got ",
                 dst.dim());
+    TORCH_CHECK(src.dim() <= dst.dim(), "torch_vortex: copy source rank ", src.dim(),
+                " exceeds destination rank ", dst.dim());
     copy_strided_args_t args = {};
     args.dst = (uint64_t)(uintptr_t)dst.data_ptr();
     args.src = (uint64_t)(uintptr_t)src.data_ptr();
     args.ndim = (uint32_t)dst.dim();
     args.total = u32_numel(dst, "copy");
+    args.dst_type = copy_dtype(dst.scalar_type());
+    args.src_type = copy_dtype(src.scalar_type());
+    const int64_t rank_delta = dst.dim() - src.dim();
     for (int64_t i = 0; i < dst.dim(); ++i) {
         args.sizes[i] = u32_dim(dst.size(i), "copy size");
         args.dst_strides[i] = u32_dim(dst.stride(i), "copy stride");
-        args.src_strides[i] = u32_dim(src.stride(i), "copy stride");
+        if (i < rank_delta) {
+            args.src_strides[i] = 0;
+        } else {
+            const int64_t src_dim = i - rank_delta;
+            TORCH_CHECK(src.size(src_dim) == 1 || src.size(src_dim) == dst.size(i),
+                        "torch_vortex: copy source shape ", src.sizes(),
+                        " cannot broadcast to destination ", dst.sizes());
+            args.src_strides[i] = src.size(src_dim) == 1
+                                      ? 0
+                                      : u32_dim(src.stride(src_dim), "copy stride");
+        }
     }
     launch(h_copy_strided_kernel, args, (args.total + 3) / 4);
 }

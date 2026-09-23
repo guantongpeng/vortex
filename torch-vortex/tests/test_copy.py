@@ -83,11 +83,32 @@ def test_self_copy_is_a_noop(backend):
     assert st["d2d_bytes"] == 0, "self copy moved bytes"
 
 
-def test_rejects_dtype_conversion(backend):
-    dst = torch.empty(4, dtype=torch.float64, device="vortex")
-    src = torch.ones(4, device="vortex")
-    with assert_rejected("does not convert dtypes", backend):
-        dst.copy_(src)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.int32,
+                                    torch.int64, torch.bool])
+def test_dtype_conversion_roundtrip(backend, dtype):
+    src = torch.tensor([-3.5, -1.0, 0.0, 1.25, 7.0], dtype=torch.float32)
+    want = src.to(dtype)
+    got = torch.empty(src.shape, dtype=dtype, device="vortex")
+    got.copy_(src)
+    assert torch.equal(got.cpu(), want)
+
+    back = torch.empty(src.shape, dtype=torch.float32, device="vortex")
+    back.copy_(got)
+    assert torch.equal(back.cpu(), want.to(torch.float32))
+
+
+def test_broadcast_copy(backend):
+    src = torch.tensor([[1.0, 2.0, 3.0]])
+    dst = torch.empty((4, 3), device="vortex")
+    dst.copy_(src)
+    assert torch.equal(dst.cpu(), src.expand(4, 3))
+
+
+def test_broadcast_copy_with_dtype_conversion(backend):
+    src = torch.tensor([[1.5, -2.0]], dtype=torch.float32)
+    dst = torch.empty((3, 2), dtype=torch.float16, device="vortex")
+    dst.copy_(src)
+    assert torch.equal(dst.cpu(), src.to(torch.float16).expand(3, 2))
 
 
 def test_rejects_shape_mismatch(backend):

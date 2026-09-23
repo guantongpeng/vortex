@@ -61,6 +61,15 @@ enum TorchBinaryOp {
     TORCH_BINARY_COUNT
 };
 
+enum TorchCopyDType {
+    TORCH_COPY_F32 = 0,
+    TORCH_COPY_F16,
+    TORCH_COPY_BF16,
+    TORCH_COPY_I32,
+    TORCH_COPY_I64,
+    TORCH_COPY_BOOL,
+};
+
 // binary_op_kernel: dst = a <TorchBinaryOp> b. `op` was previously padding,
 // so this costs nothing in size or ABI.
 struct binary_args_t {
@@ -122,6 +131,8 @@ struct copy_strided_args_t {
     uint64_t src;
     uint32_t ndim;
     uint32_t total;
+    uint32_t dst_type;
+    uint32_t src_type;
     uint32_t sizes[4];
     uint32_t dst_strides[4];
     uint32_t src_strides[4];

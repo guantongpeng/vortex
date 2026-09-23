@@ -25,6 +25,7 @@
 #include <hip/hip_runtime.h>
 #include <math.h>
 #include <stdint.h>
+#include <vortex/dtypes.h>
 
 // Argument blocks and the op-code enums are defined once, for both the device
 // and host compilers, in torch_kernel_args.h. Do not declare them locally: a
@@ -201,8 +202,52 @@ __global__ void copy_strided_kernel(copy_strided_args_t* arg) {
             dst_off += c * arg->dst_strides[d];
             src_off += c * arg->src_strides[d];
         }
-        ((float*)(uintptr_t)arg->dst)[dst_off] =
-            ((const float*)(uintptr_t)arg->src)[src_off];
+        float value;
+        switch (arg->src_type) {
+        case TORCH_COPY_F32:
+            value = ((const float*)(uintptr_t)arg->src)[src_off];
+            break;
+        case TORCH_COPY_F16:
+            value = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->src)[src_off]);
+            break;
+        case TORCH_COPY_BF16:
+            value = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)arg->src)[src_off]);
+            break;
+        case TORCH_COPY_I32:
+            value = (float)((const int32_t*)(uintptr_t)arg->src)[src_off];
+            break;
+        case TORCH_COPY_I64:
+            value = (float)((const int64_t*)(uintptr_t)arg->src)[src_off];
+            break;
+        case TORCH_COPY_BOOL:
+            value = (float)((const uint8_t*)(uintptr_t)arg->src)[src_off];
+            break;
+        default:
+            value = 0.0f;
+            break;
+        }
+        switch (arg->dst_type) {
+        case TORCH_COPY_F32:
+            ((float*)(uintptr_t)arg->dst)[dst_off] = value;
+            break;
+        case TORCH_COPY_F16:
+            ((vx_fp16_t*)(uintptr_t)arg->dst)[dst_off] = vx_f32_to_fp16(value);
+            break;
+        case TORCH_COPY_BF16:
+            ((vx_bf16_t*)(uintptr_t)arg->dst)[dst_off] = vx_f32_to_bf16(value);
+            break;
+        case TORCH_COPY_I32:
+            ((int32_t*)(uintptr_t)arg->dst)[dst_off] = (int32_t)value;
+            break;
+        case TORCH_COPY_I64:
+            ((int64_t*)(uintptr_t)arg->dst)[dst_off] = (int64_t)value;
+            break;
+        case TORCH_COPY_BOOL:
+            ((uint8_t*)(uintptr_t)arg->dst)[dst_off] = value != 0.0f;
+            break;
+        default:
+            break;
+        }
     }
 }
 
