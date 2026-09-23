@@ -93,15 +93,16 @@ const char* vx_blas_kernel_name(vx_blas_dtype dt) {
     return kVariantNames[dt];
 }
 
-vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
-                               vx_blas_dtype dt,
-                               uint32_t M, uint32_t N, uint32_t K,
-                               float alpha, float beta,
-                               uint64_t A, uint64_t B, uint64_t C,
-                               uint32_t transb) {
+vx_blas_status vx_blas_batched_gemm(vx_queue_h q,
+                                    vx_blas_dtype dt,
+                                    uint32_t batch, uint32_t M, uint32_t N,
+                                    uint32_t K, float alpha, float beta,
+                                    uint64_t A, uint64_t B, uint64_t C,
+                                    uint64_t stride_a, uint64_t stride_b,
+                                    uint64_t stride_c, uint32_t transb) {
     if (!g_state.module) return VX_BLAS_ERR_NOT_INITIALIZED;
     if ((int)dt < 0 || (int)dt > 2) return VX_BLAS_ERR_BAD_ARGS;
-    if (M == 0 || N == 0 || K == 0) return VX_BLAS_ERR_BAD_ARGS;
+    if (batch == 0 || M == 0 || N == 0 || K == 0) return VX_BLAS_ERR_BAD_ARGS;
     if (!A || !B || !C) return VX_BLAS_ERR_BAD_ARGS;
 
     vx_blas_gemm_args_t args = {};
@@ -114,6 +115,10 @@ vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
     args.alpha = alpha;
     args.beta = beta;
     args.transb = transb ? 1u : 0u;
+    args.stride_a = stride_a;
+    args.stride_b = stride_b;
+    args.stride_c = stride_c;
+    args.batch = batch;
 
     vx_launch_info_t launch = {};
     launch.struct_size = sizeof(launch);
@@ -123,7 +128,7 @@ vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
     launch.ndim = 3;
     launch.grid_dim[0] = (N + 15) / 16;
     launch.grid_dim[1] = (M + 15) / 16;
-    launch.grid_dim[2] = 1;
+    launch.grid_dim[2] = batch;
     // Unused dimensions must be 1, never 0: the KMU derives the CTA shape
     // from these fields and a zero collapses it (measured: kernels never
     // write back).
@@ -136,6 +141,16 @@ vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
         return VX_BLAS_ERR_LAUNCH;
     }
     return VX_BLAS_OK;
+}
+
+vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
+                               vx_blas_dtype dt,
+                               uint32_t M, uint32_t N, uint32_t K,
+                               float alpha, float beta,
+                               uint64_t A, uint64_t B, uint64_t C,
+                               uint32_t transb) {
+    return vx_blas_batched_gemm(q, dt, 1, M, N, K, alpha, beta, A, B, C,
+                                0, 0, 0, transb);
 }
 
 vx_blas_status vx_blas_gemm(vx_queue_h q,

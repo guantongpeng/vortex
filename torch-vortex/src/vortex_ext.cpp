@@ -2604,19 +2604,15 @@ static torch::Tensor bmm_impl(const torch::Tensor& a,
         return out.zero_();
     }
 
-    const uint64_t a_addr = (uint64_t)(uintptr_t)a.data_ptr();
-    const uint64_t b_addr = (uint64_t)(uintptr_t)b.data_ptr();
-    const uint64_t c_addr = (uint64_t)(uintptr_t)out.data_ptr();
-    const uint64_t a_stride = (uint64_t)m * k * sizeof(float);
-    const uint64_t b_stride = (uint64_t)k * n * sizeof(float);
-    const uint64_t c_stride = (uint64_t)m * n * sizeof(float);
-    auto queue = current_queue();
-    for (int64_t i = 0; i < batch; ++i) {
-        // beta=0 suppresses reads of the uninitialized output in the DL kernel.
-        DL_LAUNCH(vx_blas_gemm(queue, VX_BLAS_F32, um, un, uk, 1.0f, 0.0f,
-                               a_addr + i * a_stride, b_addr + i * b_stride,
-                               c_addr + i * c_stride));
-    }
+    const uint64_t a_stride = (uint64_t)a.stride(0) * sizeof(float);
+    const uint64_t b_stride = (uint64_t)b.stride(0) * sizeof(float);
+    const uint64_t c_stride = (uint64_t)out.stride(0) * sizeof(float);
+    // beta=0 suppresses reads of the uninitialized output in the DL kernel.
+    DL_LAUNCH(vx_blas_batched_gemm(
+        current_queue(), VX_BLAS_F32, u32_dim(batch, "bmm batch"), um, un, uk,
+        1.0f, 0.0f, (uint64_t)(uintptr_t)a.data_ptr(),
+        (uint64_t)(uintptr_t)b.data_ptr(), (uint64_t)(uintptr_t)out.data_ptr(),
+        a_stride, b_stride, c_stride, 0));
     return out;
 }
 

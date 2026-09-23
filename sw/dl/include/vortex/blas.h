@@ -76,6 +76,16 @@ vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
                                 uint64_t A, uint64_t B, uint64_t C,
                                 uint32_t transb);
 
+// Batched row-major GEMM. Strides are byte distances between consecutive
+// matrices; grid-z launches all batches in one queue command.
+vx_blas_status vx_blas_batched_gemm(vx_queue_h q,
+                                    vx_blas_dtype dt,
+                                    uint32_t batch, uint32_t M, uint32_t N,
+                                    uint32_t K, float alpha, float beta,
+                                    uint64_t A, uint64_t B, uint64_t C,
+                                    uint64_t stride_a, uint64_t stride_b,
+                                    uint64_t stride_c, uint32_t transb);
+
 // Report which kernel variant the last dispatch selected (for test output
 // and future perf attribution: "fallback" vs "tcu").
 const char* vx_blas_kernel_name(vx_blas_dtype dt);

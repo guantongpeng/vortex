@@ -51,6 +51,10 @@ gemm_tile_body(vx_blas_gemm_args_t* arg) {
     const uint32_t c0 = (t % 4) * 4;         // this thread's 4x4 cols
     const uint32_t m0 = blockIdx.y * BLAS_TILE;
     const uint32_t n0 = blockIdx.x * BLAS_TILE;
+    const uint32_t batch = blockIdx.z;
+    const uint64_t a_base = (uint64_t)arg->A + batch * arg->stride_a;
+    const uint64_t b_base = (uint64_t)arg->B + batch * arg->stride_b;
+    const uint64_t c_base = (uint64_t)arg->C + batch * arg->stride_c;
 
     float acc[4][4] = {{0}};
 
@@ -64,11 +68,11 @@ gemm_tile_body(vx_blas_gemm_args_t* arg) {
             float a = 0.0f, b = 0.0f;
             if (gr < arg->M && gk < arg->K) {
                 if (DT == 0) {
-                    a = ((const float*)(uintptr_t)arg->A)[(size_t)gr * arg->K + gk];
+                    a = ((const float*)(uintptr_t)a_base)[(size_t)gr * arg->K + gk];
                 } else if (DT == 1) {
-                    a = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->A)[(size_t)gr * arg->K + gk]);
+                    a = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)a_base)[(size_t)gr * arg->K + gk]);
                 } else {
-                    a = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)arg->A)[(size_t)gr * arg->K + gk]);
+                    a = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)a_base)[(size_t)gr * arg->K + gk]);
                 }
             }
             if (gk < arg->K && n0 + r < arg->N) {
@@ -76,17 +80,17 @@ gemm_tile_body(vx_blas_gemm_args_t* arg) {
                     const size_t bi = arg->transb
                                           ? (size_t)(n0 + r) * arg->K + gk
                                           : (size_t)gk * arg->N + n0 + r;
-                    b = ((const float*)(uintptr_t)arg->B)[bi];
+                    b = ((const float*)(uintptr_t)b_base)[bi];
                 } else if (DT == 1) {
                     const size_t bi = arg->transb
                                           ? (size_t)(n0 + r) * arg->K + gk
                                           : (size_t)gk * arg->N + n0 + r;
-                    b = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->B)[bi]);
+                    b = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)b_base)[bi]);
                 } else {
                     const size_t bi = arg->transb
                                           ? (size_t)(n0 + r) * arg->K + gk
                                           : (size_t)gk * arg->N + n0 + r;
-                    b = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)arg->B)[bi]);
+                    b = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)b_base)[bi]);
                 }
             }
             lA[r * BLAS_KC + k] = a;
@@ -111,7 +115,7 @@ gemm_tile_body(vx_blas_gemm_args_t* arg) {
             const uint32_t gm = m0 + r0 + ii;
             const uint32_t gn = n0 + c0 + jj;
             if (gm < arg->M && gn < arg->N) {
-                float* c = (float*)(uintptr_t)arg->C;
+                float* c = (float*)(uintptr_t)c_base;
                 float old = (arg->beta != 0.0f) ? c[(size_t)gm * arg->N + gn] : 0.0f;
                 c[(size_t)gm * arg->N + gn] = arg->alpha * acc[ii][jj] + arg->beta * old;
             }

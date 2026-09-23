@@ -44,13 +44,13 @@ def test_bmm_rectangular(backend, shape):
                        atol=1e-6)
 
 
-def test_bmm_queues_one_gemm_per_batch(backend):
+def test_bmm_queues_one_batched_gemm(backend):
     batch, m, k, n = 4, 5, 7, 3
     a = v(torch.randn(batch, m, k))
     b = v(torch.randn(batch, k, n))
     backend.reset_stats()
     got = torch.bmm(a, b)
-    assert backend.stats()["launches"] == batch
+    assert backend.stats()["launches"] == 1
     assert_matches_cpu(got, torch.bmm(a.cpu(), b.cpu()), rtol=1e-5, atol=1e-6)
 
 
@@ -59,7 +59,7 @@ def test_matmul_3d_reaches_bmm(backend):
     b = torch.randn(2, 3, 5)
     backend.reset_stats()
     got = torch.matmul(v(a), v(b))
-    assert backend.stats()["launches"] == 2
+    assert backend.stats()["launches"] == 1
     assert_matches_cpu(got, torch.matmul(a, b), rtol=1e-5, atol=1e-6)
 
 

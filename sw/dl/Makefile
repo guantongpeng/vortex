@@ -32,12 +32,12 @@ ifneq ($(strip $(CONFIGS)),)
 HIPCC_FLAGS += --configs='$(CONFIGS)'
 endif
 
-# vx_blas_gemm_args_t size: rv64 = 3*8 + 3*4 + 3*4 + pad -> 48 (align 8);
-# rv32 = 3*4 + 3*4 + 3*4 -> 36 (align 4).
+# vx_blas_gemm_args_t includes three byte strides and batch metadata for the
+# grid-z batched GEMM path.
 ifeq ($(XLEN),64)
-ARGS_SIZE := 48
+ARGS_SIZE := 80
 else
-ARGS_SIZE := 36
+ARGS_SIZE := 72
 endif
 KERNEL_META := [{"name": "sgemm_f32_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "hgemm_f16_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}, {"name": "bgemm_bf16_kernel", "args_size": $(ARGS_SIZE), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
 
