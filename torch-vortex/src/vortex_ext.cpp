@@ -1175,6 +1175,26 @@ static torch::Tensor stack_impl(at::TensorList tensors, int64_t dim) {
     return out;
 }
 
+static torch::Tensor& cat_out_impl(const at::ITensorListRef& tensors,
+                                   int64_t dim, torch::Tensor& out) {
+    check_vortex_f32(out, "cat out");
+    auto tmp = cat_impl(tensors, dim);
+    TORCH_CHECK(out.sizes() == tmp.sizes(), "torch_vortex: cat out shape ",
+                out.sizes(), " does not match result ", tmp.sizes());
+    out.copy_(tmp);
+    return out;
+}
+
+static torch::Tensor& stack_out_impl(at::TensorList tensors, int64_t dim,
+                                     torch::Tensor& out) {
+    check_vortex_f32(out, "stack out");
+    auto tmp = stack_impl(tensors, dim);
+    TORCH_CHECK(out.sizes() == tmp.sizes(), "torch_vortex: stack out shape ",
+                out.sizes(), " does not match result ", tmp.sizes());
+    out.copy_(tmp);
+    return out;
+}
+
 static uint32_t check_index_tensor(const torch::Tensor& index,
                                    const char* name) {
     TORCH_CHECK(index.device().type() == c10::DeviceType::PrivateUse1,
@@ -1332,6 +1352,14 @@ static torch::Tensor& scatter_src_out_impl(const torch::Tensor& self,
     return out;
 }
 
+static torch::Tensor& scatter__impl(torch::Tensor& self, int64_t dim,
+                                    const torch::Tensor& index,
+                                    const torch::Tensor& src) {
+    auto tmp = scatter_impl(self, dim, index, src);
+    self.copy_(tmp);
+    return self;
+}
+
 static torch::Tensor index_add_impl(const torch::Tensor& self, int64_t dim,
                                     const torch::Tensor& index,
                                     const torch::Tensor& source,
@@ -1390,6 +1418,28 @@ static torch::Tensor index_add_impl(const torch::Tensor& self, int64_t dim,
         check_index_error_flag(invalid, "index_add");
     }
     return out;
+}
+
+static torch::Tensor& index_add_out_impl(const torch::Tensor& self, int64_t dim,
+                                         const torch::Tensor& index,
+                                         const torch::Tensor& source,
+                                         const c10::Scalar& alpha,
+                                         torch::Tensor& out) {
+    check_vortex_f32(out, "index_add out");
+    auto tmp = index_add_impl(self, dim, index, source, alpha);
+    TORCH_CHECK(out.sizes() == tmp.sizes(), "torch_vortex: index_add out shape ",
+                out.sizes(), " does not match result ", tmp.sizes());
+    out.copy_(tmp);
+    return out;
+}
+
+static torch::Tensor& index_add__impl(torch::Tensor& self, int64_t dim,
+                                      const torch::Tensor& index,
+                                      const torch::Tensor& source,
+                                      const c10::Scalar& alpha) {
+    auto tmp = index_add_impl(self, dim, index, source, alpha);
+    self.copy_(tmp);
+    return self;
 }
 
 // ---- reductions -----------------------------------------------------------
@@ -2850,12 +2900,17 @@ void register_vortex_ops() {
     VX_IMPL("view", &view_impl);
     VX_IMPL("as_strided", &as_strided_impl);
     VX_IMPL("cat", &cat_impl);
+    VX_IMPL("cat.out", &cat_out_impl);
     VX_IMPL("stack", &stack_impl);
+    VX_IMPL("stack.out", &stack_out_impl);
     VX_IMPL("gather", &gather_impl);
     VX_IMPL("gather.out", &gather_out_impl);
     VX_IMPL("scatter.src", &scatter_impl);
     VX_IMPL("scatter.src_out", &scatter_src_out_impl);
+    VX_IMPL("scatter_.src", &scatter__impl);
     VX_IMPL("index_add", &index_add_impl);
+    VX_IMPL("index_add.out", &index_add_out_impl);
+    VX_IMPL("index_add_", &index_add__impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
     VX_IMPL("mean.dim", &mean_impl);

@@ -29,6 +29,24 @@ def test_index_add_matches_cpu_with_duplicate_indices(backend):
     assert_matches_cpu(got, want, rtol=1e-6, atol=1e-6)
 
 
+def test_index_add_out_and_inplace_match_cpu(backend):
+    self_cpu = torch.randn(2, 3)
+    index_cpu = torch.tensor([1, 1, 2], dtype=torch.int64)
+    source_cpu = torch.randn(2, 3)
+    out = torch.empty_like(self_cpu).to("vortex")
+    got = torch.index_add(v(self_cpu), 1, v(index_cpu), v(source_cpu),
+                          alpha=0.5, out=out)
+    want = torch.index_add(self_cpu, 1, index_cpu, source_cpu, alpha=0.5)
+    assert got.data_ptr() == out.data_ptr()
+    assert_matches_cpu(got, want)
+
+    inplace = v(self_cpu.clone())
+    before = inplace._version
+    inplace.index_add_(1, v(index_cpu), v(source_cpu), alpha=0.5)
+    assert inplace._version > before
+    assert_matches_cpu(inplace, want)
+
+
 def test_index_add_accepts_int32_and_negative_dim(backend):
     self_cpu = torch.zeros(3, 5)
     index_cpu = torch.tensor([0, 4, 0], dtype=torch.int32)

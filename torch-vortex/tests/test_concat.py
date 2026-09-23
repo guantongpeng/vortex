@@ -33,11 +33,27 @@ def test_cat_three_dim_and_empty_piece(backend):
     assert_matches_cpu(got, torch.cat(xs, dim=1), rtol=0, atol=0)
 
 
+def test_cat_out_matches_cpu(backend):
+    xs = [torch.randn(2, 3), torch.randn(2, 4)]
+    out = torch.empty(2, 7, device="vortex")
+    got = torch.cat([v(x) for x in xs], dim=1, out=out)
+    assert got.data_ptr() == out.data_ptr()
+    assert_matches_cpu(got, torch.cat(xs, dim=1), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dim", [0, 1, 2, -1])
 def test_stack_matches_cpu(backend, dim):
     xs = [torch.randn(2, 3), torch.randn(2, 3), torch.randn(2, 3)]
     got = torch.stack([v(x) for x in xs], dim=dim)
     assert_matches_cpu(got, torch.stack(xs, dim=dim), rtol=0, atol=0)
+
+
+def test_stack_out_matches_cpu(backend):
+    xs = [torch.randn(2, 3), torch.randn(2, 3)]
+    out = torch.empty(2, 2, 3, device="vortex")
+    got = torch.stack([v(x) for x in xs], dim=1, out=out)
+    assert got.data_ptr() == out.data_ptr()
+    assert_matches_cpu(got, torch.stack(xs, dim=1), rtol=0, atol=0)
 
 
 def test_stack_launches_once_per_input(backend):
