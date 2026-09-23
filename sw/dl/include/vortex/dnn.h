@@ -16,7 +16,7 @@
 
 // Vortex DL dnn layer (plan P3-02 second tier): direct NCHW FP32
 // convolution, windowed pooling and inference batch-norm over the
-// vortex2.h ABI. v1 constraints (enforced): dilation 1, groups 1,
+// vortex2.h ABI. v1 constraints (enforced): groups >= 1,
 // kh*kw <= 32, ci*kh*kw*4 <= local memory (16 KiB default).
 
 #include <stdint.h>
@@ -50,6 +50,16 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
                             uint32_t co, uint32_t kh, uint32_t kw,
                             uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
                             uint32_t groups);
+
+// Dilation-aware entry point. The legacy spelling above is a compatibility
+// wrapper for dh=dw=1; new callers use this entry point.
+vx_dnn_status vx_dnn_conv2d_dilated(vx_queue_h q,
+                                    uint64_t in, uint64_t weight, uint64_t bias,
+                                    uint64_t out,
+                                    uint32_t n, uint32_t ci, uint32_t hi, uint32_t wi,
+                                    uint32_t co, uint32_t kh, uint32_t kw,
+                                    uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                                    uint32_t groups, uint32_t dh, uint32_t dw);
 
 // op 0 = max, 1 = avg (count_include_pad = false),
 // op 2 = avg (count_include_pad = true).

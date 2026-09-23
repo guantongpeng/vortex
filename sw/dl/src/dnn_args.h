@@ -27,7 +27,7 @@ typedef uint32_t vx_dl_ptr_t;
 typedef uint64_t vx_dl_ptr_t;
 #endif
 
-// Direct 2D convolution, NCHW, dilation 1. Weight uses grouped layout
+// Direct 2D convolution, NCHW. Weight uses grouped layout
 // [CO][CI/groups][KH][KW].
 //   out[n][co][oy][ox] = sum_{ci,kh,kw} in[n][ci][oy*sh + kh - ph][ox*sw + kw - pw] * w[co][ci][kh][kw] (+ b[co])
 // Weight layout: [CO][CI][KH][KW]; pad symmetric ph x pw.
@@ -38,7 +38,7 @@ typedef struct {
     vx_dl_ptr_t out;
     uint32_t n, ci, hi, wi;
     uint32_t co, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw;
+    uint32_t kh, kw, ph, pw, sh, sw, dh, dw;
     uint32_t has_bias;
     uint32_t groups;
 } vx_dnn_conv_args_t;

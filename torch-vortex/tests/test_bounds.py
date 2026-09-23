@@ -181,6 +181,18 @@ def test_grouped_and_depthwise_conv_matches_cpu(backend):
         rtol=1e-5, atol=1e-5)
 
 
+def test_dilated_conv_matches_cpu(backend):
+    x = torch.randn(1, 3, 9, 10)
+    w = torch.randn(4, 3, 3, 2)
+    b = torch.randn(4)
+    got = torch.nn.functional.conv2d(x.to("vortex"), w.to("vortex"),
+                                     b.to("vortex"), padding=(2, 1),
+                                     dilation=(2, 1))
+    want = torch.nn.functional.conv2d(x, w, b, padding=(2, 1),
+                                     dilation=(2, 1))
+    assert_matches_cpu(got, want, rtol=1e-5, atol=1e-5)
+
+
 def test_adaptive_avg_pool(backend):
     x = torch.randn(2, 3, 5, 7)
     assert_matches_cpu(torch.nn.functional.adaptive_avg_pool2d(x.to("vortex"), 1),

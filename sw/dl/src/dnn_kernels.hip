@@ -63,13 +63,15 @@ __global__ void dnn_conv2d_kernel(vx_dnn_conv_args_t* arg) {
         for (uint32_t ci = 0; ci < ci_group; ++ci) {
             const float* in_ch = in_base + (size_t)(ci_base + ci) * arg->hi * arg->wi;
             for (uint32_t kh = 0; kh < arg->kh; ++kh) {
-                const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
+                const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) -
+                                   (int32_t)arg->ph;
                 if (iy < 0 || iy >= (int32_t)arg->hi) {
                     we += arg->kw;
                     continue;
                 }
                 for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                    const int32_t ix = (int32_t)(ox * arg->sw + kw) - (int32_t)arg->pw;
+                    const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) -
+                                       (int32_t)arg->pw;
                     if (ix >= 0 && ix < (int32_t)arg->wi && we < wstaged) {
                         acc += in_ch[(size_t)iy * arg->wi + ix] * stage[we];
                     }

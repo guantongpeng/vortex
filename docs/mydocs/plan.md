@@ -160,8 +160,8 @@
 
 ### 2.4 CNN eager 和模型分级
 
-- [x] conv 支持 groups/depthwise，并按每组输入通道计算权重 staging 与 LMEM；dilation、大 kernel 和完整模型分级仍待，详见 [`p2_14_grouped_conv.md`](p2_14_grouped_conv.md)。
-- [ ] conv 支持 groups/depthwise、dilation、大通道和大 kernel，并检查 LMEM/资源上限。
+- [x] conv 支持 groups/depthwise、dilation，并按每组输入通道计算权重 staging 与 LMEM；大 kernel 和完整模型分级仍待，详见 [`p2_14_grouped_conv.md`](p2_14_grouped_conv.md)、[`p2_16_conv_dilation.md`](p2_16_conv_dilation.md)。
+- [ ] conv 支持大通道和大 kernel 的权重 tiling，并检查 LMEM/资源上限。
 - [ ] 完善 BN optional affine、linear 前导 batch 维、pool 其余形态和 `relu_`。
 - [ ] 完成 MiniResNet→小输入 ResNet-18→目标输入尺寸的分级测试，固定 torchvision、权重和预处理。
 - [ ] 输出中间层、logits、fallback、传输、内存和性能证据，不能只检查最终输出。

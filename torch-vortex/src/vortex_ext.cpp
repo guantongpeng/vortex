@@ -2443,7 +2443,11 @@ static torch::Tensor convolution_impl(
     check_cnn_f32(weight, "conv.weight", 4);
     TORCH_CHECK(!transposed, "torch_vortex: transposed conv unsupported in v1");
     TORCH_CHECK(groups > 0, "torch_vortex: conv groups must be positive");
-    for (auto d : dilation) TORCH_CHECK(d == 1, "torch_vortex: dilation must be 1");
+    TORCH_CHECK(dilation.size() == 1 || dilation.size() == 2,
+                "torch_vortex: conv dilation must have one or two values");
+    const int64_t dh = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dw = dilation.size() > 1 ? dilation[1] : dh;
+    TORCH_CHECK(dh > 0 && dw > 0, "torch_vortex: conv dilation must be positive");
     for (auto o : output_padding) TORCH_CHECK(o == 0, "torch_vortex: output_padding must be 0");
     const int64_t sh = stride.size() > 0 ? stride[0] : 1;
     const int64_t sw = stride.size() > 1 ? stride[1] : sh;
@@ -2456,8 +2460,13 @@ static torch::Tensor convolution_impl(
     const int64_t kh = ws[2], kw = ws[3];
     TORCH_CHECK(is[1] % groups == 0 && ci_group == is[1] / groups,
                 "torch_vortex: conv channel mismatch for groups=", groups);
-    const int64_t ho = window_out(is[2], kh, ph, sh, "conv height");
-    const int64_t wo = window_out(is[3], kw, pw, sw, "conv width");
+    TORCH_CHECK((kh - 1) <= (INT64_MAX - 1) / dh &&
+                    (kw - 1) <= (INT64_MAX - 1) / dw,
+                "torch_vortex: conv effective kernel overflows");
+    const int64_t ekh = (kh - 1) * dh + 1;
+    const int64_t ekw = (kw - 1) * dw + 1;
+    const int64_t ho = window_out(is[2], ekh, ph, sh, "conv height");
+    const int64_t wo = window_out(is[3], ekw, pw, sw, "conv width");
 
     // One output channel stages all of its weights in LMEM at once, and the DL
     // kernel's ceiling for that is 16384 bytes. This is the real bound on a
@@ -2490,7 +2499,7 @@ static torch::Tensor convolution_impl(
     // The kernel lives in the DL library, so the ATen path and a direct
     // vx_dnn_conv2d call are the *same* kernel rather than two copies that
     // have to be kept in agreement (W3.1).
-    const int status = (int)vx_dnn_conv2d(
+    const int status = (int)vx_dnn_conv2d_dilated(
         current_queue(), (uint64_t)(uintptr_t)input.data_ptr(),
         (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
         (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(is[0], "conv batch"),
@@ -2498,7 +2507,8 @@ static torch::Tensor convolution_impl(
         u32_dim(is[3], "conv wi"), u32_dim(co, "conv co"),
         u32_dim(kh, "conv kh"), u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
         u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"), u32_dim(sw, "conv sw"),
-        u32_dim(groups, "conv groups"));
+        u32_dim(groups, "conv groups"), u32_dim(dh, "conv dh"),
+        u32_dim(dw, "conv dw"));
     // Not DL_LAUNCH: this one explains what its status codes mean, which the
     // macro has no room for. The accounting below is the same call it makes.
     TORCH_CHECK(status == 0, "torch_vortex: vx_dnn_conv2d failed with status ",

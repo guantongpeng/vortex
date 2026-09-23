@@ -106,25 +106,29 @@ vx_dnn_status vx_dnn_finalize(void) {
     return VX_DNN_OK;
 }
 
-vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
-                            uint64_t in, uint64_t weight, uint64_t bias,
-                            uint64_t out,
-                            uint32_t n, uint32_t ci, uint32_t hi, uint32_t wi,
-                            uint32_t co, uint32_t kh, uint32_t kw,
-                            uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
-                            uint32_t groups) {
+vx_dnn_status vx_dnn_conv2d_dilated(
+    vx_queue_h q, uint64_t in, uint64_t weight, uint64_t bias, uint64_t out,
+    uint32_t n, uint32_t ci, uint32_t hi, uint32_t wi, uint32_t co,
+    uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh,
+    uint32_t sw, uint32_t groups, uint32_t dh, uint32_t dw) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
     if (!in || !weight || !out || n == 0 || ci == 0 || hi == 0 || wi == 0 ||
         co == 0 || kh == 0 || kw == 0 || sh == 0 || sw == 0 || groups == 0 ||
-        ci % groups != 0 || co % groups != 0) {
+        dh == 0 || dw == 0 || ci % groups != 0 || co % groups != 0) {
+        return VX_DNN_ERR_BAD_ARGS;
+    }
+    const uint64_t ekh = (uint64_t)(kh - 1) * dh + 1;
+    const uint64_t ekw = (uint64_t)(kw - 1) * dw + 1;
+    if (ekh > UINT32_MAX || ekw > UINT32_MAX ||
+        (uint64_t)hi + 2 * ph < ekh || (uint64_t)wi + 2 * pw < ekw) {
         return VX_DNN_ERR_BAD_ARGS;
     }
     const uint32_t ci_group = ci / groups;
     if (kh * kw > 32 || ci_group * kh * kw * 4 > 16384) {
         return VX_DNN_ERR_UNSUPPORTED;  // LMEM staging bound (DNN_WMAX=32)
     }
-    const uint32_t ho = (hi + 2 * ph - kh) / sh + 1;
-    const uint32_t wo = (wi + 2 * pw - kw) / sw + 1;
+    const uint32_t ho = (hi + 2 * ph - (uint32_t)ekh) / sh + 1;
+    const uint32_t wo = (wi + 2 * pw - (uint32_t)ekw) / sw + 1;
     vx_dnn_conv_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.weight = (vx_dl_ptr_t)weight;
@@ -143,10 +147,23 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
     args.pw = pw;
     args.sh = sh;
     args.sw = sw;
+    args.dh = dh;
+    args.dw = dw;
     args.has_bias = bias != 0;
     args.groups = groups;
     return launch3(q, g_dnn.conv2d, &args, sizeof(args),
                    ho, co, n, ci * kh * kw * 4);
+}
+
+vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
+                            uint64_t in, uint64_t weight, uint64_t bias,
+                            uint64_t out,
+                            uint32_t n, uint32_t ci, uint32_t hi, uint32_t wi,
+                            uint32_t co, uint32_t kh, uint32_t kw,
+                            uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                            uint32_t groups) {
+    return vx_dnn_conv2d_dilated(q, in, weight, bias, out, n, ci, hi, wi, co,
+                                 kh, kw, ph, pw, sh, sw, groups, 1, 1);
 }
 
 vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
