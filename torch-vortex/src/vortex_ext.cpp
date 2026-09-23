@@ -831,7 +831,8 @@ static torch::Tensor arange_start_step_impl(
 
     const bool integral = start.isIntegral(false) && end.isIntegral(false) &&
                           step.isIntegral(false);
-    const auto dtype = dtype_opt.value_or(integral ? at::kLong : at::kFloat);
+    const auto dtype = dtype_opt.value_or(
+        integral ? at::kLong : c10::get_default_dtype_as_scalartype());
     TORCH_CHECK(dtype == at::kFloat || dtype == at::kInt || dtype == at::kLong,
                 "torch_vortex: arange supports only float32, int32 and int64, got ",
                 dtype);
@@ -848,6 +849,8 @@ static torch::Tensor arange_start_step_impl(
         const int64_t end_i = end.toLong();
         step_i = step.toLong();
         TORCH_CHECK(step_i != 0, "torch_vortex: arange step must be nonzero");
+        start_f = (float)start_i;
+        step_f = (float)step_i;
         if ((step_i > 0 && end_i > start_i) ||
             (step_i < 0 && end_i < start_i)) {
             const __int128 distance = step_i > 0
@@ -892,7 +895,7 @@ static torch::Tensor arange_start_step_impl(
     args.step = step_f;
     args.start_i = start_i;
     args.step_i = step_i;
-    launch(h_arange_kernel, args, (args.n + 3) / 4);
+    launch(h_arange_kernel, args, (uint32_t)((n + 3) / 4));
     return out;
 }
 

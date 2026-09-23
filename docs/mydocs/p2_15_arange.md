@@ -26,8 +26,9 @@ Tensor，但跳过零 grid launch。`float64`、bool、half/bfloat16、复数和
 ## 验证
 
 `torch-vortex/tests/test_arange.py` 覆盖默认 int64、显式 int32/float32、负步长、
-空范围的 skipped-launch 计数、非法 dtype 和整型 dtype 的小数步长。RV64/PyTorch
-2.14/Python 3.10 主线结果为 **5 passed**；kernel metadata 由共享参数头重新生成，
+空范围的 skipped-launch 计数、步长方向不一致时的空结果、非法 dtype、整型起点的
+float32 输出和整型 dtype 的小数步长。RV64/PyTorch 2.14/Python 3.10 主线结果为
+**17 passed**（含 ABI）；kernel metadata 由共享参数头重新生成，
 并由既有 ABI 测试继续校验。
 
 ## 边界

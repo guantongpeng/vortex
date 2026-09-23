@@ -38,3 +38,26 @@ def test_arange_rejects_unsupported_dtype(backend):
 def test_integer_dtype_rejects_fractional_step(backend):
     with pytest.raises(RuntimeError, match="integer arange dtype"):
         torch.arange(0.0, 4.0, 0.5, dtype=torch.int32, device="vortex")
+
+
+@pytest.mark.parametrize('args', [(7,), (2, 9, 2), (7, -3, -2)])
+def test_integral_bounds_float_output(backend, args):
+    actual = torch.arange(*args, dtype=torch.float32, device='vortex')
+    torch.testing.assert_close(actual.cpu(), torch.arange(*args, dtype=torch.float32))
+
+
+@pytest.mark.parametrize('args', [(5, 0, 1), (0, 5, -1)])
+def test_inconsistent_step_direction_is_empty(backend, args):
+    actual = torch.arange(*args, device='vortex')
+    assert actual.numel() == 0
+
+
+def test_zero_step_is_rejected(backend):
+    with pytest.raises(RuntimeError, match='step must be nonzero'):
+        torch.arange(0, 3, 0, device='vortex')
+
+
+def test_large_int64_bounds(backend):
+    start = 2**60
+    actual = torch.arange(start, start + 11, 3, device='vortex')
+    assert actual.cpu().tolist() == [start, start + 3, start + 6, start + 9]
