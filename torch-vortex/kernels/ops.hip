@@ -87,6 +87,43 @@ __global__ void arange_kernel(arange_args_t* arg) {
     }
 }
 
+__global__ void sort_kernel(sort_args_t* arg) {
+    const uint32_t row = blockIdx.x;
+    if (row >= arg->rows || threadIdx.x != 0) return;
+    const float* src = (const float*)(uintptr_t)arg->src +
+                       (size_t)row * arg->cols;
+    float* dst = (float*)(uintptr_t)arg->dst + (size_t)row * arg->k;
+    int64_t* indices = (int64_t*)(uintptr_t)arg->indices +
+                       (size_t)row * arg->k;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < arg->cols; ++i) {
+        const float value = src[i];
+        uint32_t pos = 0;
+        while (pos < count) {
+            const float prior = dst[pos];
+            const bool before = arg->descending ? value > prior : value < prior;
+            if (before) break;
+            ++pos;
+        }
+        if (count < arg->k) {
+            for (uint32_t j = count; j > pos; --j) {
+                dst[j] = dst[j - 1];
+                indices[j] = indices[j - 1];
+            }
+            dst[pos] = value;
+            indices[pos] = (int64_t)i;
+            ++count;
+        } else if (pos < arg->k) {
+            for (uint32_t j = arg->k - 1; j > pos; --j) {
+                dst[j] = dst[j - 1];
+                indices[j] = indices[j - 1];
+            }
+            dst[pos] = value;
+            indices[pos] = (int64_t)i;
+        }
+    }
+}
+
 // The index representation ATen wants, from the one the DL reduce produces.
 // Pure conversion: one thread per index, grid-stride like everything here.
 __global__ void widen_u32_i64_kernel(widen_args_t* arg) {

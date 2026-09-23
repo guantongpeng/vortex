@@ -3045,6 +3045,60 @@ static torch::Tensor min_impl(const torch::Tensor& self) {
     return reduce_into(self, out, std::nullopt, VX_PRIM_OP_MIN, "min");
 }
 
+// sort/topk use one row-wise device kernel. The input dimension is moved to
+// the trailing position and made contiguous; values and int64 indices are
+// moved back to the caller's dimension after the launch.
+static std::tuple<torch::Tensor, torch::Tensor> sort_impl(
+    const torch::Tensor& self, int64_t dim, bool descending, int64_t k) {
+    check_vortex_f32(self, "sort/topk");
+    TORCH_CHECK(self.dim() > 0, "torch_vortex: sort/topk needs at least one dimension");
+    const int64_t nd = self.dim();
+    if (dim < 0) dim += nd;
+    TORCH_CHECK(dim >= 0 && dim < nd, "torch_vortex: sort/topk dim ", dim,
+                " is out of range for a ", nd, "-D tensor");
+    const auto moved = (dim == nd - 1) ? self : self.movedim(dim, nd - 1);
+    const auto src = moved.contiguous();
+    const int64_t cols = src.size(nd - 1);
+    TORCH_CHECK(cols > 0, "torch_vortex: sort/topk on an empty dimension");
+    TORCH_CHECK(k >= 0 && k <= cols, "torch_vortex: topk k=", k,
+                " is outside [0, ", cols, "]");
+    const int64_t rows = src.numel() / cols;
+    std::vector<int64_t> out_shape(src.sizes().begin(), src.sizes().end());
+    out_shape.back() = k;
+    auto values = torch::empty(out_shape, self.options());
+    auto indices = torch::empty(out_shape, self.options().dtype(at::kLong));
+    if (rows == 0 || k == 0) {
+        ++g_stats.skipped_launches;
+    } else {
+        sort_args_t args = {};
+        args.dst = (uint64_t)(uintptr_t)values.data_ptr();
+        args.indices = (uint64_t)(uintptr_t)indices.data_ptr();
+        args.src = (uint64_t)(uintptr_t)src.data_ptr();
+        args.rows = u32_dim(rows, "sort rows");
+        args.cols = u32_dim(cols, "sort columns");
+        args.k = u32_dim(k, "sort k");
+        args.descending = descending ? 1u : 0u;
+        launch(h_sort_kernel, args, args.rows);
+    }
+    if (dim != nd - 1) {
+        values = values.movedim(nd - 1, dim);
+        indices = indices.movedim(nd - 1, dim);
+    }
+    return std::make_tuple(values, indices);
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> sort_op_impl(
+    const torch::Tensor& self, int64_t dim, bool descending) {
+    return sort_impl(self, dim, descending, self.size(dim < 0 ? dim + self.dim() : dim));
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> topk_impl(
+    const torch::Tensor& self, c10::SymInt k, int64_t dim, bool largest,
+    bool sorted) {
+    (void)sorted;  // the device result is sorted, which is valid for sorted=false
+    return sort_impl(self, dim, largest, k.expect_int());
+}
+
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
@@ -3089,6 +3143,8 @@ void register_vortex_ops() {
     VX_IMPL("min", &min_impl);
     VX_IMPL("min.dim", &min_dim_impl);
     VX_IMPL("argmin", &argmin_impl);
+    VX_IMPL("sort", &sort_op_impl);
+    VX_IMPL("topk", &topk_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);

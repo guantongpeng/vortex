@@ -146,7 +146,7 @@
 - [x] FP32 连续布局的 `sum/mean/max/argmax`、`bmm`、`cat/stack`、`gather/scatter.src`、`index_add`、`avg_pool2d` 基础路径。
 - [x] `gather.out` 与 `scatter.src_out` 复用同一 device index kernel 和 out storage；其余 out/in-place overload 仍待，详见 [`p2_11_index_out.md`](p2_11_index_out.md)。
 - [x] `scatter_.src`、`index_add.out/_`、`cat.out`、`stack.out` 已补齐并复用既有 device kernel；详见 [`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
-- [ ] `topk`、`sort`。
+- [~] `topk`、`sort`：基础 FP32 values/indices、任意 dim 和 k=0 已落地；stable、dimname、out、低精度/整数 dtype 与大行并行优化仍待，详见 [`p2_17_sort_topk.md`](p2_17_sort_topk.md)。
 - [x] FP32 `amin` 与 `amin.out`，采用独立静态 MIN reduction kernel；详见 [`p2_05_amin.md`](p2_05_amin.md)。
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。
 - [x] FP32 `nll_loss_forward` 的 none/sum/mean、weight、ignore_index 与越界校验；详见 [`p2_13_nll_loss.md`](p2_13_nll_loss.md)。
