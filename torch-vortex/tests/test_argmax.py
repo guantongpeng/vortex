@@ -48,9 +48,29 @@ def test_argmax_over_every_dim(backend, tensor, dim):
 
 
 @pytest.mark.parametrize("tensor", [X2, X3, X4], ids=["2d", "3d", "4d"])
+@pytest.mark.parametrize("dim", [0, 1, -1])
+def test_argmin_over_every_dim(backend, tensor, dim):
+    if dim >= tensor.dim():
+        pytest.skip("dim out of range for this tensor")
+    got = torch.argmin(v(tensor), dim=dim)
+    want = torch.argmin(tensor, dim=dim)
+    assert got.dtype == torch.int64
+    assert torch.equal(got.cpu(), want)
+
+
+@pytest.mark.parametrize("tensor", [X2, X3, X4], ids=["2d", "3d", "4d"])
 def test_max_dim_matches_cpu(backend, tensor):
     got = torch.max(v(tensor), dim=-1)
     want = torch.max(tensor, dim=-1)
+    assert got.indices.dtype == torch.int64
+    assert torch.equal(got.indices.cpu(), want.indices)
+    assert_matches_cpu(got.values, want.values, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tensor", [X2, X3, X4], ids=["2d", "3d", "4d"])
+def test_min_dim_matches_cpu(backend, tensor):
+    got = torch.min(v(tensor), dim=-1)
+    want = torch.min(tensor, dim=-1)
     assert got.indices.dtype == torch.int64
     assert torch.equal(got.indices.cpu(), want.indices)
     assert_matches_cpu(got.values, want.values, rtol=0, atol=0)
@@ -76,6 +96,13 @@ def test_full_reduction_gives_a_zero_dim_index(backend):
                        torch.tensor(2))
     # a 1-element tensor has one index, and it is 0
     assert torch.argmax(v(torch.tensor([7.0]))).cpu().item() == 0
+
+
+def test_full_argmin_and_min(backend):
+    x = torch.tensor([4.0, -2.0, 7.0, -2.0])
+    assert torch.equal(torch.argmin(v(x)).cpu(), torch.argmin(x))
+    got = torch.min(v(x)).cpu()
+    assert got.item() == torch.min(x).item()
 
 
 @pytest.mark.parametrize("dim", [0, -1])
@@ -136,6 +163,16 @@ def test_nan_wins_and_its_index_is_the_first(backend):
         assert torch.equal(got.indices.cpu(), torch.argmax(t, dim=-1))
         assert torch.equal(torch.argmax(v(t), dim=-1).cpu(),
                            torch.argmax(t, dim=-1))
+
+
+def test_argmin_nan_and_signed_zero(backend):
+    t = torch.tensor([[0.0, -0.0, 2.0],
+                      [1.0, float("nan"), -1.0]])
+    got = torch.min(v(t), dim=-1)
+    want = torch.min(t, dim=-1)
+    assert torch.equal(got.indices.cpu(), want.indices)
+    assert torch.equal(torch.argmin(v(t), dim=-1).cpu(), torch.argmin(t, dim=-1))
+    assert torch.isnan(got.values.cpu()[1])
 
 
 def test_empty_inputs(backend):

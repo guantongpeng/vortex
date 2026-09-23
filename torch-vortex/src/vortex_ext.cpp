@@ -1538,7 +1538,7 @@ static void check_reduce_dtype(std::optional<c10::ScalarType> dtype,
                 " is unsupported; only float32 is implemented (W3.2)");
 }
 
-// ---- index reductions: argmax and max(dim=) -------------------------------
+// ---- index reductions: argmax/argmin and max/min(dim=) ---------------------
 //
 // One DL pass produces both the index and the extreme it points at, so
 // max(dim=)'s pair costs no more than argmax's index alone. The index comes
@@ -1561,7 +1561,7 @@ static void launch_widen_u32_i64(uint64_t dst, uint64_t src, uint32_t n) {
 static void index_reduce(const torch::Tensor& self,
                          c10::OptionalArrayRef<int64_t> dim,
                          torch::Tensor& indices, torch::Tensor* values,
-                         const char* name) {
+                         uint32_t op, const char* name) {
     check_vortex_f32(self, name);
     TORCH_CHECK(indices.scalar_type() == at::kLong && indices.is_contiguous(),
                 "torch_vortex: ", name, " indices must be contiguous int64");
@@ -1590,7 +1590,7 @@ static void index_reduce(const torch::Tensor& self,
     }
     auto stage = torch::empty({rows}, self.options().dtype(at::kInt));
     DL_LAUNCH(vx_prim_index_reduce(
-        current_queue(), VX_PRIM_OP_ARGMAX, (uint64_t)(uintptr_t)src.data_ptr(),
+        current_queue(), (vx_prim_op)op, (uint64_t)(uintptr_t)src.data_ptr(),
         (uint64_t)(uintptr_t)stage.data_ptr(),
         values ? (uint64_t)(uintptr_t)values->data_ptr() : 0,
         u32_dim(rows, "argmax rows"), u32_dim(cols, "argmax cols")));
@@ -1613,7 +1613,23 @@ static torch::Tensor argmax_impl(const torch::Tensor& self,
     // reduced_shape returns for an empty dim list.
     auto out = torch::empty(reduced_shape(self, d, keepdim),
                             self.options().dtype(at::kLong));
-    index_reduce(self, d, out, nullptr, "argmax");
+    index_reduce(self, d, out, nullptr, VX_PRIM_OP_ARGMAX, "argmax");
+    return out;
+}
+
+static torch::Tensor argmin_impl(const torch::Tensor& self,
+                                 std::optional<int64_t> dim, bool keepdim) {
+    check_vortex_f32(self, "argmin");
+    c10::OptionalArrayRef<int64_t> d;
+    std::vector<int64_t> one;
+    if (dim.has_value()) {
+        one = {*dim};
+        d = c10::OptionalArrayRef<int64_t>(one);
+    }
+    check_reduce_dims(self, d, "argmin");
+    auto out = torch::empty(reduced_shape(self, d, keepdim),
+                            self.options().dtype(at::kLong));
+    index_reduce(self, d, out, nullptr, VX_PRIM_OP_ARGMIN, "argmin");
     return out;
 }
 
@@ -1626,7 +1642,20 @@ static std::tuple<torch::Tensor, torch::Tensor> max_dim_impl(
     auto shape = reduced_shape(self, d, keepdim);
     auto values = torch::empty(shape, self.options());
     auto indices = torch::empty(shape, self.options().dtype(at::kLong));
-    index_reduce(self, d, indices, &values, "max");
+    index_reduce(self, d, indices, &values, VX_PRIM_OP_ARGMAX, "max");
+    return std::make_tuple(values, indices);
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> min_dim_impl(
+    const torch::Tensor& self, int64_t dim, bool keepdim) {
+    check_vortex_f32(self, "min");
+    std::vector<int64_t> one = {dim};
+    c10::OptionalArrayRef<int64_t> d = c10::OptionalArrayRef<int64_t>(one);
+    check_reduce_dims(self, d, "min");
+    auto shape = reduced_shape(self, d, keepdim);
+    auto values = torch::empty(shape, self.options());
+    auto indices = torch::empty(shape, self.options().dtype(at::kLong));
+    index_reduce(self, d, indices, &values, VX_PRIM_OP_ARGMIN, "min");
     return std::make_tuple(values, indices);
 }
 
@@ -2775,6 +2804,11 @@ static torch::Tensor max_impl(const torch::Tensor& self) {
     return reduce_into(self, out, std::nullopt, VX_PRIM_OP_MAX, "max");
 }
 
+static torch::Tensor min_impl(const torch::Tensor& self) {
+    auto out = torch::empty({}, self.options());
+    return reduce_into(self, out, std::nullopt, VX_PRIM_OP_MIN, "min");
+}
+
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
@@ -2805,6 +2839,9 @@ void register_vortex_ops() {
     VX_IMPL("amin", &amin_impl);
     VX_IMPL("amin.out", &amin_out_impl);
     VX_IMPL("max", &max_impl);
+    VX_IMPL("min", &min_impl);
+    VX_IMPL("min.dim", &min_dim_impl);
+    VX_IMPL("argmin", &argmin_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);

@@ -60,6 +60,7 @@ typedef enum vx_prim_op {
     VX_PRIM_OP_ARGMAX = 15,     // index out; see vx_prim_index_reduce
     VX_PRIM_OP_MEAN = 16,
     VX_PRIM_OP_MIN = 17,
+    VX_PRIM_OP_ARGMIN = 18,     // index out; see vx_prim_index_reduce
 } vx_prim_op;
 
 typedef enum vx_prim_binary_op {
@@ -101,7 +102,7 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
                               uint64_t in, uint64_t out,
                               uint32_t rows, uint32_t cols);
 
-// Row-wise maximum with its index, for VX_PRIM_OP_ARGMAX.
+// Row-wise maximum/minimum with its index, for VX_PRIM_OP_ARGMAX/ARGMIN.
 // `indices` is rows uint32; `values` is rows floats and may be 0 if the caller
 // wants only the index. ARGMAX ties go to the earliest element and a NaN beats
 // every number, both of which match torch -- and because the value comes from

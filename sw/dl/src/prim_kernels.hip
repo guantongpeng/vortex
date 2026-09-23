@@ -183,6 +183,13 @@ static __device__ bool argmax_better(float v, uint32_t i, float bv, uint32_t bi)
     return i < bi;
 }
 
+static __device__ bool argmin_better(float v, uint32_t i, float bv, uint32_t bi) {
+    if (isnan(v) != isnan(bv)) return isnan(v);
+    if (isnan(v)) return i < bi;
+    if (v != bv) return v < bv;
+    return i < bi;
+}
+
 __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
     float* tbuf = (float*)__local_mem();
     const uint32_t lane = threadIdx.x % warpSize;
@@ -287,6 +294,51 @@ __global__ void prim_min_kernel(vx_prim_reduce_args_t* arg) {
             v = nan_min(v, tbuf[w]);
         }
         ((float*)(uintptr_t)arg->out)[row] = v;
+    }
+}
+
+__global__ void prim_min_index_kernel(vx_prim_reduce_args_t* arg) {
+    float* tbuf = (float*)__local_mem();
+    const uint32_t lane = threadIdx.x % warpSize;
+    const uint32_t wid = threadIdx.x / warpSize;
+    const uint32_t row = blockIdx.x;
+    const float* in = (const float*)(uintptr_t)arg->in + (size_t)row * arg->cols;
+    float seen = INFINITY;
+    uint32_t seen_idx = 0;
+    for (uint32_t i = threadIdx.x; i < arg->cols; i += PRIM_BLOCK) {
+        const float x = in[i];
+        if (argmin_better(x, i, seen, seen_idx)) {
+            seen = x;
+            seen_idx = i;
+        }
+    }
+    for (uint32_t off = warpSize / 2; off > 0; off >>= 1) {
+        const float ov = __shfl_down(seen, (int)off, warpSize);
+        const uint32_t oi = __shfl_down(seen_idx, (int)off, warpSize);
+        if (argmin_better(ov, oi, seen, seen_idx)) {
+            seen = ov;
+            seen_idx = oi;
+        }
+    }
+    uint32_t* ubuf = (uint32_t*)tbuf;
+    if (lane == 0) {
+        tbuf[wid] = seen;
+        ubuf[PRIM_LMEM_FLOATS / 2 + wid] = seen_idx;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float bv = tbuf[0];
+        uint32_t bi = ubuf[PRIM_LMEM_FLOATS / 2];
+        for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) {
+            const float v = tbuf[w];
+            const uint32_t i = ubuf[PRIM_LMEM_FLOATS / 2 + w];
+            if (argmin_better(v, i, bv, bi)) {
+                bv = v;
+                bi = i;
+            }
+        }
+        ((uint32_t*)(uintptr_t)arg->out)[row] = bi;
+        if (arg->values) ((float*)(uintptr_t)arg->values)[row] = bv;
     }
 }
 
