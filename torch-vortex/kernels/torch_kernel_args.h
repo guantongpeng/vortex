@@ -69,6 +69,23 @@ struct fill_args_t {
     uint32_t pad;
 };
 
+// nll_loss_forward: input is [C] or [N,C], target is scalar or [N]. The
+// kernel writes output (scalar for reductions, N values for none) and the
+// scalar total weight; invalid targets set the device-side flag.
+struct nll_loss_args_t {
+    uint64_t dst;
+    uint64_t total_weight;
+    uint64_t input;
+    uint64_t target;
+    uint64_t weight;
+    uint64_t invalid;
+    uint32_t rows;
+    uint32_t classes;
+    uint32_t reduction;
+    uint32_t pad;
+    int64_t ignore_index;
+};
+
 // copy_strided_kernel: elementwise copy between two arbitrarily strided
 // buffers of the same shape, up to 4 dimensions. A stride of 0 broadcasts,
 // which is how `x.t().to("vortex")` and `contiguous()` on a transposed tensor
@@ -179,6 +196,7 @@ struct bias_args_t {
     X(scatter_kernel, index_args_t, 0, 0)                                     \
     X(index_add_kernel, index_add_args_t, 0, 0)                               \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
+    X(nll_loss_kernel, nll_loss_args_t, 0, 0)                                 \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 
 #endif  // TORCH_VORTEX_KERNEL_ARGS_H

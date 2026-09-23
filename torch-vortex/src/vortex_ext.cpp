@@ -1442,6 +1442,57 @@ static torch::Tensor& index_add__impl(torch::Tensor& self, int64_t dim,
     return self;
 }
 
+static std::tuple<torch::Tensor, torch::Tensor> nll_loss_forward_impl(
+    const torch::Tensor& input, const torch::Tensor& target,
+    const std::optional<torch::Tensor>& weight, int64_t reduction,
+    c10::SymInt ignore_index) {
+    check_vortex_f32(input, "nll_loss input");
+    TORCH_CHECK(input.dim() == 1 || input.dim() == 2,
+                "torch_vortex: nll_loss input must be 1-D or 2-D");
+    TORCH_CHECK(target.device().type() == c10::DeviceType::PrivateUse1 &&
+                    target.scalar_type() == at::kLong && target.is_contiguous(),
+                "torch_vortex: nll_loss target must be contiguous Vortex int64");
+    const uint32_t rows = input.dim() == 1 ? 1 : u32_dim(input.size(0),
+                                                          "nll_loss rows");
+    const uint32_t classes = u32_dim(input.dim() == 1 ? input.size(0)
+                                                       : input.size(1),
+                                      "nll_loss classes");
+    TORCH_CHECK(classes > 0, "torch_vortex: nll_loss classes must be nonzero");
+    TORCH_CHECK((input.dim() == 1 && target.dim() == 0) ||
+                    (input.dim() == 2 && target.dim() == 1 &&
+                     target.size(0) == input.size(0)),
+                "torch_vortex: nll_loss target shape does not match input");
+    TORCH_CHECK(reduction >= 0 && reduction <= 2,
+                "torch_vortex: nll_loss reduction must be none, mean or sum");
+    uint64_t weight_addr = 0;
+    if (weight.has_value() && weight->defined()) {
+        check_vortex_f32(*weight, "nll_loss weight");
+        TORCH_CHECK(weight->dim() == 1 && weight->size(0) == classes,
+                    "torch_vortex: nll_loss weight must have one value per class");
+        weight_addr = (uint64_t)(uintptr_t)weight->data_ptr();
+    }
+    const auto out_shape = (reduction == 0 && input.dim() == 2)
+                               ? std::vector<int64_t>{(int64_t)rows}
+                               : std::vector<int64_t>{};
+    auto out = torch::empty(out_shape, input.options());
+    auto total_weight = torch::empty({}, input.options());
+    auto invalid = make_index_error_flag(input);
+    nll_loss_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
+    args.total_weight = (uint64_t)(uintptr_t)total_weight.data_ptr();
+    args.input = (uint64_t)(uintptr_t)input.data_ptr();
+    args.target = (uint64_t)(uintptr_t)target.data_ptr();
+    args.weight = weight_addr;
+    args.invalid = (uint64_t)(uintptr_t)invalid.data_ptr();
+    args.rows = rows;
+    args.classes = classes;
+    args.reduction = (uint32_t)reduction;
+    args.ignore_index = ignore_index.expect_int();
+    launch(h_nll_loss_kernel, args, 1);
+    check_index_error_flag(invalid, "nll_loss");
+    return std::make_tuple(out, total_weight);
+}
+
 // ---- reductions -----------------------------------------------------------
 //
 // The kernel reduces the trailing dimension of a contiguous (rows, cols)
@@ -2911,6 +2962,7 @@ void register_vortex_ops() {
     VX_IMPL("index_add", &index_add_impl);
     VX_IMPL("index_add.out", &index_add_out_impl);
     VX_IMPL("index_add_", &index_add__impl);
+    VX_IMPL("nll_loss_forward", &nll_loss_forward_impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
     VX_IMPL("mean.dim", &mean_impl);

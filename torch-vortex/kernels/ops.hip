@@ -39,6 +39,39 @@ __global__ void fill_kernel(fill_args_t* arg) {
     }
 }
 
+__global__ void nll_loss_kernel(nll_loss_args_t* arg) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    float total = 0.0f;
+    float total_weight = 0.0f;
+    for (uint32_t row = 0; row < arg->rows; ++row) {
+        const int64_t target = ((const int64_t*)(uintptr_t)arg->target)[row];
+        if (target == arg->ignore_index) {
+            if (arg->reduction == 0) ((float*)(uintptr_t)arg->dst)[row] = 0.0f;
+            continue;
+        }
+        if (target < 0 || target >= (int64_t)arg->classes) {
+            *reinterpret_cast<uint32_t*>((uintptr_t)arg->invalid) = 1;
+            if (arg->reduction == 0) ((float*)(uintptr_t)arg->dst)[row] = 0.0f;
+            continue;
+        }
+        const float w = arg->weight
+                            ? ((const float*)(uintptr_t)arg->weight)[target]
+                            : 1.0f;
+        const float value = -((const float*)(uintptr_t)arg->input)
+                                 [(size_t)row * arg->classes + target] * w;
+        if (arg->reduction == 0) ((float*)(uintptr_t)arg->dst)[row] = value;
+        total += value;
+        total_weight += w;
+    }
+    if (arg->reduction == 1) {
+        ((float*)(uintptr_t)arg->dst)[0] =
+            total_weight == 0.0f ? NAN : total / total_weight;
+    } else if (arg->reduction == 2) {
+        ((float*)(uintptr_t)arg->dst)[0] = total;
+    }
+    ((float*)(uintptr_t)arg->total_weight)[0] = total_weight;
+}
+
 // The index representation ATen wants, from the one the DL reduce produces.
 // Pure conversion: one thread per index, grid-stride like everything here.
 __global__ void widen_u32_i64_kernel(widen_args_t* arg) {
