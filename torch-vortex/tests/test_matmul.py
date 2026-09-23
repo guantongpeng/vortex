@@ -218,3 +218,14 @@ def test_matmul_rejects_bad_input(backend):
         torch.bmm(bc, bd)
     with assert_rejected("contiguous", backend):
         torch.bmm(bmm_nc, bmm_rhs)
+
+
+def test_linear_leading_batch_dimensions(backend):
+    for shape in ((5,), (2, 3, 5), (2, 1, 3, 5)):
+        x = torch.randn(*shape)
+        w = torch.randn(4, 5)
+        b = torch.randn(4)
+        got = torch.nn.functional.linear(x.to("vortex"), w.to("vortex"),
+                                         b.to("vortex"))
+        want = torch.nn.functional.linear(x, w, b)
+        torch.testing.assert_close(got.cpu(), want, rtol=1e-5, atol=1e-5)

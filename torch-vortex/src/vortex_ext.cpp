@@ -2896,14 +2896,18 @@ static torch::Tensor mm_impl_wrap(const torch::Tensor& a,
 static torch::Tensor linear_impl(
     const torch::Tensor& input, const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias) {
-    // v1 is 2-D only. A 1-D input has a different output rank, and quietly
-    // treating it as 2-D is worse than refusing it.
-    check_cnn_f32(input, "linear.input", 2);
+    check_vortex_f32(input, "linear.input");
+    TORCH_CHECK(input.dim() > 0,
+                "torch_vortex: linear input must have at least one dimension");
     check_cnn_f32(weight, "linear.weight", 2);
-    TORCH_CHECK(input.size(1) == weight.size(1),
-                "torch_vortex: linear input has ", input.size(1),
+    const int64_t k = input.size(-1);
+    TORCH_CHECK(k == weight.size(1),
+                "torch_vortex: linear input has ", k,
                 " features but weight expects ", weight.size(1));
-    auto out = mm_launch(input, weight, 1, nullptr, 0, 1.0f, 0.0f);  // x @ w^T
+    int64_t rows = 1;
+    for (int64_t i = 0; i + 1 < input.dim(); ++i) rows *= input.size(i);
+    auto matrix = input.reshape({rows, k});
+    auto out = mm_launch(matrix, weight, 1, nullptr, 0, 1.0f, 0.0f);
     if (bias.has_value() && bias->defined()) {
         check_cnn_f32(*bias, "linear.bias", 1);
         TORCH_CHECK(bias->numel() == out.size(1), "torch_vortex: linear bias has ",
@@ -2915,7 +2919,9 @@ static torch::Tensor linear_impl(
                             u32_dim(out.size(1), "linear columns")};
         launch(h_tv_bias_add_kernel, args, (uint32_t)((out.numel() + 3) / 4));
     }
-    return out;
+    auto shape = input.sizes().vec();
+    shape.back() = weight.size(0);
+    return out.reshape(shape);
 }
 
 // torch.addmm: beta*self + alpha*(mat1 @ mat2).
