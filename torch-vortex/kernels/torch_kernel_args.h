@@ -48,18 +48,8 @@
 //
 // The unary operations are not here: they are sw/dl's (vx_prim_op), because
 // that library's prim module implements them and this image would only be a
-// second copy of the same switch. Binary operation labels remain here for the
-// dispatcher; their argument blocks and kernels live in sw/dl's prim image.
-
-enum TorchBinaryOp {
-    TORCH_BINARY_ADD = 0,
-    TORCH_BINARY_SUB,
-    TORCH_BINARY_MUL,
-    TORCH_BINARY_DIV,
-    TORCH_BINARY_MAXIMUM,
-    TORCH_BINARY_MINIMUM,
-    TORCH_BINARY_COUNT
-};
+// second copy of the same switch. Binary operation labels are public in
+// vortex/prim.h; their argument blocks and kernels live in sw/dl's prim image.
 
 enum TorchCopyDType {
     TORCH_COPY_F32 = 0,

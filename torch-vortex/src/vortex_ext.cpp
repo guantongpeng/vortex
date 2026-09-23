@@ -1951,7 +1951,7 @@ static torch::Tensor scaled_by(const torch::Tensor& t, double k) {
     auto out = torch::empty_like(t);
     launch_scalar_op((uint64_t)(uintptr_t)out.data_ptr(),
                      (uint64_t)(uintptr_t)t.data_ptr(), (float)k,
-                     u32_numel(out, "scaled"), TORCH_BINARY_MUL, 0);
+                     u32_numel(out, "scaled"), VX_PRIM_BINARY_MUL, 0);
     return out;
 }
 
@@ -2032,28 +2032,28 @@ static torch::Tensor& alpha_scaled_op_(torch::Tensor& self, const torch::Tensor&
         return binary_op_(self, other, OP, LABEL);                             \
     }
 
-VX_BINARY_OP(mul, TORCH_BINARY_MUL, "mul")
-VX_BINARY_OP(div, TORCH_BINARY_DIV, "div")
-VX_BINARY_OP(maximum, TORCH_BINARY_MAXIMUM, "maximum")
-VX_BINARY_OP(minimum, TORCH_BINARY_MINIMUM, "minimum")
+VX_BINARY_OP(mul, VX_PRIM_BINARY_MUL, "mul")
+VX_BINARY_OP(div, VX_PRIM_BINARY_DIV, "div")
+VX_BINARY_OP(maximum, VX_PRIM_BINARY_MAXIMUM, "maximum")
+VX_BINARY_OP(minimum, VX_PRIM_BINARY_MINIMUM, "minimum")
 #undef VX_BINARY_OP
 
 static torch::Tensor add_impl(const torch::Tensor& a, const torch::Tensor& b,
                               const c10::Scalar& alpha) {
-    return alpha_scaled_op(a, b, TORCH_BINARY_ADD, alpha, "add");
+    return alpha_scaled_op(a, b, VX_PRIM_BINARY_ADD, alpha, "add");
 }
 static torch::Tensor sub_impl(const torch::Tensor& a, const torch::Tensor& b,
                               const c10::Scalar& alpha) {
     // torch.sub(a, b, alpha) is a - alpha*b
-    return alpha_scaled_op(a, b, TORCH_BINARY_SUB, alpha, "sub");
+    return alpha_scaled_op(a, b, VX_PRIM_BINARY_SUB, alpha, "sub");
 }
 static torch::Tensor& add__impl(torch::Tensor& self, const torch::Tensor& other,
                                 const c10::Scalar& alpha) {
-    return alpha_scaled_op_(self, other, TORCH_BINARY_ADD, alpha, "add_");
+    return alpha_scaled_op_(self, other, VX_PRIM_BINARY_ADD, alpha, "add_");
 }
 static torch::Tensor& sub__impl(torch::Tensor& self, const torch::Tensor& other,
                                 const c10::Scalar& alpha) {
-    return alpha_scaled_op_(self, other, TORCH_BINARY_SUB, alpha, "sub_");
+    return alpha_scaled_op_(self, other, VX_PRIM_BINARY_SUB, alpha, "sub_");
 }
 
 // The .Scalar overloads. `x + 1.0` reaches add.Tensor with a wrapped 0-dim
@@ -2069,32 +2069,32 @@ static torch::Tensor& sub__impl(torch::Tensor& self, const torch::Tensor& other,
         return binary_op_(self, at::scalar_to_tensor(other), OP, LABEL);        \
     }
 
-VX_SCALAR_OP("mul.Scalar", mul, TORCH_BINARY_MUL, "mul")
-VX_SCALAR_OP("div.Scalar", div, TORCH_BINARY_DIV, "div")
+VX_SCALAR_OP("mul.Scalar", mul, VX_PRIM_BINARY_MUL, "mul")
+VX_SCALAR_OP("div.Scalar", div, VX_PRIM_BINARY_DIV, "div")
 #undef VX_SCALAR_OP
 
 static torch::Tensor add_scalar_impl(const torch::Tensor& self,
                                      const c10::Scalar& other,
                                      const c10::Scalar& alpha) {
-    return alpha_scaled_op(self, at::scalar_to_tensor(other), TORCH_BINARY_ADD, alpha,
+    return alpha_scaled_op(self, at::scalar_to_tensor(other), VX_PRIM_BINARY_ADD, alpha,
                     "add");
 }
 static torch::Tensor sub_scalar_impl(const torch::Tensor& self,
                                      const c10::Scalar& other,
                                      const c10::Scalar& alpha) {
-    return alpha_scaled_op(self, at::scalar_to_tensor(other), TORCH_BINARY_SUB, alpha,
+    return alpha_scaled_op(self, at::scalar_to_tensor(other), VX_PRIM_BINARY_SUB, alpha,
                     "sub");
 }
 static torch::Tensor& add_scalar__impl(torch::Tensor& self,
                                        const c10::Scalar& other,
                                        const c10::Scalar& alpha) {
-    return alpha_scaled_op_(self, at::scalar_to_tensor(other), TORCH_BINARY_ADD, alpha,
+    return alpha_scaled_op_(self, at::scalar_to_tensor(other), VX_PRIM_BINARY_ADD, alpha,
                      "add_");
 }
 static torch::Tensor& sub_scalar__impl(torch::Tensor& self,
                                        const c10::Scalar& other,
                                        const c10::Scalar& alpha) {
-    return alpha_scaled_op_(self, at::scalar_to_tensor(other), TORCH_BINARY_SUB, alpha,
+    return alpha_scaled_op_(self, at::scalar_to_tensor(other), VX_PRIM_BINARY_SUB, alpha,
                      "sub_");
 }
 
