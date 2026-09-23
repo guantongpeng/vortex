@@ -2419,7 +2419,7 @@ static void check_cnn_f32(const torch::Tensor& t, const char* what,
 // grid instead of an error. PyTorch floors, so a window that does not divide
 // evenly is legal and must not be rejected here.
 static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
-                          const char* what) {
+                          bool ceil_mode, const char* what) {
     TORCH_CHECK(k > 0, "torch_vortex: ", what, ": kernel must be > 0, got ", k);
     TORCH_CHECK(stride > 0,
                 "torch_vortex: ", what, ": stride must be > 0, got ", stride);
@@ -2427,7 +2427,12 @@ static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
                 "torch_vortex: ", what, ": padding must be >= 0, got ", pad);
     TORCH_CHECK(in + 2 * pad >= k, "torch_vortex: ", what, ": input ", in,
                 " with padding ", pad, " is smaller than kernel ", k);
-    return (in + 2 * pad - k) / stride + 1;
+    int64_t out = ceil_mode ? (in + 2 * pad - k + stride - 1) / stride + 1
+                            : (in + 2 * pad - k) / stride + 1;
+    if (ceil_mode) {
+        while (out > 0 && (out - 1) * stride >= in + pad) --out;
+    }
+    return out;
 }
 
 
@@ -2465,8 +2470,8 @@ static torch::Tensor convolution_impl(
                 "torch_vortex: conv effective kernel overflows");
     const int64_t ekh = (kh - 1) * dh + 1;
     const int64_t ekw = (kw - 1) * dw + 1;
-    const int64_t ho = window_out(is[2], ekh, ph, sh, "conv height");
-    const int64_t wo = window_out(is[3], ekw, pw, sw, "conv width");
+    const int64_t ho = window_out(is[2], ekh, ph, sh, false, "conv height");
+    const int64_t wo = window_out(is[3], ekw, pw, sw, false, "conv width");
 
     // One output channel stages all of its weights in LMEM at once, and the DL
     // kernel's ceiling for that is 16384 bytes. This is the real bound on a
@@ -2520,7 +2525,8 @@ static torch::Tensor convolution_impl(
 static torch::Tensor pool_impl(const torch::Tensor& self,
                                c10::IntArrayRef kernel_size,
                                c10::IntArrayRef stride,
-                               c10::IntArrayRef padding, uint32_t op) {
+                               c10::IntArrayRef padding, uint32_t op,
+                               bool ceil_mode, uint32_t divisor) {
     check_cnn_f32(self, "pool.input", 4);
     const int64_t kh = kernel_size[0], kw = kernel_size[1];
     const int64_t sh = stride.size() > 0 ? stride[0] : kh;
@@ -2528,8 +2534,8 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     const int64_t ph = padding.size() > 0 ? padding[0] : 0;
     const int64_t pw = padding.size() > 1 ? padding[1] : ph;
     const auto& s = self.sizes();
-    const int64_t ho = window_out(s[2], kh, ph, sh, "pool height");
-    const int64_t wo = window_out(s[3], kw, pw, sw, "pool width");
+    const int64_t ho = window_out(s[2], kh, ph, sh, ceil_mode, "pool height");
+    const int64_t wo = window_out(s[3], kw, pw, sw, ceil_mode, "pool width");
     auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
     // An all-empty result is not a launch: the DL kernel refuses n == 0 or a
     // zero-sized dimension, and there is nothing to compute anyway.
@@ -2539,7 +2545,7 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     // The shape arithmetic stays here: window_out is bounds-checked and names
     // the argument it rejects, while the DL's is plain unsigned arithmetic.
     // ATen validates, the DL computes.
-    DL_LAUNCH(vx_dnn_pool2d(current_queue(),
+    DL_LAUNCH(vx_dnn_pool2d_ex(current_queue(),
                             (uint64_t)(uintptr_t)self.data_ptr(),
                             (uint64_t)(uintptr_t)out.data_ptr(),
                             u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
@@ -2550,7 +2556,7 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
                             u32_dim(ph, "pool padding height"),
                             u32_dim(pw, "pool padding width"),
                             u32_dim(sh, "pool stride height"),
-                            u32_dim(sw, "pool stride width"), op));
+                            u32_dim(sw, "pool stride width"), op, divisor));
     return out;
 }
 
@@ -2560,9 +2566,9 @@ static torch::Tensor max_pool2d_impl(const torch::Tensor& self,
                                      c10::IntArrayRef padding,
                                      c10::IntArrayRef dilation,
                                      bool ceil_mode) {
-    TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
     for (auto d : dilation) TORCH_CHECK(d == 1, "torch_vortex: dilation must be 1");
-    return pool_impl(self, kernel, stride, padding, 0);
+    TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
+    return pool_impl(self, kernel, stride, padding, 0, false, 0);
 }
 
 static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
@@ -2572,10 +2578,14 @@ static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
                                      bool ceil_mode, bool count_include_pad,
                                      std::optional<int64_t> divisor_override) {
     TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
-    TORCH_CHECK(!divisor_override.has_value(),
-                "torch_vortex: avg_pool2d divisor_override unsupported in v1");
+    uint32_t divisor = 0;
+    if (divisor_override.has_value()) {
+        TORCH_CHECK(*divisor_override > 0 && *divisor_override <= UINT32_MAX,
+                    "torch_vortex: avg_pool2d divisor_override must fit uint32");
+        divisor = (uint32_t)*divisor_override;
+    }
     return pool_impl(self, kernel, stride, padding,
-                     count_include_pad ? 2u : 1u);
+                     count_include_pad ? 2u : 1u, false, divisor);
 }
 
 
@@ -2586,7 +2596,7 @@ static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
     TORCH_CHECK(os.size() == 2 && os[0] == 1 && os[1] == 1,
                 "torch_vortex: adaptive_avg_pool2d only output (1,1) in v1");
     const auto& s = self.sizes();
-    return pool_impl(self, {(int64_t)s[2], (int64_t)s[3]}, {}, {}, 1);
+    return pool_impl(self, {(int64_t)s[2], (int64_t)s[3]}, {}, {}, 1, false, 0);
 }
 
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm_impl(

@@ -163,7 +163,8 @@
 - [x] conv 支持 groups/depthwise、dilation，并按每组输入通道计算权重 staging 与 LMEM；大 kernel 和完整模型分级仍待，详见 [`p2_14_grouped_conv.md`](p2_14_grouped_conv.md)、[`p2_16_conv_dilation.md`](p2_16_conv_dilation.md)。
 - [ ] conv 支持大通道和大 kernel 的权重 tiling，并检查 LMEM/资源上限。
 - [x] BN inference optional affine 与 linear 前导 batch 维已支持；详见 [`p2_18_linear_batch.md`](p2_18_linear_batch.md)。
-- [ ] pool 其余形态和 `relu_` 仍待补齐。
+- [x] avg_pool2d `divisor_override` 已接入统一 DNN kernel；ceil_mode、pool dilation、return_indices 和其余 pool 形态仍待，详见 [`p2_19_pool_divisor.md`](p2_19_pool_divisor.md)。
+- [ ] `relu_` 及剩余 pool 形态仍待补齐。
 - [ ] 完成 MiniResNet→小输入 ResNet-18→目标输入尺寸的分级测试，固定 torchvision、权重和预处理。
 - [ ] 输出中间层、logits、fallback、传输、内存和性能证据，不能只检查最终输出。
 

@@ -166,19 +166,25 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
                                  kh, kw, ph, pw, sh, sw, groups, 1, 1);
 }
 
-vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
-                            uint32_t n, uint32_t c,
-                            uint32_t hi, uint32_t wi,
-                            uint32_t kh, uint32_t kw,
-                            uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
-                            uint32_t op) {
+vx_dnn_status vx_dnn_pool2d_ex(vx_queue_h q, uint64_t in, uint64_t out,
+                               uint32_t n, uint32_t c,
+                               uint32_t hi, uint32_t wi,
+                               uint32_t kh, uint32_t kw,
+                               uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                               uint32_t op, uint32_t divisor) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
     if (!in || !out || n == 0 || c == 0 || hi == 0 || wi == 0 || kh == 0 ||
-        kw == 0 || sh == 0 || sw == 0 || (op != 0 && op != 1 && op != 2)) {
+        kw == 0 || sh == 0 || sw == 0 || (op != 0 && op != 1 && op != 2) ||
+        (op == 0 && divisor != 0)) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    const uint32_t ho = (hi + 2 * ph - kh) / sh + 1;
-    const uint32_t wo = (wi + 2 * pw - kw) / sw + 1;
+    if ((uint64_t)hi + 2 * ph < kh || (uint64_t)wi + 2 * pw < kw) {
+        return VX_DNN_ERR_BAD_ARGS;
+    }
+    const uint64_t nh = (uint64_t)hi + 2 * ph - kh;
+    const uint64_t nw = (uint64_t)wi + 2 * pw - kw;
+    const uint32_t ho = (uint32_t)(nh / sh + 1);
+    const uint32_t wo = (uint32_t)(nw / sw + 1);
     vx_dnn_pool_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.out = (vx_dl_ptr_t)out;
@@ -195,7 +201,16 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
     args.sh = sh;
     args.sw = sw;
     args.op = op;
+    args.divisor = divisor;
     return launch3(q, g_dnn.pool2d, &args, sizeof(args), ho, c, n, 0);
+}
+
+vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
+                            uint32_t n, uint32_t c, uint32_t hi, uint32_t wi,
+                            uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw,
+                            uint32_t sh, uint32_t sw, uint32_t op) {
+    return vx_dnn_pool2d_ex(q, in, out, n, c, hi, wi, kh, kw, ph, pw, sh, sw,
+                            op, 0);
 }
 
 vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,

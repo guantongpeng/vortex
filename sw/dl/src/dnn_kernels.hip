@@ -119,10 +119,12 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         }
         if (arg->op == 0) {
             out_row[ox] = acc;
-        } else if (arg->op == 1) {
-            out_row[ox] = count ? acc / (float)count : 0.0f;
-        } else {
-            out_row[ox] = acc / (float)(arg->kh * arg->kw);
+        } else if (arg->op == 1 || arg->op == 2) {
+            const uint32_t divisor = arg->divisor
+                                         ? arg->divisor
+                                         : (arg->op == 1 ? count
+                                                         : arg->kh * arg->kw);
+            out_row[ox] = divisor ? acc / (float)divisor : 0.0f;
         }
     }
 }

@@ -216,8 +216,9 @@ def test_avg_pool2d_rejects_unimplemented_overloads(backend):
     x = torch.randn(1, 2, 4, 4).to("vortex")
     with assert_rejected("ceil_mode unsupported", backend):
         torch.nn.functional.avg_pool2d(x, 2, ceil_mode=True)
-    with assert_rejected("divisor_override unsupported", backend):
-        torch.nn.functional.avg_pool2d(x, 2, divisor_override=3)
+    got = torch.nn.functional.avg_pool2d(x, 2, stride=2, divisor_override=3)
+    want = torch.nn.functional.avg_pool2d(x.cpu(), 2, stride=2, divisor_override=3)
+    assert_matches_cpu(got, want, rtol=1e-5, atol=1e-6)
 
 
 def test_device_rng_is_refused_by_name(backend):

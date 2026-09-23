@@ -51,6 +51,7 @@ typedef struct {
     uint32_t n, c, hi, wi, ho, wo;
     uint32_t kh, kw, ph, pw, sh, sw;
     uint32_t op;
+    uint32_t divisor;
 } vx_dnn_pool_args_t;
 
 // Inference batch norm as a fused per-channel affine:
