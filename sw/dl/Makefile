@@ -154,7 +154,7 @@ D_CONV_SIZE := 72
 D_POOL_SIZE := 60
 D_BN_SIZE := 44
 endif
-DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE)}]
+DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}]
 
 dnn.vxbin: $(SRC_DIR)/dnn_kernels.hip $(SRC_DIR)/dnn_args.h \
            $(VORTEX_HOME)/ci/hipcc_vortex.py

@@ -63,6 +63,7 @@ enum TorchBinaryOp {
 
 enum TorchCopyDType {
     TORCH_COPY_F32 = 0,
+    TORCH_COPY_F64,
     TORCH_COPY_F16,
     TORCH_COPY_BF16,
     TORCH_COPY_I32,

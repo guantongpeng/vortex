@@ -207,6 +207,9 @@ __global__ void copy_strided_kernel(copy_strided_args_t* arg) {
         case TORCH_COPY_F32:
             value = ((const float*)(uintptr_t)arg->src)[src_off];
             break;
+        case TORCH_COPY_F64:
+            value = (float)((const double*)(uintptr_t)arg->src)[src_off];
+            break;
         case TORCH_COPY_F16:
             value = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->src)[src_off]);
             break;
@@ -229,6 +232,9 @@ __global__ void copy_strided_kernel(copy_strided_args_t* arg) {
         switch (arg->dst_type) {
         case TORCH_COPY_F32:
             ((float*)(uintptr_t)arg->dst)[dst_off] = value;
+            break;
+        case TORCH_COPY_F64:
+            ((double*)(uintptr_t)arg->dst)[dst_off] = (double)value;
             break;
         case TORCH_COPY_F16:
             ((vx_fp16_t*)(uintptr_t)arg->dst)[dst_off] = vx_f32_to_fp16(value);

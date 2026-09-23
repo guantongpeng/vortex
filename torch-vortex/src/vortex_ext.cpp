@@ -819,6 +819,7 @@ static torch::Tensor empty_strided_impl(
 static uint32_t copy_dtype(c10::ScalarType dtype) {
     switch (dtype) {
     case at::kFloat: return TORCH_COPY_F32;
+    case at::kDouble: return TORCH_COPY_F64;
     case at::kHalf: return TORCH_COPY_F16;
     case at::kBFloat16: return TORCH_COPY_BF16;
     case at::kInt: return TORCH_COPY_I32;
