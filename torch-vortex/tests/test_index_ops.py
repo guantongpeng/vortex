@@ -39,6 +39,16 @@ def test_gather_accepts_int32_and_subshapes(backend):
     assert_matches_cpu(got, torch.gather(x, 1, index), rtol=0, atol=0)
 
 
+def test_gather_out_matches_cpu(backend):
+    x = torch.randn(2, 3, 4)
+    index = torch.tensor([[[0, 1], [2, 0], [1, 2]],
+                          [[1, 0], [0, 2], [2, 1]]], dtype=torch.int64)
+    out = torch.empty_like(index, dtype=torch.float32, device="vortex")
+    got = torch.gather(v(x), 1, v(index), out=out)
+    assert got.data_ptr() == out.data_ptr()
+    assert_matches_cpu(got, torch.gather(x, 1, index), rtol=0, atol=0)
+
+
 def test_scatter_matches_cpu(backend):
     base = torch.randn(2, 3, 4)
     index = torch.tensor([[[0, 1, 0, 1], [1, 0, 1, 0]],
@@ -55,6 +65,17 @@ def test_scatter_accepts_int32_and_submits_one_kernel(backend):
     backend.reset_stats()
     got = torch.scatter(v(base), 1, v(index), v(src))
     assert backend.stats()["launches"] == 1
+    assert_matches_cpu(got, torch.scatter(base, 1, index, src), rtol=0, atol=0)
+
+
+def test_scatter_out_matches_cpu(backend):
+    base = torch.randn(2, 3, 4)
+    index = torch.tensor([[[0, 1, 0, 1], [1, 0, 1, 0]],
+                          [[1, 0, 1, 0], [0, 1, 0, 1]]], dtype=torch.int64)
+    src = torch.randn(2, 2, 4)
+    out = torch.empty_like(base).to("vortex")
+    got = torch.scatter(v(base), 1, v(index), v(src), out=out)
+    assert got.data_ptr() == out.data_ptr()
     assert_matches_cpu(got, torch.scatter(base, 1, index, src), rtol=0, atol=0)
 
 

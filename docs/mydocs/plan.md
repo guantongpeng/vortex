@@ -144,6 +144,7 @@
 ### 2.3 通用 Tensor 和基础算子
 
 - [x] FP32 连续布局的 `sum/mean/max/argmax`、`bmm`、`cat/stack`、`gather/scatter.src`、`index_add`、`avg_pool2d` 基础路径。
+- [x] `gather.out` 与 `scatter.src_out` 复用同一 device index kernel 和 out storage；其余 out/in-place overload 仍待，详见 [`p2_11_index_out.md`](p2_11_index_out.md)。
 - [ ] `topk`、`sort`、`min`、`argmin`、`nll_loss_forward`。
 - [x] FP32 `amin` 与 `amin.out`，采用独立静态 MIN reduction kernel；详见 [`p2_05_amin.md`](p2_05_amin.md)。
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。

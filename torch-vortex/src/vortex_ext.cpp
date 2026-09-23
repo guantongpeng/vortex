@@ -1275,6 +1275,17 @@ static torch::Tensor gather_impl(const torch::Tensor& self, int64_t dim,
     return out;
 }
 
+static torch::Tensor& gather_out_impl(const torch::Tensor& self, int64_t dim,
+                                      const torch::Tensor& index,
+                                      bool sparse_grad, torch::Tensor& out) {
+    check_vortex_f32(out, "gather out");
+    auto tmp = gather_impl(self, dim, index, sparse_grad);
+    TORCH_CHECK(out.sizes() == tmp.sizes(), "torch_vortex: gather out shape ",
+                out.sizes(), " does not match result ", tmp.sizes());
+    out.copy_(tmp);
+    return out;
+}
+
 static torch::Tensor scatter_impl(const torch::Tensor& self, int64_t dim,
                                   const torch::Tensor& index,
                                   const torch::Tensor& src) {
@@ -1305,6 +1316,19 @@ static torch::Tensor scatter_impl(const torch::Tensor& self, int64_t dim,
                                 "scatter");
     launch(h_scatter_kernel, args, (total + 3) / 4);
     check_index_error_flag(invalid, "scatter");
+    return out;
+}
+
+static torch::Tensor& scatter_src_out_impl(const torch::Tensor& self,
+                                           int64_t dim,
+                                           const torch::Tensor& index,
+                                           const torch::Tensor& src,
+                                           torch::Tensor& out) {
+    check_vortex_f32(out, "scatter out");
+    auto tmp = scatter_impl(self, dim, index, src);
+    TORCH_CHECK(out.sizes() == tmp.sizes(), "torch_vortex: scatter out shape ",
+                out.sizes(), " does not match result ", tmp.sizes());
+    out.copy_(tmp);
     return out;
 }
 
@@ -2828,7 +2852,9 @@ void register_vortex_ops() {
     VX_IMPL("cat", &cat_impl);
     VX_IMPL("stack", &stack_impl);
     VX_IMPL("gather", &gather_impl);
+    VX_IMPL("gather.out", &gather_out_impl);
     VX_IMPL("scatter.src", &scatter_impl);
+    VX_IMPL("scatter.src_out", &scatter_src_out_impl);
     VX_IMPL("index_add", &index_add_impl);
     VX_IMPL("sum.dim_IntList", &sum_impl);
     VX_IMPL("sum.IntList_out", &sum_out_impl);
