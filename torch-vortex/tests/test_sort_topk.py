@@ -32,3 +32,20 @@ def test_topk_largest_smallest_and_zero_k(backend):
 
     values, indices = torch.topk(x.to("vortex"), 0, dim=1)
     assert values.shape == (2, 0) and indices.shape == (2, 0)
+
+
+def test_sort_and_topk_out_overloads(backend):
+    x = torch.tensor([[4.0, 1.0, 3.0, 2.0]])
+    values = torch.empty_like(x).to("vortex")
+    indices = torch.empty(x.shape, dtype=torch.long, device="vortex")
+    rv, ri = torch.sort(x.to("vortex"), out=(values, indices))
+    assert rv.data_ptr() == values.data_ptr() and ri.data_ptr() == indices.data_ptr()
+    torch.testing.assert_close(values.cpu(), torch.tensor([[1.0, 2.0, 3.0, 4.0]]))
+    assert indices.cpu().tolist() == [[1, 3, 2, 0]]
+
+    tv = torch.empty((1, 2), device="vortex")
+    ti = torch.empty((1, 2), dtype=torch.long, device="vortex")
+    rv, ri = torch.topk(x.to("vortex"), 2, out=(tv, ti))
+    assert rv.data_ptr() == tv.data_ptr() and ri.data_ptr() == ti.data_ptr()
+    assert tv.cpu().tolist() == [[4.0, 3.0]]
+    assert ti.cpu().tolist() == [[0, 2]]

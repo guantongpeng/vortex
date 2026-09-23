@@ -3118,6 +3118,40 @@ static std::tuple<torch::Tensor, torch::Tensor> topk_impl(
     return sort_impl(self, dim, largest, k.expect_int());
 }
 
+static std::tuple<torch::Tensor&, torch::Tensor&> topk_values_impl(
+    const torch::Tensor& self, c10::SymInt k, int64_t dim, bool largest,
+    bool sorted, torch::Tensor& values, torch::Tensor& indices) {
+    auto result = topk_impl(self, k, dim, largest, sorted);
+    TORCH_CHECK(values.device() == self.device() && indices.device() == self.device(),
+                "torch_vortex: topk.values outputs must be on the input device");
+    TORCH_CHECK(values.scalar_type() == self.scalar_type() &&
+                    indices.scalar_type() == at::kLong,
+                "torch_vortex: topk.values outputs have the wrong dtype");
+    TORCH_CHECK(values.sizes() == std::get<0>(result).sizes() &&
+                    indices.sizes() == std::get<1>(result).sizes(),
+                "torch_vortex: topk.values outputs have the wrong shape");
+    values.copy_(std::get<0>(result));
+    indices.copy_(std::get<1>(result));
+    return std::tie(values, indices);
+}
+
+static std::tuple<torch::Tensor&, torch::Tensor&> sort_values_impl(
+    const torch::Tensor& self, int64_t dim, bool descending,
+    torch::Tensor& values, torch::Tensor& indices) {
+    auto result = sort_op_impl(self, dim, descending);
+    TORCH_CHECK(values.device() == self.device() && indices.device() == self.device(),
+                "torch_vortex: sort.values outputs must be on the input device");
+    TORCH_CHECK(values.scalar_type() == self.scalar_type() &&
+                    indices.scalar_type() == at::kLong,
+                "torch_vortex: sort.values outputs have the wrong dtype");
+    TORCH_CHECK(values.sizes() == std::get<0>(result).sizes() &&
+                    indices.sizes() == std::get<1>(result).sizes(),
+                "torch_vortex: sort.values outputs have the wrong shape");
+    values.copy_(std::get<0>(result));
+    indices.copy_(std::get<1>(result));
+    return std::tie(values, indices);
+}
+
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
@@ -3163,7 +3197,9 @@ void register_vortex_ops() {
     VX_IMPL("min.dim", &min_dim_impl);
     VX_IMPL("argmin", &argmin_impl);
     VX_IMPL("sort", &sort_op_impl);
+    VX_IMPL("sort.values", &sort_values_impl);
     VX_IMPL("topk", &topk_impl);
+    VX_IMPL("topk.values", &topk_values_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);
