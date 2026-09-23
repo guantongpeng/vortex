@@ -146,13 +146,14 @@
 - [x] FP32 连续布局的 `sum/mean/max/argmax`、`bmm`、`cat/stack`、`gather/scatter.src`、`index_add`、`avg_pool2d` 基础路径。
 - [x] `gather.out` 与 `scatter.src_out` 复用同一 device index kernel 和 out storage；其余 out/in-place overload 仍待，详见 [`p2_11_index_out.md`](p2_11_index_out.md)。
 - [x] `scatter_.src`、`index_add.out/_`、`cat.out`、`stack.out` 已补齐并复用既有 device kernel；详见 [`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
-- [ ] `topk`、`sort`、`min`、`argmin`、`nll_loss_forward`。
+- [ ] `topk`、`sort`。
 - [x] FP32 `amin` 与 `amin.out`，采用独立静态 MIN reduction kernel；详见 [`p2_05_amin.md`](p2_05_amin.md)。
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。
 - [x] FP32 `nll_loss_forward` 的 none/sum/mean、weight、ignore_index 与越界校验；详见 [`p2_13_nll_loss.md`](p2_13_nll_loss.md)。
 - [ ] `interpolate`、`ceil_mode`、`divisor_override`、`group_norm`。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
-- [ ] cast、clone/contiguous、transpose/permute/slice/select/expand/arange、dtype promotion 和 bool/int64 数据路径。
+- [ ] cast、clone/contiguous、transpose/permute/slice/select/expand、dtype promotion 和 bool/int64 数据路径。
+- [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
 - [ ] 补 broadcast add/mul/sub/div、标量 alpha、GELU/SiLU、dropout，以及模型需要的 in-place/out overload。
 - [ ] 补 `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out`。
 - [ ] 对每个 schema 建立 overload×dtype×layout×shape 支持矩阵，unsupported 必须在 launch 前明确报错。

@@ -72,6 +72,21 @@ __global__ void nll_loss_kernel(nll_loss_args_t* arg) {
     ((float*)(uintptr_t)arg->total_weight)[0] = total_weight;
 }
 
+__global__ void arange_kernel(arange_args_t* arg) {
+    for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < arg->n;
+         i += blockDim.x * gridDim.x) {
+        if (arg->dtype == 0) {
+            ((float*)(uintptr_t)arg->dst)[i] = arg->start + (float)i * arg->step;
+        } else if (arg->dtype == 1) {
+            ((int32_t*)(uintptr_t)arg->dst)[i] =
+                (int32_t)(arg->start_i + (int64_t)i * arg->step_i);
+        } else {
+            ((int64_t*)(uintptr_t)arg->dst)[i] =
+                arg->start_i + (int64_t)i * arg->step_i;
+        }
+    }
+}
+
 // The index representation ATen wants, from the one the DL reduce produces.
 // Pure conversion: one thread per index, grid-stride like everything here.
 __global__ void widen_u32_i64_kernel(widen_args_t* arg) {

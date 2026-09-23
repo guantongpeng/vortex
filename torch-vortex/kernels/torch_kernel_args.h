@@ -86,6 +86,17 @@ struct nll_loss_args_t {
     int64_t ignore_index;
 };
 
+struct arange_args_t {
+    uint64_t dst;
+    uint32_t n;
+    uint32_t dtype;  // 0 = float32, 1 = int32, 2 = int64
+    uint32_t pad;
+    float start;
+    float step;
+    int64_t start_i;
+    int64_t step_i;
+};
+
 // copy_strided_kernel: elementwise copy between two arbitrarily strided
 // buffers of the same shape, up to 4 dimensions. A stride of 0 broadcasts,
 // which is how `x.t().to("vortex")` and `contiguous()` on a transposed tensor
@@ -197,6 +208,7 @@ struct bias_args_t {
     X(index_add_kernel, index_add_args_t, 0, 0)                               \
     X(fill_kernel, fill_args_t, 0, 0)                                          \
     X(nll_loss_kernel, nll_loss_args_t, 0, 0)                                 \
+    X(arange_kernel, arange_args_t, 0, 0)                                      \
     X(tv_bias_add_kernel, bias_args_t, 0, 0)
 
 #endif  // TORCH_VORTEX_KERNEL_ARGS_H

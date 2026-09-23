@@ -817,6 +817,105 @@ static torch::Tensor empty_strided_impl(
     return torch::Tensor(std::move(base));
 }
 
+static torch::Tensor arange_start_step_impl(
+    const c10::Scalar& start, const c10::Scalar& end, const c10::Scalar& step,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {
+    TORCH_CHECK(!layout_opt.has_value() || *layout_opt == c10::Layout::Strided,
+                "torch_vortex: arange supports strided layout only");
+    check_vortex_device_arg(device_opt, "arange");
+    TORCH_CHECK(!pin_memory_opt.value_or(false),
+                "torch_vortex: arange pin_memory is unsupported");
+
+    const bool integral = start.isIntegral(false) && end.isIntegral(false) &&
+                          step.isIntegral(false);
+    const auto dtype = dtype_opt.value_or(integral ? at::kLong : at::kFloat);
+    TORCH_CHECK(dtype == at::kFloat || dtype == at::kInt || dtype == at::kLong,
+                "torch_vortex: arange supports only float32, int32 and int64, got ",
+                dtype);
+    TORCH_CHECK(step.isIntegral(false) || step.isFloatingPoint(),
+                "torch_vortex: arange step must be an integer or float");
+
+    uint64_t n = 0;
+    int64_t start_i = 0;
+    int64_t step_i = 0;
+    float start_f = 0.0f;
+    float step_f = 0.0f;
+    if (integral) {
+        start_i = start.toLong();
+        const int64_t end_i = end.toLong();
+        step_i = step.toLong();
+        TORCH_CHECK(step_i != 0, "torch_vortex: arange step must be nonzero");
+        if ((step_i > 0 && end_i > start_i) ||
+            (step_i < 0 && end_i < start_i)) {
+            const __int128 distance = step_i > 0
+                                          ? (__int128)end_i - start_i
+                                          : (__int128)start_i - end_i;
+            const __int128 stride = step_i > 0 ? step_i : -(__int128)step_i;
+            const __int128 count = (distance + stride - 1) / stride;
+            TORCH_CHECK(count <= UINT32_MAX,
+                        "torch_vortex: arange result has too many elements");
+            n = (uint64_t)count;
+        }
+    } else {
+        const double start_d = start.toDouble();
+        const double end_d = end.toDouble();
+        const double step_d = step.toDouble();
+        TORCH_CHECK(std::isfinite(start_d) && std::isfinite(end_d) &&
+                        std::isfinite(step_d),
+                    "torch_vortex: arange requires finite start, end and step");
+        TORCH_CHECK(step_d != 0.0, "torch_vortex: arange step must be nonzero");
+        const long double span = ((long double)end_d - start_d) / step_d;
+        if (span > 0.0L) {
+            const long double count = std::ceil(span);
+            TORCH_CHECK(count <= (long double)UINT32_MAX,
+                        "torch_vortex: arange result has too many elements");
+            n = (uint64_t)count;
+        }
+        start_f = (float)start_d;
+        step_f = (float)step_d;
+        TORCH_CHECK(dtype == at::kFloat,
+                    "torch_vortex: integer arange dtype requires integral bounds and step");
+    }
+
+    auto options = torch::TensorOptions()
+                       .device(c10::Device(c10::DeviceType::PrivateUse1, 0))
+                       .dtype(dtype);
+    auto out = torch::empty({(int64_t)n}, options);
+    arange_args_t args = {};
+    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
+    args.n = (uint32_t)n;
+    args.dtype = dtype == at::kFloat ? 0 : (dtype == at::kInt ? 1 : 2);
+    args.start = start_f;
+    args.step = step_f;
+    args.start_i = start_i;
+    args.step_i = step_i;
+    launch(h_arange_kernel, args, (args.n + 3) / 4);
+    return out;
+}
+
+static torch::Tensor arange_impl(
+    const c10::Scalar& end, std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {
+    return arange_start_step_impl(c10::Scalar(0), end, c10::Scalar(1),
+                                  dtype_opt, layout_opt, device_opt,
+                                  pin_memory_opt);
+}
+
+static torch::Tensor arange_start_impl(
+    const c10::Scalar& start, const c10::Scalar& end,
+    std::optional<c10::ScalarType> dtype_opt,
+    std::optional<c10::Layout> layout_opt,
+    std::optional<c10::Device> device_opt,
+    std::optional<bool> pin_memory_opt) {
+    return arange_start_step_impl(start, end, c10::Scalar(1), dtype_opt,
+                                  layout_opt, device_opt, pin_memory_opt);
+}
+
 static uint32_t copy_dtype(c10::ScalarType dtype) {
     switch (dtype) {
     case at::kFloat: return TORCH_COPY_F32;
@@ -2946,6 +3045,9 @@ void register_vortex_ops() {
 #define VX_IMPL(name, fn) VX_LIB.impl(name, fn)
     VX_IMPL("empty.memory_format", &empty_impl);
     VX_IMPL("empty_strided", &empty_strided_impl);
+    VX_IMPL("arange", &arange_impl);
+    VX_IMPL("arange.start", &arange_start_impl);
+    VX_IMPL("arange.start_step", &arange_start_step_impl);
     VX_IMPL("copy_", &copy_impl);
     VX_IMPL("_copy_from", &copy_from_impl);
     VX_IMPL("fill_.Scalar", &fill__impl);
