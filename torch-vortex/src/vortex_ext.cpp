@@ -1510,12 +1510,16 @@ static torch::Tensor& reduce_into(const torch::Tensor& self, torch::Tensor& out,
         // for input.numel() == 0"; agreeing with that beats inventing a value.
         // (The seed the old kernel left behind was -INFINITY, which torch never
         // returns.)
-        TORCH_CHECK(op != VX_PRIM_OP_MAX, "torch_vortex: ", name,
+        TORCH_CHECK(op != VX_PRIM_OP_MAX && op != VX_PRIM_OP_MIN,
+                    "torch_vortex: ", name,
                     " of a tensor with no elements has no result; torch amax "
                     "requires a reduction dim for an empty input");
         fill_args_t args = {(uint64_t)(uintptr_t)out.data_ptr(),
                             u32_numel(out, name),
-                            op == VX_PRIM_OP_MEAN ? (float)NAN : 0.0f, 0};
+                            op == VX_PRIM_OP_MEAN ? (float)NAN
+                                                  : (op == VX_PRIM_OP_MIN
+                                                         ? (float)INFINITY : 0.0f),
+                            0};
         launch(h_fill_kernel, args, (args.n + 3) / 4);
         return out;
     }
@@ -2749,6 +2753,21 @@ static torch::Tensor& amax_out_impl(const torch::Tensor& self,
     return reduce_into(self, out, d, VX_PRIM_OP_MAX, "amax");
 }
 
+static torch::Tensor amin_impl(const torch::Tensor& self, c10::IntArrayRef dim,
+                               bool keepdim) {
+    c10::OptionalArrayRef<int64_t> d =
+        dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    auto out = torch::empty(reduced_shape(self, d, keepdim), self.options());
+    return reduce_into(self, out, d, VX_PRIM_OP_MIN, "amin");
+}
+static torch::Tensor& amin_out_impl(const torch::Tensor& self,
+                                    c10::IntArrayRef dim, bool keepdim,
+                                    torch::Tensor& out) {
+    c10::OptionalArrayRef<int64_t> d =
+        dim.size() == 0 ? std::nullopt : std::make_optional(dim);
+    return reduce_into(self, out, d, VX_PRIM_OP_MIN, "amin");
+}
+
 // aten::max with no dim is a full reduction. max(dim=...) returns indices via
 // the index-reduction path above.
 static torch::Tensor max_impl(const torch::Tensor& self) {
@@ -2783,6 +2802,8 @@ void register_vortex_ops() {
     VX_IMPL("mean.out", &mean_out_impl);
     VX_IMPL("amax", &amax_impl);
     VX_IMPL("amax.out", &amax_out_impl);
+    VX_IMPL("amin", &amin_impl);
+    VX_IMPL("amin.out", &amin_out_impl);
     VX_IMPL("max", &max_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);

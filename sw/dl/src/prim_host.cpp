@@ -83,6 +83,7 @@ struct PrimState {
     vx_kernel_h scalar = nullptr;
     vx_kernel_h broadcast = nullptr;
     vx_kernel_h reduce = nullptr;
+    vx_kernel_h min = nullptr;
     vx_kernel_h softmax = nullptr;
     vx_kernel_h layernorm = nullptr;
     vx_kernel_h rmsnorm = nullptr;
@@ -139,6 +140,7 @@ vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
         {"prim_scalar_kernel", &g_prim.scalar},
         {"prim_broadcast_kernel", &g_prim.broadcast},
         {"prim_reduce_kernel", &g_prim.reduce},
+        {"prim_min_kernel", &g_prim.min},
         {"prim_softmax_kernel", &g_prim.softmax},
         {"prim_layernorm_kernel", &g_prim.layernorm},
         {"prim_rmsnorm_kernel", &g_prim.rmsnorm},
@@ -157,7 +159,8 @@ vx_prim_status vx_prim_init(vx_device_h dev, const char* vxbin_path) {
 vx_prim_status vx_prim_finalize(void) {
     if (!g_prim.module) return VX_PRIM_OK;
     vx_kernel_h ks[] = {g_prim.unary, g_prim.binary, g_prim.scalar,
-                        g_prim.broadcast, g_prim.reduce, g_prim.softmax,
+                        g_prim.broadcast, g_prim.reduce, g_prim.min,
+                        g_prim.softmax,
                         g_prim.layernorm, g_prim.rmsnorm};
     for (vx_kernel_h k : ks) {
         if (k) vx_kernel_release(k);
@@ -250,7 +253,7 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
                               uint32_t rows, uint32_t cols) {
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || rows == 0 || cols == 0) return VX_PRIM_ERR_BAD_ARGS;
-    if (op < VX_PRIM_OP_SUM || op > VX_PRIM_OP_MEAN) return VX_PRIM_ERR_BAD_ARGS;
+    if (op < VX_PRIM_OP_SUM || op > VX_PRIM_OP_MIN) return VX_PRIM_ERR_BAD_ARGS;
     if (is_arg_op(op)) return VX_PRIM_ERR_BAD_ARGS;   // use vx_prim_index_reduce
     vx_prim_reduce_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
@@ -258,6 +261,9 @@ vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
     args.rows = rows;
     args.cols = cols;
     args.op = (uint32_t)(op - VX_PRIM_OP_SUM);
+    if (op == VX_PRIM_OP_MIN) {
+        return launch(q, g_prim.min, &args, sizeof(args), rows, 16, 256);
+    }
     return launch(q, g_prim.reduce, &args, sizeof(args), rows, 16, 256);
 }
 

@@ -143,7 +143,8 @@
 ### 2.3 通用 Tensor 和基础算子
 
 - [x] FP32 连续布局的 `sum/mean/max/argmax`、`bmm`、`cat/stack`、`gather/scatter.src`、`index_add`、`avg_pool2d` 基础路径。
-- [ ] `topk`、`sort`、`min`、`amin`、`argmin`、`nll_loss_forward`。
+- [ ] `topk`、`sort`、`min`、`argmin`、`nll_loss_forward`。
+- [x] FP32 `amin` 与 `amin.out`，采用独立静态 MIN reduction kernel；详见 [`p2_05_amin.md`](p2_05_amin.md)。
 - [ ] `interpolate`、`ceil_mode`、`divisor_override`、`group_norm`。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
 - [ ] cast、clone/contiguous、transpose/permute/slice/select/expand/arange、dtype promotion 和 bool/int64 数据路径。

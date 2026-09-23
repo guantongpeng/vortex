@@ -65,6 +65,22 @@ def test_amax(backend):
     assert_matches_cpu(v(X2).max(), X2.max())
 
 
+def test_amin_matches_cpu(backend):
+    assert_matches_cpu(torch.amin(v(X2)), torch.amin(X2))
+    assert_matches_cpu(torch.amin(v(X3), dim=1), torch.amin(X3, dim=1))
+
+
+def test_amin_special_values(backend):
+    t = torch.tensor([[float("inf"), 2.0, -3.0],
+                      [1.0, float("nan"), -2.0]])
+    assert_matches_cpu(torch.amin(v(t), dim=1), torch.amin(t, dim=1))
+
+
+def test_amin_empty_reduction_is_rejected(backend):
+    with assert_rejected("empty dimension", backend, may_allocate=True):
+        torch.amin(v(torch.empty(0)), dim=0)
+
+
 @pytest.mark.parametrize("values,expected", [
     ([float("-inf"), float("-inf")], float("-inf")),
     ([float("-inf"), -1.0], -1.0),

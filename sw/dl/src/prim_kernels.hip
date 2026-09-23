@@ -154,6 +154,17 @@ static __device__ float warp_max(float x) {
     return x;
 }
 
+static __device__ float nan_min(float a, float b) {
+    return (isnan(a) || isnan(b)) ? NAN : (a <= b ? a : b);
+}
+
+static __device__ float warp_min(float x) {
+    for (uint32_t off = warpSize / 2; off > 0; off >>= 1) {
+        x = nan_min(x, __shfl_down(x, (int)off, warpSize));
+    }
+    return x;
+}
+
 // The better of two (value, index) candidates: NaN beats every number, and
 // among equals the smaller index wins -- which is what torch.argmax returns
 // for a tie.
@@ -249,6 +260,32 @@ __global__ void prim_reduce_kernel(vx_prim_reduce_args_t* arg) {
             v = (arg->op == VX_PRIM_RED_MAX) ? nan_max(v, tbuf[w]) : v + tbuf[w];
         }
         if (arg->op == VX_PRIM_RED_MEAN) v /= (float)cols;
+        ((float*)(uintptr_t)arg->out)[row] = v;
+    }
+}
+
+// MIN has its own entry point because making the existing op-selected reduce
+// kernel seed on +INF causes VOLT to discard its LMEM store at -O3. Keeping
+// the operation static preserves the already validated SUM/MAX/MEAN/ARGMAX
+// image while giving amin the same row and NaN semantics.
+__global__ void prim_min_kernel(vx_prim_reduce_args_t* arg) {
+    float* tbuf = (float*)__local_mem();
+    const uint32_t lane = threadIdx.x % warpSize;
+    const uint32_t wid = threadIdx.x / warpSize;
+    const uint32_t row = blockIdx.x;
+    const float* in = (const float*)(uintptr_t)arg->in + (size_t)row * arg->cols;
+    float acc = INFINITY;
+    for (uint32_t i = threadIdx.x; i < arg->cols; i += PRIM_BLOCK) {
+        acc = nan_min(acc, in[i]);
+    }
+    acc = warp_min(acc);
+    if (lane == 0) tbuf[wid] = acc;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float v = tbuf[0];
+        for (uint32_t w = 1; w < PRIM_BLOCK / warpSize; ++w) {
+            v = nan_min(v, tbuf[w]);
+        }
         ((float*)(uintptr_t)arg->out)[row] = v;
     }
 }

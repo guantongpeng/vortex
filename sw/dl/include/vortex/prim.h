@@ -59,7 +59,7 @@ typedef enum vx_prim_op {
     VX_PRIM_OP_MAX  = 14,
     VX_PRIM_OP_ARGMAX = 15,     // index out; see vx_prim_index_reduce
     VX_PRIM_OP_MEAN = 16,
-    // No MIN/ARGMIN: see the note in src/prim_args.h.
+    VX_PRIM_OP_MIN = 17,
 } vx_prim_op;
 
 typedef enum vx_prim_binary_op {
@@ -95,7 +95,7 @@ vx_prim_status vx_prim_broadcast(vx_queue_h q, vx_prim_binary_op op,
 
 // Row-wise reduction over a rows x cols FP32 row-major buffer; out[r] is the
 // reduction of row r. A whole-vector reduction is rows = 1. `out` is rows
-// floats, and the op is one of SUM/MEAN/MAX -- the arg ops have their own
+// floats, and the op is one of SUM/MEAN/MAX/MIN -- the arg ops have their own
 // entry point because their output is not floats.
 vx_prim_status vx_prim_reduce(vx_queue_h q, vx_prim_op op,
                               uint64_t in, uint64_t out,
