@@ -127,7 +127,7 @@
 
 - [x] 非原地 ReLU、addmm/mm/linear 基础语义、BN batch 修复、max pool 特殊值、基础 view/copy 和 PrivateUse1 factory 隔离。
 - [x] `copy/to` 已实现 FP32/FP16/BF16/int32/int64/bool 的设备端 dtype conversion、broadcast copy、非连续源/目标、storage offset 和 D2D/H2D/D2H 路径；重叠 copy、pinned/non-blocking 的完整语义仍列为边界，详见 [`p2_01_tensor_copy_dtype.md`](p2_01_tensor_copy_dtype.md)。
-- [ ] 完整实现 view/reshape/transpose/permute/slice/select/as_strided 的 alias、stride、版本计数和必要复制。
+- [x] 完整实现 view/reshape/transpose/permute/slice/select/as_strided 的 alias、stride、版本计数和必要复制；详见 [`p2_07_view_alias.md`](p2_07_view_alias.md)。
 - [ ] 支持或明确拒绝空张量、K=0、零 launch、越界 shape、非法 stride/padding、LMEM/block/grid 超限。
 - [ ] 保持 CPU、Meta、其他设备 factory 不受影响；FakeTensor 阶段不分配设备内存、不发射 HIP。
 

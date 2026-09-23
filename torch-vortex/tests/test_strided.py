@@ -80,6 +80,30 @@ def test_indexing(backend):
     assert torch.equal(vx[0, 1, 2].cpu(), X[0, 1, 2])
 
 
+def test_slice_select_and_expand_preserve_alias_layout(backend):
+    vx = v(X)
+    sliced = vx[:, 1:, ::2]
+    want = X[:, 1:, ::2]
+    assert sliced.untyped_storage().data_ptr() == vx.untyped_storage().data_ptr()
+    assert sliced.storage_offset() == want.storage_offset()
+    assert sliced.stride() == want.stride()
+    assert torch.equal(sliced.cpu(), want)
+
+    selected = vx.select(1, 2)
+    assert selected.untyped_storage().data_ptr() == vx.untyped_storage().data_ptr()
+    assert selected.stride() == X.select(1, 2).stride()
+    before = vx._version
+    selected.copy_(torch.full_like(selected, 7.0, device="vortex"))
+    assert vx._version > before
+    assert torch.equal(vx.cpu(), X.index_copy(1, torch.tensor([2]),
+                                               torch.full((2, 1, 4), 7.0)))
+
+    one = v(X[:1, :2, :])
+    expanded = one.expand(2, 2, 4)
+    assert expanded.stride() == (0, 4, 1)
+    assert torch.equal(expanded.cpu(), X[:1, :2, :].expand(2, 2, 4))
+
+
 def test_commands_on_strided_views(backend):
     vx = v(X)
     assert torch.equal(vx.transpose(1, 2).contiguous().cpu(),
