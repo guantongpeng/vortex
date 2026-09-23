@@ -179,6 +179,19 @@ def test_linear(backend):
                        torch.nn.functional.linear(x, w, None))
 
 
+def test_linear_transb_does_not_materialise_weight(backend):
+    x = v(torch.randn(4, 6))
+    w = v(torch.randn(5, 6))
+    bias = v(torch.randn(5))
+    backend.reset_stats()
+    out = torch.nn.functional.linear(x, w, bias)
+    stats = backend.stats()
+    # zeros initialization, transposed-B GEMM, and bias epilogue. A materialised
+    # `weight.t().contiguous()` would add a fourth device launch.
+    assert stats["launches"] == 3, "linear launched a temporary transpose copy"
+    assert torch.equal(out.cpu(), torch.nn.functional.linear(x.cpu(), w.cpu(), bias.cpu()))
+
+
 def test_matmul_rejects_bad_input(backend):
     # operands are materialised outside the assertion: moving them to the
     # device is not part of the call being rejected

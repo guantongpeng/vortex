@@ -2565,22 +2565,17 @@ static torch::Tensor mm_launch(const torch::Tensor& a, const torch::Tensor& b_in
         out.add_(self_full, beta);
     }
 
-    // The DL gemm is C = alpha*A*B + beta*C with no transpose option, so a
-    // transposed operand is materialised. That copy is what having one GEMM
-    // instead of two costs; adding transb to vx_blas_gemm is the follow-up.
-    torch::Tensor b = transb ? b_in.t().contiguous() : b_in;
-
     // A zero-sized dimension is not a launch: the DL rejects it (the KMU
     // derives the CTA shape from the grid and a zero collapses it), and the
     // answer is the epilogue already sitting in `out`.
     if (m == 0 || n == 0 || k == 0) {
         return out;
     }
-    DL_LAUNCH(vx_blas_gemm(current_queue(), VX_BLAS_F32, u32_dim(m, "matmul m"),
+    DL_LAUNCH(vx_blas_gemm_ex(current_queue(), VX_BLAS_F32, u32_dim(m, "matmul m"),
                            u32_dim(n, "matmul n"), u32_dim(k, "matmul k"), alpha,
                            1.0f, (uint64_t)(uintptr_t)a.data_ptr(),
-                           (uint64_t)(uintptr_t)b.data_ptr(),
-                           (uint64_t)(uintptr_t)out.data_ptr()));
+                           (uint64_t)(uintptr_t)b_in.data_ptr(),
+                           (uint64_t)(uintptr_t)out.data_ptr(), transb));
     return out;
 }
 

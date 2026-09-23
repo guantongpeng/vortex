@@ -66,6 +66,16 @@ vx_blas_status vx_blas_gemm(vx_queue_h q,
                             float alpha, float beta,
                             uint64_t A, uint64_t B, uint64_t C);
 
+// Same row-major GEMM with an optional transposed B storage. When transb is
+// non-zero, B is supplied as [N][K] and the kernel consumes B^T directly;
+// no temporary materialisation is needed by linear layers.
+vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
+                                vx_blas_dtype dt,
+                                uint32_t M, uint32_t N, uint32_t K,
+                                float alpha, float beta,
+                                uint64_t A, uint64_t B, uint64_t C,
+                                uint32_t transb);
+
 // Report which kernel variant the last dispatch selected (for test output
 // and future perf attribution: "fallback" vs "tcu").
 const char* vx_blas_kernel_name(vx_blas_dtype dt);

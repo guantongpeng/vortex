@@ -40,7 +40,7 @@ typedef struct {
     uint32_t K;
     float alpha;
     float beta;
-    uint32_t pad;
+    uint32_t transb;  // 0: B[K][N], 1: B[N][K]
 } vx_blas_gemm_args_t;
 
 #endif // VORTEX_DL_BLAS_ARGS_H

@@ -73,11 +73,20 @@ gemm_tile_body(vx_blas_gemm_args_t* arg) {
             }
             if (gk < arg->K && n0 + r < arg->N) {
                 if (DT == 0) {
-                    b = ((const float*)(uintptr_t)arg->B)[(size_t)gk * arg->N + n0 + r];
+                    const size_t bi = arg->transb
+                                          ? (size_t)(n0 + r) * arg->K + gk
+                                          : (size_t)gk * arg->N + n0 + r;
+                    b = ((const float*)(uintptr_t)arg->B)[bi];
                 } else if (DT == 1) {
-                    b = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->B)[(size_t)gk * arg->N + n0 + r]);
+                    const size_t bi = arg->transb
+                                          ? (size_t)(n0 + r) * arg->K + gk
+                                          : (size_t)gk * arg->N + n0 + r;
+                    b = vx_fp16_to_f32(((const vx_fp16_t*)(uintptr_t)arg->B)[bi]);
                 } else {
-                    b = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)arg->B)[(size_t)gk * arg->N + n0 + r]);
+                    const size_t bi = arg->transb
+                                          ? (size_t)(n0 + r) * arg->K + gk
+                                          : (size_t)gk * arg->N + n0 + r;
+                    b = vx_bf16_to_f32(((const vx_bf16_t*)(uintptr_t)arg->B)[bi]);
                 }
             }
             lA[r * BLAS_KC + k] = a;

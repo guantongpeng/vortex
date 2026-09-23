@@ -136,7 +136,7 @@
 - [x] conv、pool、BN、GEMM、norm、一元和归约的主要路径已迁移到 `sw/dl`。
 - [ ] 给 `sw/dl` prim 增加二元 elementwise 入口，迁移 `binary_op`、scalar 和 broadcast kernel。
 - [ ] 为 DL library 使用调用方 device/context/queue，消除新的全局 singleton。
-- [ ] 给 GEMM 增加 `transb`，消除 linear 的 `w.t().contiguous()` 临时拷贝。
+- [x] BLAS GEMM 增加 `transb`，linear 直接读取 `[N,K]` 权重，消除 `w.t().contiguous()` 临时拷贝；详见 [`p2_02_gemm_transb.md`](p2_02_gemm_transb.md)。
 - [ ] 将按 batch 循环的 `bmm` 扩展为带 batch stride 的真正 batched/tiled GEMM，并补 epilogue 支持。
 - [ ] 将重复状态枚举统一为可检查的公共定义，并把 `mxfp8_args.h` 纳入 ABI 漂移测试。
 

@@ -93,11 +93,12 @@ const char* vx_blas_kernel_name(vx_blas_dtype dt) {
     return kVariantNames[dt];
 }
 
-vx_blas_status vx_blas_gemm(vx_queue_h q,
-                            vx_blas_dtype dt,
-                            uint32_t M, uint32_t N, uint32_t K,
-                            float alpha, float beta,
-                            uint64_t A, uint64_t B, uint64_t C) {
+vx_blas_status vx_blas_gemm_ex(vx_queue_h q,
+                               vx_blas_dtype dt,
+                               uint32_t M, uint32_t N, uint32_t K,
+                               float alpha, float beta,
+                               uint64_t A, uint64_t B, uint64_t C,
+                               uint32_t transb) {
     if (!g_state.module) return VX_BLAS_ERR_NOT_INITIALIZED;
     if ((int)dt < 0 || (int)dt > 2) return VX_BLAS_ERR_BAD_ARGS;
     if (M == 0 || N == 0 || K == 0) return VX_BLAS_ERR_BAD_ARGS;
@@ -112,6 +113,7 @@ vx_blas_status vx_blas_gemm(vx_queue_h q,
     args.K = K;
     args.alpha = alpha;
     args.beta = beta;
+    args.transb = transb ? 1u : 0u;
 
     vx_launch_info_t launch = {};
     launch.struct_size = sizeof(launch);
@@ -134,4 +136,12 @@ vx_blas_status vx_blas_gemm(vx_queue_h q,
         return VX_BLAS_ERR_LAUNCH;
     }
     return VX_BLAS_OK;
+}
+
+vx_blas_status vx_blas_gemm(vx_queue_h q,
+                            vx_blas_dtype dt,
+                            uint32_t M, uint32_t N, uint32_t K,
+                            float alpha, float beta,
+                            uint64_t A, uint64_t B, uint64_t C) {
+    return vx_blas_gemm_ex(q, dt, M, N, K, alpha, beta, A, B, C, 0);
 }
