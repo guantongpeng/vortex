@@ -163,6 +163,24 @@ def test_conv_and_pool_parity(backend):
                        torch.nn.functional.max_pool2d(x, 3, 2, 1))
 
 
+def test_grouped_and_depthwise_conv_matches_cpu(backend):
+    x = torch.randn(2, 4, 7, 6)
+    w = torch.randn(6, 2, 3, 3)
+    b = torch.randn(6)
+    got = torch.nn.functional.conv2d(x.to("vortex"), w.to("vortex"),
+                                     b.to("vortex"), padding=1, groups=2)
+    want = torch.nn.functional.conv2d(x, w, b, padding=1, groups=2)
+    assert_matches_cpu(got, want, rtol=1e-5, atol=1e-5)
+
+    xd = torch.randn(1, 4, 5, 5)
+    wd = torch.randn(4, 1, 3, 3)
+    assert_matches_cpu(
+        torch.nn.functional.conv2d(xd.to("vortex"), wd.to("vortex"),
+                                   padding=1, groups=4),
+        torch.nn.functional.conv2d(xd, wd, padding=1, groups=4),
+        rtol=1e-5, atol=1e-5)
+
+
 def test_adaptive_avg_pool(backend):
     x = torch.randn(2, 3, 5, 7)
     assert_matches_cpu(torch.nn.functional.adaptive_avg_pool2d(x.to("vortex"), 1),

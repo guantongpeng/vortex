@@ -111,13 +111,16 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
                             uint64_t out,
                             uint32_t n, uint32_t ci, uint32_t hi, uint32_t wi,
                             uint32_t co, uint32_t kh, uint32_t kw,
-                            uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw) {
+                            uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                            uint32_t groups) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
     if (!in || !weight || !out || n == 0 || ci == 0 || hi == 0 || wi == 0 ||
-        co == 0 || kh == 0 || kw == 0 || sh == 0 || sw == 0) {
+        co == 0 || kh == 0 || kw == 0 || sh == 0 || sw == 0 || groups == 0 ||
+        ci % groups != 0 || co % groups != 0) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    if (kh * kw > 32 || ci * kh * kw * 4 > 16384) {
+    const uint32_t ci_group = ci / groups;
+    if (kh * kw > 32 || ci_group * kh * kw * 4 > 16384) {
         return VX_DNN_ERR_UNSUPPORTED;  // LMEM staging bound (DNN_WMAX=32)
     }
     const uint32_t ho = (hi + 2 * ph - kh) / sh + 1;
@@ -141,6 +144,7 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
     args.sh = sh;
     args.sw = sw;
     args.has_bias = bias != 0;
+    args.groups = groups;
     return launch3(q, g_dnn.conv2d, &args, sizeof(args),
                    ho, co, n, ci * kh * kw * 4);
 }

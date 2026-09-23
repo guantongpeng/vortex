@@ -152,11 +152,11 @@ quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
 # kernelParams path would get, which is why the drift was latent rather than
 # an active over-read.
 ifeq ($(XLEN),64)
-D_CONV_SIZE := 88
+D_CONV_SIZE := 96
 D_POOL_SIZE := 72
 D_BN_SIZE := 72
 else
-D_CONV_SIZE := 72
+D_CONV_SIZE := 76
 D_POOL_SIZE := 60
 D_BN_SIZE := 44
 endif

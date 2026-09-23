@@ -2343,7 +2343,7 @@ static torch::Tensor convolution_impl(
     check_cnn_f32(input, "conv.input", 4);
     check_cnn_f32(weight, "conv.weight", 4);
     TORCH_CHECK(!transposed, "torch_vortex: transposed conv unsupported in v1");
-    TORCH_CHECK(groups == 1, "torch_vortex: grouped conv unsupported in v1");
+    TORCH_CHECK(groups > 0, "torch_vortex: conv groups must be positive");
     for (auto d : dilation) TORCH_CHECK(d == 1, "torch_vortex: dilation must be 1");
     for (auto o : output_padding) TORCH_CHECK(o == 0, "torch_vortex: output_padding must be 0");
     const int64_t sh = stride.size() > 0 ? stride[0] : 1;
@@ -2353,9 +2353,10 @@ static torch::Tensor convolution_impl(
 
     const auto& is = input.sizes();
     const auto& ws = weight.sizes();
-    const int64_t co = ws[0], ci = ws[1];
+    const int64_t co = ws[0], ci_group = ws[1];
     const int64_t kh = ws[2], kw = ws[3];
-    TORCH_CHECK(is[1] == ci, "torch_vortex: conv channel mismatch");
+    TORCH_CHECK(is[1] % groups == 0 && ci_group == is[1] / groups,
+                "torch_vortex: conv channel mismatch for groups=", groups);
     const int64_t ho = window_out(is[2], kh, ph, sh, "conv height");
     const int64_t wo = window_out(is[3], kw, pw, sw, "conv width");
 
@@ -2364,9 +2365,9 @@ static torch::Tensor convolution_impl(
     // full-resolution ResNet stem (ci=512, 3x3, fp32 needs 18 KiB), and
     // shrinking the input image does not reduce it. Checked before anything is
     // allocated, so a rejected call does nothing at all.
-    const int64_t lmem_needed = ci * kh * kw * 4;
+    const int64_t lmem_needed = ci_group * kh * kw * 4;
     TORCH_CHECK(lmem_needed <= 16384, "torch_vortex: conv needs ", lmem_needed,
-                " bytes of local memory to stage one filter (ci=", ci, " kh=",
+                " bytes of local memory to stage one filter (ci=", ci_group, " kh=",
                 kh, " kw=", kw, " x 4 bytes), but the DL kernel allows 16384. ",
                 "Tile the weights across output channels; a smaller input ",
                 "image does not reduce this.");
@@ -2394,10 +2395,11 @@ static torch::Tensor convolution_impl(
         current_queue(), (uint64_t)(uintptr_t)input.data_ptr(),
         (uint64_t)(uintptr_t)weight.data_ptr(), baddr,
         (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(is[0], "conv batch"),
-        u32_dim(ci, "conv ci"), u32_dim(is[2], "conv hi"),
+        u32_dim(is[1], "conv ci"), u32_dim(is[2], "conv hi"),
         u32_dim(is[3], "conv wi"), u32_dim(co, "conv co"),
         u32_dim(kh, "conv kh"), u32_dim(kw, "conv kw"), u32_dim(ph, "conv ph"),
-        u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"), u32_dim(sw, "conv sw"));
+        u32_dim(pw, "conv pw"), u32_dim(sh, "conv sh"), u32_dim(sw, "conv sw"),
+        u32_dim(groups, "conv groups"));
     // Not DL_LAUNCH: this one explains what its status codes mean, which the
     // macro has no room for. The accounting below is the same call it makes.
     TORCH_CHECK(status == 0, "torch_vortex: vx_dnn_conv2d failed with status ",

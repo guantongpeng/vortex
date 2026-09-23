@@ -31,19 +31,22 @@ __global__ void dnn_conv2d_kernel(vx_dnn_conv_args_t* arg) {
     const uint32_t co = blockIdx.y;
     const uint32_t oy = blockIdx.x;
 
+    const uint32_t ci_group = arg->ci / arg->groups;
+    const uint32_t group = co / (arg->co / arg->groups);
+    const uint32_t ci_base = group * ci_group;
     const float* w = (const float*)(uintptr_t)arg->weight +
-                     ((size_t)co * arg->ci) * (arg->kh * arg->kw);
+                     ((size_t)co * ci_group) * (arg->kh * arg->kw);
     float* stage = (float*)__local_mem();  // [ci][kh*kw]
 
     // Stage this output channel's weights (CI*KH*KW floats, 16 threads).
-    const uint32_t wtotal = arg->ci * arg->kh * arg->kw;
-    for (uint32_t e = threadIdx.x; e < wtotal && e < arg->ci * DNN_WMAX;
+    const uint32_t wtotal = ci_group * arg->kh * arg->kw;
+    for (uint32_t e = threadIdx.x; e < wtotal && e < ci_group * DNN_WMAX;
          e += 16) {
         stage[e] = w[e];
     }
     __syncthreads();
-    const uint32_t wstaged = wtotal < arg->ci * DNN_WMAX ? wtotal
-                                                         : arg->ci * DNN_WMAX;
+    const uint32_t wstaged = wtotal < ci_group * DNN_WMAX ? wtotal
+                                                         : ci_group * DNN_WMAX;
 
     const float* in_base = (const float*)(uintptr_t)arg->in +
                            (size_t)n * arg->ci * arg->hi * arg->wi;
@@ -57,8 +60,8 @@ __global__ void dnn_conv2d_kernel(vx_dnn_conv_args_t* arg) {
     for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
         float acc = bias;
         uint32_t we = 0;
-        for (uint32_t ci = 0; ci < arg->ci; ++ci) {
-            const float* in_ch = in_base + (size_t)ci * arg->hi * arg->wi;
+        for (uint32_t ci = 0; ci < ci_group; ++ci) {
+            const float* in_ch = in_base + (size_t)(ci_base + ci) * arg->hi * arg->wi;
             for (uint32_t kh = 0; kh < arg->kh; ++kh) {
                 const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
                 if (iy < 0 || iy >= (int32_t)arg->hi) {

@@ -42,7 +42,7 @@ import torch.nn.functional as F
 
 from torch_vortex import _paths
 
-CONV_SIG = [ctypes.c_void_p] + [ctypes.c_uint64] * 4 + [ctypes.c_uint32] * 11
+CONV_SIG = [ctypes.c_void_p] + [ctypes.c_uint64] * 4 + [ctypes.c_uint32] * 12
 POOL_SIG = [ctypes.c_void_p] + [ctypes.c_uint64] * 2 + [ctypes.c_uint32] * 11
 
 
@@ -175,7 +175,7 @@ def test_aten_conv_is_the_dl_kernel(backend, dl):
     out_shape = (1, 4, 8, 8)
     dout = _upload(hip, b"\0" * (4 * 4 * 8 * 8))
     rc = conv(queue, dx.value, dw.value, db.value, dout.value,
-              1, 3, 8, 8, 4, 3, 3, 1, 1, 1, 1)
+              1, 3, 8, 8, 4, 3, 3, 1, 1, 1, 1, 1)
     assert rc == 0, "vx_dnn_conv2d returned %d" % rc
     assert hip.hipDeviceSynchronize() == 0
 
@@ -225,7 +225,7 @@ def test_the_same_kernel_for_several_shapes(backend, dl, kwargs):
     db = _upload(hip, flat(bias)) if bias is not None else ctypes.c_void_p(0)
     dout = _upload(hip, b"\0" * (n * co * ho * wo * 4))
     rc = conv(queue, dx.value, dw.value, db.value or 0, dout.value,
-              n, ci, hi, wi, co, kh, kw, pad, pad, stride, stride)
+              n, ci, hi, wi, co, kh, kw, pad, pad, stride, stride, 1)
     assert rc == 0, "vx_dnn_conv2d returned %d" % rc
     assert hip.hipDeviceSynchronize() == 0
     direct = torch.frombuffer(bytearray(_download(hip, dout, n * co * ho * wo * 4)),

@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
         upload(q, bb, bias.data(), bias.size() * 4);
 
         CHECK(vx_dnn_conv2d(q, bi.addr, bw.addr, bb.addr, bo.addr,
-                            N, CI, HI, WI, CO, KH, KW, P, P, S, S));
+                            N, CI, HI, WI, CO, KH, KW, P, P, S, S, 1));
         CHECK(vx_queue_flush(q));
         std::vector<float> got((size_t)N * CO * HO * WO);
         download(q, got, bo);
@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
         const uint32_t WS = (WI + 2 * P - KW) / S2 + 1;
         DevBuf bos = make_buf(dev, (size_t)N * CO * HS * WS * 4);
         CHECK(vx_dnn_conv2d(q, bi.addr, bw.addr, 0, bos.addr,
-                            N, CI, HI, WI, CO, KH, KW, P, P, S2, S2));
+                            N, CI, HI, WI, CO, KH, KW, P, P, S2, S2, 1));
         CHECK(vx_queue_flush(q));
         std::vector<float> gots((size_t)N * CO * HS * WS);
         download(q, gots, bos);
