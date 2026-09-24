@@ -153,7 +153,7 @@
 - [x] FP32 `group_norm` 设备 kernel，支持任意空间 rank、独立 affine 和空 batch；详见 [`p2_22_group_norm.md`](p2_22_group_norm.md)。
 - [ ] `interpolate`、pool `ceil_mode`/其余形态仍待补齐。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
-- [ ] cast、clone/contiguous、transpose/permute/slice/select/expand、dtype promotion 和 bool/int64 数据路径。
+- [~] clone/contiguous 已补显式设备实现并验证独立 storage、stride 保留和 contiguous memory format；cast、dtype promotion、重叠 stride 与 bool/int64 计算路径仍待，详见 [`p2_24_clone_contiguous.md`](p2_24_clone_contiguous.md)。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
 - [~] broadcast add/mul/sub/div、标量 alpha、GELU/SiLU 和主要 in-place/out overload 已具备；dropout eval identity 已实现，训练随机路径待 RNG，详见 [`p2_23_dropout_eval.md`](p2_23_dropout_eval.md)。
 - [x] `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out` 已补齐，详见 [`p2_11_index_out.md`](p2_11_index_out.md)、[`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。

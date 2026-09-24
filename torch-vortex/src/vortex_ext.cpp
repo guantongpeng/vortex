@@ -1062,6 +1062,16 @@ static torch::Tensor copy_from_impl(const torch::Tensor& self,
     return dst;
 }
 
+static torch::Tensor clone_impl(
+    const torch::Tensor& self,
+    std::optional<at::MemoryFormat> memory_format) {
+    TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: clone on non-vortex tensor");
+    auto out = at::empty_like(self, self.options(), memory_format);
+    copy_impl(out, self, false);
+    return out;
+}
+
 static torch::Tensor& fill__impl(torch::Tensor& self, const c10::Scalar& value) {
     check_vortex_f32(self, "fill_");
     fill_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
@@ -3231,6 +3241,7 @@ void register_vortex_ops() {
     VX_IMPL("arange.start_step", &arange_start_step_impl);
     VX_IMPL("copy_", &copy_impl);
     VX_IMPL("_copy_from", &copy_from_impl);
+    VX_IMPL("clone", &clone_impl);
     VX_IMPL("fill_.Scalar", &fill__impl);
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
