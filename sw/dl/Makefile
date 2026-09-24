@@ -153,11 +153,11 @@ quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
 # an active over-read.
 ifeq ($(XLEN),64)
 D_CONV_SIZE := 104
-D_POOL_SIZE := 72
+D_POOL_SIZE := 80
 D_BN_SIZE := 72
 else
 D_CONV_SIZE := 84
-D_POOL_SIZE := 64
+D_POOL_SIZE := 72
 D_BN_SIZE := 44
 endif
 DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}]

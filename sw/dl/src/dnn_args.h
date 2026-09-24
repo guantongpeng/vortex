@@ -44,12 +44,12 @@ typedef struct {
 } vx_dnn_conv_args_t;
 
 // Windowed pooling over HxW: op 0 = max, 1 = avg with count_include_pad=false,
-// 2 = avg with count_include_pad=true.
+// 2 = avg with count_include_pad=true, 3 = ceil-mode include-pad average.
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;
     uint32_t n, c, hi, wi, ho, wo;
-    uint32_t kh, kw, ph, pw, sh, sw;
+    uint32_t kh, kw, ph, pw, sh, sw, dh, dw;
     uint32_t op;
     uint32_t divisor;
 } vx_dnn_pool_args_t;

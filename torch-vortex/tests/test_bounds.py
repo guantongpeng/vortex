@@ -193,6 +193,16 @@ def test_dilated_conv_matches_cpu(backend):
     assert_matches_cpu(got, want, rtol=1e-5, atol=1e-5)
 
 
+def test_dilated_pool_matches_cpu(backend):
+    x = torch.randn(1, 2, 9, 10)
+    got = torch.nn.functional.max_pool2d(
+        x.to("vortex"), 3, stride=2, padding=1, dilation=(2, 1),
+        ceil_mode=True).cpu()
+    want = torch.nn.functional.max_pool2d(
+        x, 3, stride=2, padding=1, dilation=(2, 1), ceil_mode=True)
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+
 def test_adaptive_avg_pool(backend):
     x = torch.randn(2, 3, 5, 7)
     assert_matches_cpu(torch.nn.functional.adaptive_avg_pool2d(x.to("vortex"), 1),

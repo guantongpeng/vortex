@@ -166,25 +166,28 @@ vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
                                  kh, kw, ph, pw, sh, sw, groups, 1, 1);
 }
 
-vx_dnn_status vx_dnn_pool2d_ex_mode(vx_queue_h q, uint64_t in, uint64_t out,
+static vx_dnn_status pool2d_mode_impl(vx_queue_h q, uint64_t in, uint64_t out,
                                     uint32_t n, uint32_t c,
                                     uint32_t hi, uint32_t wi,
                                     uint32_t kh, uint32_t kw,
                                     uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
                                     uint32_t op, uint32_t divisor,
-                                    uint32_t ceil_mode) {
+                                    uint32_t ceil_mode, uint32_t dh, uint32_t dw) {
     if (!g_dnn.module) return VX_DNN_ERR_NOT_INITIALIZED;
     if (!in || !out || n == 0 || c == 0 || hi == 0 || wi == 0 || kh == 0 ||
         kw == 0 || sh == 0 || sw == 0 ||
-        (op != 0 && op != 1 && op != 2 && op != 3) ||
+        (op != 0 && op != 1 && op != 2 && op != 3) || dh == 0 || dw == 0 ||
         (op == 0 && divisor != 0)) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    if ((uint64_t)hi + 2 * ph < kh || (uint64_t)wi + 2 * pw < kw) {
+    const uint64_t ekh = (uint64_t)(kh - 1) * dh + 1;
+    const uint64_t ekw = (uint64_t)(kw - 1) * dw + 1;
+    if (ekh > UINT32_MAX || ekw > UINT32_MAX ||
+        (uint64_t)hi + 2 * ph < ekh || (uint64_t)wi + 2 * pw < ekw) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    const uint64_t nh = (uint64_t)hi + 2 * ph - kh;
-    const uint64_t nw = (uint64_t)wi + 2 * pw - kw;
+    const uint64_t nh = (uint64_t)hi + 2 * ph - ekh;
+    const uint64_t nw = (uint64_t)wi + 2 * pw - ekw;
     const uint32_t ho = (uint32_t)((nh + (ceil_mode ? sh - 1 : 0)) / sh + 1);
     const uint32_t wo = (uint32_t)((nw + (ceil_mode ? sw - 1 : 0)) / sw + 1);
     if (ceil_mode) {
@@ -204,6 +207,7 @@ vx_dnn_status vx_dnn_pool2d_ex_mode(vx_queue_h q, uint64_t in, uint64_t out,
         args.n = n; args.c = c; args.hi = hi; args.wi = wi;
         args.ho = adj_ho; args.wo = adj_wo; args.kh = kh; args.kw = kw;
         args.ph = ph; args.pw = pw; args.sh = sh; args.sw = sw;
+        args.dh = dh; args.dw = dw;
         args.op = op; args.divisor = divisor;
         return launch3(q, g_dnn.pool2d, &args, sizeof(args), adj_ho, c, n, 0);
     }
@@ -222,9 +226,33 @@ vx_dnn_status vx_dnn_pool2d_ex_mode(vx_queue_h q, uint64_t in, uint64_t out,
     args.pw = pw;
     args.sh = sh;
     args.sw = sw;
+    args.dh = dh;
+    args.dw = dw;
     args.op = op;
     args.divisor = divisor;
     return launch3(q, g_dnn.pool2d, &args, sizeof(args), ho, c, n, 0);
+}
+
+vx_dnn_status vx_dnn_pool2d_ex_mode(vx_queue_h q, uint64_t in, uint64_t out,
+                                    uint32_t n, uint32_t c,
+                                    uint32_t hi, uint32_t wi,
+                                    uint32_t kh, uint32_t kw,
+                                    uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                                    uint32_t op, uint32_t divisor,
+                                    uint32_t ceil_mode) {
+    return pool2d_mode_impl(q, in, out, n, c, hi, wi, kh, kw, ph, pw, sh, sw,
+                            op, divisor, ceil_mode, 1, 1);
+}
+
+vx_dnn_status vx_dnn_pool2d_dilated(vx_queue_h q, uint64_t in, uint64_t out,
+                                    uint32_t n, uint32_t c,
+                                    uint32_t hi, uint32_t wi,
+                                    uint32_t kh, uint32_t kw,
+                                    uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
+                                    uint32_t op, uint32_t divisor,
+                                    uint32_t ceil_mode, uint32_t dh, uint32_t dw) {
+    return pool2d_mode_impl(q, in, out, n, c, hi, wi, kh, kw, ph, pw, sh, sw,
+                            op, divisor, ceil_mode, dh, dw);
 }
 
 vx_dnn_status vx_dnn_pool2d_ex(vx_queue_h q, uint64_t in, uint64_t out,

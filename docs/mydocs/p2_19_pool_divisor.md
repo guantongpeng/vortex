@@ -14,5 +14,6 @@ kernel 对边界窗口按有效元素计数。`test_bounds.py` 新增 ceil_mode 
 `vx_dnn_pool2d_ex_mode` ABI 入口，显式传递 ceil 选择并由 host 计算后的输出
 尺寸写入同一参数块；旧 `vx_dnn_pool2d_ex` 保持 floor 语义兼容。
 
-pool dilation、return_indices 和更高维 adaptive pooling 仍未实现，
+pool `dilation` 已通过新的 `vx_dnn_pool2d_dilated` 入口接入；
+`return_indices` 和更高维 adaptive pooling 仍未实现，
 不在本节点的支持声明内。

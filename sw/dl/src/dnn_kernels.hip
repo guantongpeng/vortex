@@ -102,11 +102,12 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         uint32_t count = 0;
         uint32_t include_count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
-            const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
+            const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) -
+                               (int32_t)arg->ph;
             if (arg->op == 3 && iy >= -(int32_t)arg->ph &&
                 iy < (int32_t)(arg->hi + arg->ph)) {
                 for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                    const int32_t ix = (int32_t)(ox * arg->sw + kw) -
+                    const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) -
                                        (int32_t)arg->pw;
                     if (ix >= -(int32_t)arg->pw &&
                         ix < (int32_t)(arg->wi + arg->pw)) {
@@ -116,7 +117,8 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
             }
             if (iy < 0 || iy >= (int32_t)arg->hi) continue;
             for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                const int32_t ix = (int32_t)(ox * arg->sw + kw) - (int32_t)arg->pw;
+                const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) -
+                                   (int32_t)arg->pw;
                 if (ix < 0 || ix >= (int32_t)arg->wi) continue;
                 float v = in_ch[(size_t)iy * arg->wi + ix];
                 if (arg->op == 0) {
