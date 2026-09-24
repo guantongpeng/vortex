@@ -173,7 +173,7 @@
 
 - [~] 已将 Philox uniform 接入 `torch_vortex.rand`，支持 process-local seed、counter 推进和可复现；PyTorch Generator/state、`randn` 和模型随机操作仍待。
 - [~] `torch_vortex.manual_seed` 与 checkpoint 前后的显式 seed 可复现路径已具备；标准 `torch.vortex` fork/state API 和跨流语义仍待。
-- [~] layernorm/rmsnorm、GELU/SiLU、gather 和基础 attention 组件已有设备路径；embedding、RoPE/SwiGLU 和完整 attention schema 仍待。
+- [~] layernorm/rmsnorm、GELU/SiLU、gather、embedding 和带显式 contiguous K 的 tiny attention 已有设备路径；RoPE/SwiGLU、mask/causal schema 和完整 attention 仍待。
 - [ ] 验证 mask、causal、scale、head layout，再补 GQA、长序列和 paged KV。
 - [ ] 实现 KV cache append/read、prefill、逐 token decode、采样/top-k，并统计禁止的 host 往返。
 - [~] 已验证 `state_dict` 权重经 CPU `save/load` 后再迁移到 Vortex 的 bit-exact round trip；device storage、map_location 直接恢复和完整模型 checkpoint 仍待。

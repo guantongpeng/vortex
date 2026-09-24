@@ -1158,6 +1158,12 @@ static torch::Tensor view_impl(const torch::Tensor& self,
     return out;
 }
 
+static torch::Tensor reshape_alias_impl(const torch::Tensor& self,
+                                        c10::SymIntArrayRef sym_sizes,
+                                        c10::SymIntArrayRef sym_strides) {
+    return as_strided_impl(self, sym_sizes, sym_strides, std::nullopt);
+}
+
 // relu, non-inplace. PyTorch's relu is max(x, 0) with two properties a naive
 // `x > 0 ? x : 0` gets wrong: NaN propagates, and -0.0 stays -0.0. It also
 // must not touch its input — this used to run the in-place kernel on self and
@@ -1434,6 +1440,29 @@ static torch::Tensor& gather_out_impl(const torch::Tensor& self, int64_t dim,
                 out.sizes(), " does not match result ", tmp.sizes());
     out.copy_(tmp);
     return out;
+}
+
+static torch::Tensor embedding_impl(const torch::Tensor& weight,
+                                    const torch::Tensor& indices,
+                                    c10::SymInt padding_idx,
+                                    bool scale_grad_by_freq, bool sparse) {
+    check_vortex_f32(weight, "embedding weight");
+    TORCH_CHECK(weight.dim() == 2, "torch_vortex: embedding weight must be 2-D");
+    TORCH_CHECK(!scale_grad_by_freq && !sparse,
+                "torch_vortex: embedding backward options are unsupported");
+    TORCH_CHECK(indices.device().type() == c10::DeviceType::PrivateUse1 &&
+                    (indices.scalar_type() == at::kLong || indices.scalar_type() == at::kInt),
+                "torch_vortex: embedding indices must be int32/int64 on vortex");
+    TORCH_CHECK(padding_idx.expect_int() == -1 ||
+                    (padding_idx.expect_int() >= 0 &&
+                     padding_idx.expect_int() < weight.size(0)),
+                "torch_vortex: embedding padding_idx is out of range");
+    auto flat = indices.reshape({-1}).contiguous();
+    auto expanded = flat.unsqueeze(1).expand({flat.numel(), weight.size(1)}).contiguous();
+    auto gathered = gather_impl(weight, 0, expanded, false);
+    std::vector<int64_t> shape(indices.sizes().begin(), indices.sizes().end());
+    shape.push_back(weight.size(1));
+    return gathered.reshape(shape);
 }
 
 static torch::Tensor scatter_impl(const torch::Tensor& self, int64_t dim,
@@ -3445,6 +3474,7 @@ void register_vortex_ops() {
     VX_IMPL("fill_.Scalar", &fill__impl);
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
+    VX_IMPL("_reshape_alias", &reshape_alias_impl);
     VX_IMPL("as_strided", &as_strided_impl);
     VX_IMPL("cat", &cat_impl);
     VX_IMPL("cat.out", &cat_out_impl);
@@ -3452,6 +3482,7 @@ void register_vortex_ops() {
     VX_IMPL("stack.out", &stack_out_impl);
     VX_IMPL("gather", &gather_impl);
     VX_IMPL("gather.out", &gather_out_impl);
+    VX_IMPL("embedding", &embedding_impl);
     VX_IMPL("scatter.src", &scatter_impl);
     VX_IMPL("scatter.src_out", &scatter_src_out_impl);
     VX_IMPL("scatter_.src", &scatter__impl);
