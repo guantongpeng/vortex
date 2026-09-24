@@ -212,10 +212,16 @@ def test_avg_pool2d_matches_cpu(backend):
         torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
 
 
-def test_avg_pool2d_rejects_unimplemented_overloads(backend):
+def test_pool_ceil_mode_matches_cpu(backend):
+    x = torch.randn(1, 2, 5, 6)
+    for fn in (torch.nn.functional.max_pool2d, torch.nn.functional.avg_pool2d):
+        got = fn(x.to("vortex"), 3, stride=2, padding=1, ceil_mode=True).cpu()
+        want = fn(x, 3, stride=2, padding=1, ceil_mode=True)
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-6)
+
+
+def test_avg_pool2d_divisor_override(backend):
     x = torch.randn(1, 2, 4, 4).to("vortex")
-    with assert_rejected("ceil_mode unsupported", backend):
-        torch.nn.functional.avg_pool2d(x, 2, ceil_mode=True)
     got = torch.nn.functional.avg_pool2d(x, 2, stride=2, divisor_override=3)
     want = torch.nn.functional.avg_pool2d(x.cpu(), 2, stride=2, divisor_override=3)
     assert_matches_cpu(got, want, rtol=1e-5, atol=1e-6)

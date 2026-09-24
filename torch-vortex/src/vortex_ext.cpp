@@ -2589,7 +2589,7 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     // The shape arithmetic stays here: window_out is bounds-checked and names
     // the argument it rejects, while the DL's is plain unsigned arithmetic.
     // ATen validates, the DL computes.
-    DL_LAUNCH(vx_dnn_pool2d_ex(current_queue(),
+    DL_LAUNCH(vx_dnn_pool2d_ex_mode(current_queue(),
                             (uint64_t)(uintptr_t)self.data_ptr(),
                             (uint64_t)(uintptr_t)out.data_ptr(),
                             u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
@@ -2600,7 +2600,9 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
                             u32_dim(ph, "pool padding height"),
                             u32_dim(pw, "pool padding width"),
                             u32_dim(sh, "pool stride height"),
-                            u32_dim(sw, "pool stride width"), op, divisor));
+                            u32_dim(sw, "pool stride width"),
+                            (op == 2 && ceil_mode) ? 3u : op, divisor,
+                            ceil_mode ? 1u : 0u));
     return out;
 }
 
@@ -2611,8 +2613,7 @@ static torch::Tensor max_pool2d_impl(const torch::Tensor& self,
                                      c10::IntArrayRef dilation,
                                      bool ceil_mode) {
     for (auto d : dilation) TORCH_CHECK(d == 1, "torch_vortex: dilation must be 1");
-    TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
-    return pool_impl(self, kernel, stride, padding, 0, false, 0);
+    return pool_impl(self, kernel, stride, padding, 0, ceil_mode, 0);
 }
 
 static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
@@ -2621,7 +2622,6 @@ static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
                                      c10::IntArrayRef padding,
                                      bool ceil_mode, bool count_include_pad,
                                      std::optional<int64_t> divisor_override) {
-    TORCH_CHECK(!ceil_mode, "torch_vortex: ceil_mode unsupported in v1");
     uint32_t divisor = 0;
     if (divisor_override.has_value()) {
         TORCH_CHECK(*divisor_override > 0 && *divisor_override <= UINT32_MAX,
@@ -2629,7 +2629,7 @@ static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
         divisor = (uint32_t)*divisor_override;
     }
     return pool_impl(self, kernel, stride, padding,
-                     count_include_pad ? 2u : 1u, false, divisor);
+                     count_include_pad ? 2u : 1u, ceil_mode, divisor);
 }
 
 

@@ -100,8 +100,20 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         // NaN (F10 in docs/mydocs/pytorch_plan.md).
         float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
+        uint32_t include_count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
             const int32_t iy = (int32_t)(oy * arg->sh + kh) - (int32_t)arg->ph;
+            if (arg->op == 3 && iy >= -(int32_t)arg->ph &&
+                iy < (int32_t)(arg->hi + arg->ph)) {
+                for (uint32_t kw = 0; kw < arg->kw; ++kw) {
+                    const int32_t ix = (int32_t)(ox * arg->sw + kw) -
+                                       (int32_t)arg->pw;
+                    if (ix >= -(int32_t)arg->pw &&
+                        ix < (int32_t)(arg->wi + arg->pw)) {
+                        ++include_count;
+                    }
+                }
+            }
             if (iy < 0 || iy >= (int32_t)arg->hi) continue;
             for (uint32_t kw = 0; kw < arg->kw; ++kw) {
                 const int32_t ix = (int32_t)(ox * arg->sw + kw) - (int32_t)arg->pw;
@@ -119,11 +131,13 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         }
         if (arg->op == 0) {
             out_row[ox] = acc;
-        } else if (arg->op == 1 || arg->op == 2) {
+        } else if (arg->op == 1 || arg->op == 2 || arg->op == 3) {
             const uint32_t divisor = arg->divisor
                                          ? arg->divisor
                                          : (arg->op == 1 ? count
-                                                         : arg->kh * arg->kw);
+                                                         : (arg->op == 3
+                                                                ? include_count
+                                                                : arg->kh * arg->kw));
             out_row[ox] = divisor ? acc / (float)divisor : 0.0f;
         }
     }
