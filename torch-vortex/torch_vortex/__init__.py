@@ -165,6 +165,12 @@ def _device_module():
             """
             _require_ext().device_synchronize()
 
+        def get_rng_state(self, device=None):
+            return get_rng_state(device)
+
+        def set_rng_state(self, state, device=None):
+            set_rng_state(state, device)
+
     return _VortexModule()
 
 
@@ -310,6 +316,25 @@ def manual_seed(seed):
     _rng_seed = int(seed) & ((1 << 64) - 1)
     _rng_offset = 0
     return _rng_seed
+
+
+def get_rng_state(device="vortex"):
+    if device not in (None, "vortex"):
+        raise RuntimeError("torch_vortex RNG state only supports device='vortex'")
+    value = (_rng_seed.to_bytes(8, "little") +
+             _rng_offset.to_bytes(8, "little"))
+    return torch.tensor(list(value), dtype=torch.uint8)
+
+
+def set_rng_state(state, device="vortex"):
+    global _rng_seed, _rng_offset
+    if device not in (None, "vortex"):
+        raise RuntimeError("torch_vortex RNG state only supports device='vortex'")
+    if state.device.type != "cpu" or state.dtype != torch.uint8 or state.numel() != 16:
+        raise RuntimeError("torch_vortex RNG state must be a CPU uint8 tensor of length 16")
+    value = bytes(state.tolist())
+    _rng_seed = int.from_bytes(value[:8], "little")
+    _rng_offset = int.from_bytes(value[8:], "little")
 
 
 def rand(*sizes, device="vortex"):

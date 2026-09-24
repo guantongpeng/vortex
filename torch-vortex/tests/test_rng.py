@@ -18,3 +18,12 @@ def test_philox_stream_advances_by_counter_blocks(backend):
     torch_vortex.manual_seed(77)
     whole = torch_vortex.rand(8).cpu()
     assert torch.equal(joined, whole)
+
+
+def test_philox_state_round_trip(backend):
+    torch_vortex.manual_seed(91)
+    torch_vortex.rand(4)
+    state = torch_vortex.get_rng_state()
+    expected = torch_vortex.rand(4).cpu()
+    torch_vortex.set_rng_state(state)
+    assert torch.equal(expected, torch_vortex.rand(4).cpu())
