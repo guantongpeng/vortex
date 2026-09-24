@@ -49,6 +49,10 @@ a = torch.randn(4).to("vortex")      # randn(device="vortex") needs RNG (W3.5)
 b = torch.randn(4).to("vortex")
 c = a + b                            # runs the vortex add kernel
 c.cpu()                              # d2h copy
+
+# Device Philox uniform stream
+torch_vortex.manual_seed(123)
+r = torch_vortex.rand(4)
 ```
 
 ## Running the tests
@@ -85,7 +89,7 @@ the message. None of it falls back to the CPU.
 | `argmax` (any dim, or the whole tensor) and `max(dim=)` with its indices | |
 | `conv2d`, batch norm (inference), pooling, `mm`/`bmm`/`linear`/`addmm` | |
 | `avg_pool2d` with `count_include_pad` true/false | |
-| max-pool `return_indices`; nearest and nearest-exact 2D interpolate | |
+| max-pool `return_indices`; 1D/2D/3D nearest and linear-family interpolate | |
 | `layer_norm` (affine optional, with `mean`/`rstd`), `rms_norm` | |
 | `softmax`/`log_softmax` over any one dim, `logsumexp`, `nn.Softmax`/`nn.LogSoftmax` | |
 | `cat` and `stack` for contiguous FP32 tensors | |
@@ -102,9 +106,9 @@ the message. None of it falls back to the CPU.
 | reductions over several dims at once, or a non-trailing dim without a copy | W3.2 |
 | `softmax`/`log_softmax` on tensors above 4 dimensions (the write-back copy) | W3.2 |
 | dtype conversion in `copy_` | W3.2 |
-| elementwise ops on strided inputs (`x.t() + 1`): the kernels index linearly | W3.2 |
-| `torch.randn(device="vortex")`, `torch.manual_seed` on the device | W3.5 |
-| transposed conv, linear/bilinear/bicubic interpolate, adaptive pool beyond (1,1) | W3.3 |
+| reductions on strided inputs still normalize to contiguous storage | W3.2 |
+| `torch.randn(device="vortex")` and Generator-backed random ops | W3.5 |
+| area/antialias interpolate, transposed conv, adaptive pool beyond (1,1) | W3.3 |
 | training: batch-norm training mode, autograd | W8.1 |
 | `non_blocking` actually overlapping (the runtime has one in-order ring) | W2.2 |
 | `Stream.query()`/`Event.query()` (no non-blocking query in the runtime) | W2.2 |
