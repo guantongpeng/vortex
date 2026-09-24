@@ -2325,6 +2325,27 @@ static torch::Tensor& sub_scalar__impl(torch::Tensor& self,
                      "sub_");
 }
 
+static torch::Tensor dropout_impl(const torch::Tensor& input, double p, bool train) {
+    check_vortex_f32(input, "dropout.input");
+    TORCH_CHECK(p >= 0.0 && p <= 1.0,
+                "torch_vortex: dropout probability must be in [0, 1]");
+    TORCH_CHECK(!train,
+                "torch_vortex: dropout training is unsupported; use eval mode");
+    return input;
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> native_dropout_impl(
+    const torch::Tensor& input, double p, std::optional<bool> train) {
+    const bool training = train.value_or(true);
+    check_vortex_f32(input, "native_dropout.input");
+    TORCH_CHECK(p >= 0.0 && p <= 1.0,
+                "torch_vortex: dropout probability must be in [0, 1]");
+    TORCH_CHECK(!training,
+                "torch_vortex: dropout training is unsupported; use eval mode");
+    auto mask = torch::ones(input.sizes(), input.options().dtype(at::kBool));
+    return std::make_tuple(input, mask);
+}
+
 // ---- unary ----------------------------------------------------------------
 
 static torch::Tensor unary_op(const torch::Tensor& self, uint32_t op,
@@ -3243,6 +3264,8 @@ void register_vortex_ops() {
     VX_IMPL("sort.values", &sort_values_impl);
     VX_IMPL("topk", &topk_impl);
     VX_IMPL("topk.values", &topk_values_impl);
+    VX_IMPL("dropout", &dropout_impl);
+    VX_IMPL("native_dropout", &native_dropout_impl);
     VX_IMPL("relu", &relu_impl);
     VX_IMPL("relu_", &relu__impl);
     VX_IMPL("add.Tensor", &add_impl);

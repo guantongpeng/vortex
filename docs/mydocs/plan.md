@@ -155,8 +155,8 @@
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
 - [ ] cast、clone/contiguous、transpose/permute/slice/select/expand、dtype promotion 和 bool/int64 数据路径。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
-- [ ] 补 broadcast add/mul/sub/div、标量 alpha、GELU/SiLU、dropout，以及模型需要的 in-place/out overload。
-- [ ] 补 `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out`。
+- [~] broadcast add/mul/sub/div、标量 alpha、GELU/SiLU 和主要 in-place/out overload 已具备；dropout eval identity 已实现，训练随机路径待 RNG，详见 [`p2_23_dropout_eval.md`](p2_23_dropout_eval.md)。
+- [x] `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out` 已补齐，详见 [`p2_11_index_out.md`](p2_11_index_out.md)、[`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
 - [ ] 对每个 schema 建立 overload×dtype×layout×shape 支持矩阵，unsupported 必须在 launch 前明确报错。
 
 ### 2.4 CNN eager 和模型分级
