@@ -176,7 +176,7 @@
 - [~] layernorm/rmsnorm、GELU/SiLU、gather 和基础 attention 组件已有设备路径；embedding、RoPE/SwiGLU 和完整 attention schema 仍待。
 - [ ] 验证 mask、causal、scale、head layout，再补 GQA、长序列和 paged KV。
 - [ ] 实现 KV cache append/read、prefill、逐 token decode、采样/top-k，并统计禁止的 host 往返。
-- [ ] 验证 `state_dict`、save/load、map_location、CPU↔Vortex 权重迁移和 storage 方法。
+- [~] 已验证 `state_dict` 权重经 CPU `save/load` 后再迁移到 Vortex 的 bit-exact round trip；device storage、map_location 直接恢复和完整模型 checkpoint 仍待。
 - [ ] Mamba 接入 selective scan/state update，解除小 `d_state` 限制并测试 chunked state continuation。
 
 **阶段验收：**正式 PyTorch/Python 组合下，ResNet-18 分级、tiny Transformer/decoder、RNG 和 checkpoint 通过；稳态前向没有未记录的 host 数值计算或隐式 CPU fallback。
