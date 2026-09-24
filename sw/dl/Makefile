@@ -154,10 +154,12 @@ quant_host.o: $(SRC_DIR)/quant_host.cpp $(SRC_DIR)/quant_args.h
 ifeq ($(XLEN),64)
 D_CONV_SIZE := 104
 D_POOL_SIZE := 88
+D_POOL3_SIZE := 112
 D_BN_SIZE := 72
 else
 D_CONV_SIZE := 84
 D_POOL_SIZE := 76
+D_POOL3_SIZE := 100
 D_BN_SIZE := 44
 endif
 ifeq ($(XLEN),64)
@@ -165,7 +167,7 @@ D_RESIZE_SIZE := 96
 else
 D_RESIZE_SIZE := 84
 endif
-DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_resize_kernel", "args_size": $(D_RESIZE_SIZE), "max_block": [16, 1, 1]}]
+DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool3d_kernel", "args_size": $(D_POOL3_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_resize_kernel", "args_size": $(D_RESIZE_SIZE), "max_block": [16, 1, 1]}]
 
 dnn.vxbin: $(SRC_DIR)/dnn_kernels.hip $(SRC_DIR)/dnn_args.h \
            $(VORTEX_HOME)/ci/hipcc_vortex.py

@@ -57,6 +57,17 @@ typedef struct {
     uint32_t divisor;
 } vx_dnn_pool_args_t;
 
+// Windowed pooling over DHW. The operation and divisor have the same meaning
+// as vx_dnn_pool_args_t; indices, when nonzero, hold flattened D*H*W offsets.
+typedef struct {
+    vx_dl_ptr_t in;
+    vx_dl_ptr_t out;
+    vx_dl_ptr_t indices;
+    uint32_t n, c, di, hi, wi, do_, ho, wo;
+    uint32_t kd, kh, kw, pd, ph, pw, sd, sh, sw;
+    uint32_t op, divisor, dd, dh, dw;
+} vx_dnn_pool3d_args_t;
+
 typedef struct {
   vx_dl_ptr_t in, out;
   uint32_t n, c, ndim, mode, align_corners;

@@ -30,6 +30,7 @@ struct DnnState {
     vx_module_h module = nullptr;
     vx_kernel_h conv2d = nullptr;
     vx_kernel_h pool2d = nullptr;
+    vx_kernel_h pool3d = nullptr;
     vx_kernel_h bn = nullptr;
     vx_kernel_h resize = nullptr;
     std::string path;   // what init was called with
@@ -81,6 +82,7 @@ vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path) {
     } entries[] = {
         {"dnn_conv2d_kernel", &g_dnn.conv2d},
         {"dnn_pool2d_kernel", &g_dnn.pool2d},
+        {"dnn_pool3d_kernel", &g_dnn.pool3d},
         {"dnn_bn_affine_kernel", &g_dnn.bn},
         {"dnn_resize_kernel", &g_dnn.resize},
     };
@@ -101,7 +103,7 @@ vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path) {
 
 vx_dnn_status vx_dnn_finalize(void) {
     if (!g_dnn.module) return VX_DNN_OK;
-    for (vx_kernel_h k : {g_dnn.conv2d, g_dnn.pool2d, g_dnn.bn, g_dnn.resize}) {
+    for (vx_kernel_h k : {g_dnn.conv2d, g_dnn.pool2d, g_dnn.pool3d, g_dnn.bn, g_dnn.resize}) {
         if (k) vx_kernel_release(k);
     }
     vx_module_release(g_dnn.module);
@@ -295,6 +297,43 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
                             uint32_t sh, uint32_t sw, uint32_t op) {
     return vx_dnn_pool2d_ex_mode(q, in, out, n, c, hi, wi, kh, kw, ph, pw,
                                  sh, sw, op, 0, 0);
+}
+
+vx_dnn_status vx_dnn_pool3d(vx_queue_h q, uint64_t in, uint64_t out,
+                            uint32_t n, uint32_t c,
+                            uint32_t di, uint32_t hi, uint32_t wi,
+                            uint32_t kd, uint32_t kh, uint32_t kw,
+                            uint32_t pd, uint32_t ph, uint32_t pw,
+                            uint32_t sd, uint32_t sh, uint32_t sw,
+                            uint32_t op, uint32_t divisor,
+                            uint32_t ceil_mode, uint32_t dd, uint32_t dh,
+                            uint32_t dw, uint64_t indices) {
+    if (!g_dnn.module || !in || !out || !n || !c || !di || !hi || !wi ||
+        !kd || !kh || !kw || !sd || !sh || !sw || !dd || !dh || !dw ||
+        op > 3 || (op == 0 && divisor)) return VX_DNN_ERR_BAD_ARGS;
+    const uint64_t ekd = (uint64_t)(kd - 1) * dd + 1;
+    const uint64_t ekh = (uint64_t)(kh - 1) * dh + 1;
+    const uint64_t ekw = (uint64_t)(kw - 1) * dw + 1;
+    if ((uint64_t)di + 2ull * pd < ekd || (uint64_t)hi + 2ull * ph < ekh ||
+        (uint64_t)wi + 2ull * pw < ekw) return VX_DNN_ERR_BAD_ARGS;
+    const uint32_t od = (uint32_t)(((uint64_t)di + 2ull * pd - ekd +
+                                    (ceil_mode ? sd - 1 : 0)) / sd + 1);
+    const uint32_t oh = (uint32_t)(((uint64_t)hi + 2ull * ph - ekh +
+                                    (ceil_mode ? sh - 1 : 0)) / sh + 1);
+    const uint32_t ow = (uint32_t)(((uint64_t)wi + 2ull * pw - ekw +
+                                    (ceil_mode ? sw - 1 : 0)) / sw + 1);
+    if (!od || !oh || !ow || (uint64_t)od * oh > UINT32_MAX) return VX_DNN_ERR_BAD_ARGS;
+    vx_dnn_pool3d_args_t args = {};
+    args.in = (vx_dl_ptr_t)in; args.out = (vx_dl_ptr_t)out;
+    args.indices = (vx_dl_ptr_t)indices;
+    args.n = n; args.c = c; args.di = di; args.hi = hi; args.wi = wi;
+    args.do_ = od; args.ho = oh; args.wo = ow;
+    args.kd = kd; args.kh = kh; args.kw = kw;
+    args.pd = pd; args.ph = ph; args.pw = pw;
+    args.sd = sd; args.sh = sh; args.sw = sw;
+    args.op = op; args.divisor = divisor;
+    args.dd = dd; args.dh = dh; args.dw = dw;
+    return launch3(q, g_dnn.pool3d, &args, sizeof(args), od * oh, c, n, 0);
 }
 
 vx_dnn_status vx_dnn_resize(

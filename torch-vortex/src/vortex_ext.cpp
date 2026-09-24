@@ -2989,6 +2989,95 @@ static torch::Tensor avg_pool1d_impl(const torch::Tensor& self,
                        count_include_pad ? 2u : 1u, ceil_mode, 0, 1);
 }
 
+static torch::Tensor pool3d_impl(const torch::Tensor& self,
+                                 c10::IntArrayRef kernel,
+                                 c10::IntArrayRef stride,
+                                 c10::IntArrayRef padding, uint32_t op,
+                                 bool ceil_mode, uint32_t divisor,
+                                 c10::IntArrayRef dilation,
+                                 torch::Tensor* indices_out = nullptr) {
+    check_cnn_f32(self, "pool.input", 5);
+    TORCH_CHECK(kernel.size() == 3 && (stride.empty() || stride.size() == 3) &&
+                    (padding.empty() || padding.size() == 3) &&
+                    (dilation.empty() || dilation.size() == 3),
+                "torch_vortex: pool3d parameters must have three values");
+    const int64_t kd = kernel[0], kh = kernel[1], kw = kernel[2];
+    const int64_t sd = stride.empty() ? kd : stride[0];
+    const int64_t sh = stride.empty() ? kh : stride[1];
+    const int64_t sw = stride.empty() ? kw : stride[2];
+    const int64_t pd = padding.empty() ? 0 : padding[0];
+    const int64_t ph = padding.empty() ? 0 : padding[1];
+    const int64_t pw = padding.empty() ? 0 : padding[2];
+    const int64_t dd = dilation.empty() ? 1 : dilation[0];
+    const int64_t dh = dilation.empty() ? 1 : dilation[1];
+    const int64_t dw = dilation.empty() ? 1 : dilation[2];
+    TORCH_CHECK(kd > 0 && kh > 0 && kw > 0 && sd > 0 && sh > 0 && sw > 0 &&
+                    dd > 0 && dh > 0 && dw > 0 && pd >= 0 && ph >= 0 && pw >= 0,
+                "torch_vortex: pool3d parameters must be positive");
+    const auto& x = self.sizes();
+    const int64_t od = window_out(x[2], (kd - 1) * dd + 1, pd, sd, ceil_mode, "pool depth");
+    const int64_t oh = window_out(x[3], (kh - 1) * dh + 1, ph, sh, ceil_mode, "pool height");
+    const int64_t ow = window_out(x[4], (kw - 1) * dw + 1, pw, sw, ceil_mode, "pool width");
+    auto out = torch::empty({x[0], x[1], od, oh, ow}, self.options());
+    torch::Tensor indices;
+    if (indices_out) {
+        TORCH_CHECK(op == 0, "torch_vortex: pool indices are only defined for max_pool3d");
+        indices = torch::empty(out.sizes(), self.options().dtype(torch::kLong));
+        *indices_out = indices;
+    }
+    if (out.numel() == 0) return out;
+    const int status = (int)vx_dnn_pool3d(
+        current_queue(), (uint64_t)(uintptr_t)self.data_ptr(),
+        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(x[0], "pool batch"),
+        u32_dim(x[1], "pool channels"), u32_dim(x[2], "pool depth"),
+        u32_dim(x[3], "pool height"), u32_dim(x[4], "pool width"),
+        u32_dim(kd, "pool kernel depth"), u32_dim(kh, "pool kernel height"),
+        u32_dim(kw, "pool kernel width"), u32_dim(pd, "pool padding depth"),
+        u32_dim(ph, "pool padding height"), u32_dim(pw, "pool padding width"),
+        u32_dim(sd, "pool stride depth"), u32_dim(sh, "pool stride height"),
+        u32_dim(sw, "pool stride width"), op, divisor, ceil_mode ? 1u : 0u,
+        u32_dim(dd, "pool dilation depth"), u32_dim(dh, "pool dilation height"),
+        u32_dim(dw, "pool dilation width"),
+        indices_out ? (uint64_t)(uintptr_t)indices.data_ptr() : 0);
+    TORCH_CHECK(status == 0, "torch_vortex: vx_dnn_pool3d failed with status ", status);
+    note_device_work();
+    return out;
+}
+
+static torch::Tensor max_pool3d_impl(const torch::Tensor& self,
+                                     c10::IntArrayRef kernel,
+                                     c10::IntArrayRef stride,
+                                     c10::IntArrayRef padding,
+                                     c10::IntArrayRef dilation,
+                                     bool ceil_mode) {
+    return pool3d_impl(self, kernel, stride, padding, 0, ceil_mode, 0, dilation);
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> max_pool3d_with_indices_impl(
+    const torch::Tensor& self, c10::IntArrayRef kernel,
+    c10::IntArrayRef stride, c10::IntArrayRef padding,
+    c10::IntArrayRef dilation, bool ceil_mode) {
+    torch::Tensor indices;
+    auto out = pool3d_impl(self, kernel, stride, padding, 0, ceil_mode, 0, dilation, &indices);
+    return std::make_tuple(out, indices);
+}
+
+static torch::Tensor avg_pool3d_impl(const torch::Tensor& self,
+                                     c10::IntArrayRef kernel,
+                                     c10::IntArrayRef stride,
+                                     c10::IntArrayRef padding, bool ceil_mode,
+                                     bool count_include_pad,
+                                     std::optional<int64_t> divisor_override) {
+    uint32_t divisor = 0;
+    if (divisor_override.has_value()) {
+        TORCH_CHECK(*divisor_override > 0 && *divisor_override <= UINT32_MAX,
+                    "torch_vortex: avg_pool3d divisor_override is invalid");
+        divisor = (uint32_t)*divisor_override;
+    }
+    return pool3d_impl(self, kernel, stride, padding, count_include_pad ? 2u : 1u,
+                       ceil_mode, divisor, {1, 1, 1});
+}
+
 static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
                                               c10::SymIntArrayRef output_size) {
     check_cnn_f32(self, "pool.input", 4);
@@ -3731,6 +3820,9 @@ void register_vortex_ops() {
     VX_IMPL("max_pool1d", &max_pool1d_impl);
     VX_IMPL("max_pool1d_with_indices", &max_pool1d_with_indices_impl);
     VX_IMPL("avg_pool1d", &avg_pool1d_impl);
+    VX_IMPL("max_pool3d", &max_pool3d_impl);
+    VX_IMPL("max_pool3d_with_indices", &max_pool3d_with_indices_impl);
+    VX_IMPL("avg_pool3d", &avg_pool3d_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("adaptive_avg_pool1d", &adaptive_avg_pool1d_impl);
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);

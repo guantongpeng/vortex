@@ -101,6 +101,16 @@ vx_dnn_status vx_dnn_pool2d_dilated(vx_queue_h q, uint64_t in, uint64_t out,
                                     uint32_t op, uint32_t divisor,
                                     uint32_t ceil_mode, uint32_t dh, uint32_t dw);
 
+vx_dnn_status vx_dnn_pool3d(vx_queue_h q, uint64_t in, uint64_t out,
+                            uint32_t n, uint32_t c,
+                            uint32_t di, uint32_t hi, uint32_t wi,
+                            uint32_t kd, uint32_t kh, uint32_t kw,
+                            uint32_t pd, uint32_t ph, uint32_t pw,
+                            uint32_t sd, uint32_t sh, uint32_t sw,
+                            uint32_t op, uint32_t divisor,
+                            uint32_t ceil_mode, uint32_t dd, uint32_t dh,
+                            uint32_t dw, uint64_t indices);
+
 // mode: 0 nearest, 1 nearest-exact, 2 linear, 3 bicubic (ndim=2).
 // scales are inverse spatial scales; strides are measured in FP32 elements.
 vx_dnn_status vx_dnn_resize(

@@ -138,6 +138,70 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
     }
 }
 
+__global__ void dnn_pool3d_kernel(vx_dnn_pool3d_args_t* arg) {
+    const uint32_t n = blockIdx.z;
+    const uint32_t c = blockIdx.y;
+    const uint32_t plane = arg->ho * arg->wo;
+    const uint32_t oz = blockIdx.x / arg->ho;
+    const uint32_t oy = blockIdx.x % arg->ho;
+    const float* in_ch = (const float*)(uintptr_t)arg->in +
+        (((size_t)n * arg->c) + c) * arg->di * arg->hi * arg->wi;
+    float* out_row = (float*)(uintptr_t)arg->out +
+        ((((size_t)n * arg->c + c) * arg->do_ + oz) * arg->ho + oy) * arg->wo;
+    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
+        float acc = arg->op == 0 ? -INFINITY : 0.0f;
+        uint32_t count = 0;
+        int64_t max_index = 0;
+        uint32_t include_count = 0;
+        for (uint32_t kd = 0; kd < arg->kd; ++kd) {
+            const int32_t iz = (int32_t)(oz * arg->sd + kd * arg->dd) - (int32_t)arg->pd;
+            if (arg->op == 3 && iz >= -(int32_t)arg->pd && iz < (int32_t)(arg->di + arg->pd)) {
+                for (uint32_t kh = 0; kh < arg->kh; ++kh) {
+                    const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) - (int32_t)arg->ph;
+                    for (uint32_t kw = 0; kw < arg->kw; ++kw) {
+                        const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) - (int32_t)arg->pw;
+                        if (iy >= -(int32_t)arg->ph && iy < (int32_t)(arg->hi + arg->ph) &&
+                            ix >= -(int32_t)arg->pw && ix < (int32_t)(arg->wi + arg->pw)) {
+                            ++include_count;
+                        }
+                    }
+                }
+            }
+            if (iz < 0 || iz >= (int32_t)arg->di) continue;
+            for (uint32_t kh = 0; kh < arg->kh; ++kh) {
+                const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) - (int32_t)arg->ph;
+                if (iy < 0 || iy >= (int32_t)arg->hi) continue;
+                for (uint32_t kw = 0; kw < arg->kw; ++kw) {
+                    const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) - (int32_t)arg->pw;
+                    if (ix < 0 || ix >= (int32_t)arg->wi) continue;
+                    const size_t index = ((size_t)iz * arg->hi + iy) * arg->wi + ix;
+                    const float v = in_ch[index];
+                    if (arg->op == 0) {
+                        if (v > acc || isnan(v)) {
+                            acc = v;
+                            max_index = (int64_t)index;
+                        }
+                    } else {
+                        acc += v;
+                    }
+                    ++count;
+                }
+            }
+        }
+        if (arg->op == 0) {
+            out_row[ox] = acc;
+            if (arg->indices) {
+                ((int64_t*)(uintptr_t)arg->indices)[
+                    ((((size_t)n * arg->c + c) * arg->do_ + oz) * arg->ho + oy) * arg->wo + ox] = max_index;
+            }
+        } else {
+            const uint32_t divisor = arg->divisor ? arg->divisor
+                : (arg->op == 1 ? count : (arg->op == 3 ? include_count : arg->kd * arg->kh * arg->kw));
+            out_row[ox] = divisor ? acc / (float)divisor : 0.0f;
+        }
+    }
+}
+
 static __device__ uint32_t resize_bound(int64_t i, uint32_t size) {
   return i < 0 ? 0 : (i >= size ? size - 1 : (uint32_t)i);
 }
