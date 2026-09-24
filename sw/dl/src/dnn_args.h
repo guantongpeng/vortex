@@ -27,6 +27,8 @@ typedef uint32_t vx_dl_ptr_t;
 typedef uint64_t vx_dl_ptr_t;
 #endif
 
+#define VX_DNN_CONV_TILE 256u
+
 // Direct 2D convolution, NCHW. Weight uses grouped layout
 // [CO][CI/groups][KH][KW].
 //   out[n][co][oy][ox] = sum_{ci,kh,kw} in[n][ci][oy*sh + kh - ph][ox*sw + kw - pw] * w[co][ci][kh][kw] (+ b[co])

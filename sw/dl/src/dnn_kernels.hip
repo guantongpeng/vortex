@@ -11,76 +11,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Vortex DL dnn kernels (plan P3-02 second tier): direct 2D convolution,
-// windowed pooling and inference batch-norm (fused affine). NCHW FP32.
-// Direct conv rather than implicit GEMM is deliberate at this node: the
-// verification target is correctness on the models' small layers, and the
-// tile/GEMM reuse happens through the TCU path later. One 4-warp CTA per
-// (output channel, output row); LMEM stages the weight for that channel.
-
 #include <hip/hip_runtime.h>
 #include <math.h>
 
 #include "dnn_args.h"
 
-#define DNN_WMAX 16  // max kernel width staged in LMEM (kh*kw floats)
-
 __global__ void dnn_conv2d_kernel(vx_dnn_conv_args_t* arg) {
-    // grid: (wo_blocks?, co, n) — one CTA computes one (n, co, oy) row.
-    const uint32_t n = blockIdx.z;
-    const uint32_t co = blockIdx.y;
-    const uint32_t oy = blockIdx.x;
-
-    const uint32_t ci_group = arg->ci / arg->groups;
-    const uint32_t group = co / (arg->co / arg->groups);
-    const uint32_t ci_base = group * ci_group;
-    const float* w = (const float*)(uintptr_t)arg->weight +
-                     ((size_t)co * ci_group) * (arg->kh * arg->kw);
-    float* stage = (float*)__local_mem();  // [ci][kh*kw]
-
-    // Stage this output channel's weights (CI*KH*KW floats, 16 threads).
-    const uint32_t wtotal = ci_group * arg->kh * arg->kw;
-    for (uint32_t e = threadIdx.x; e < wtotal && e < ci_group * DNN_WMAX;
-         e += 16) {
-        stage[e] = w[e];
+  const uint32_t n = blockIdx.z;
+  const uint32_t co = blockIdx.y;
+  const uint32_t width_tiles = (arg->wo + 15) / 16;
+  const uint32_t oy = blockIdx.x / width_tiles;
+  const uint32_t ox = (blockIdx.x % width_tiles) * 16 + threadIdx.x;
+  const uint32_t ci_group = arg->ci / arg->groups;
+  const uint32_t ci_base = (co / (arg->co / arg->groups)) * ci_group;
+  const uint32_t area = arg->kh * arg->kw;
+  const uint32_t total = ci_group * area;
+  const float* weights = (const float*)(uintptr_t)arg->weight + (size_t)co * total;
+  const float* input = (const float*)(uintptr_t)arg->in +
+                      ((size_t)n * arg->ci + ci_base) * arg->hi * arg->wi;
+  float* stage = (float*)__local_mem();
+  float acc = arg->has_bias ? ((const float*)(uintptr_t)arg->bias)[co] : 0.0f;
+  for (uint32_t start = 0; start < total;) {
+    const uint32_t count = total - start < VX_DNN_CONV_TILE
+                               ? total - start : VX_DNN_CONV_TILE;
+    for (uint32_t i = threadIdx.x; i < count; i += 16) {
+      stage[i] = weights[start + i];
     }
     __syncthreads();
-    const uint32_t wstaged = wtotal < ci_group * DNN_WMAX ? wtotal
-                                                         : ci_group * DNN_WMAX;
-
-    const float* in_base = (const float*)(uintptr_t)arg->in +
-                           (size_t)n * arg->ci * arg->hi * arg->wi;
-    float* out_row = (float*)(uintptr_t)arg->out +
-                     (((size_t)n * arg->co + co) * arg->ho + oy) * arg->wo;
-    const float bias = arg->has_bias
-                           ? ((const float*)(uintptr_t)arg->bias)[co]
-                           : 0.0f;
-
-    // Output columns split across the CTA's threads.
-    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        float acc = bias;
-        uint32_t we = 0;
-        for (uint32_t ci = 0; ci < ci_group; ++ci) {
-            const float* in_ch = in_base + (size_t)(ci_base + ci) * arg->hi * arg->wi;
-            for (uint32_t kh = 0; kh < arg->kh; ++kh) {
-                const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) -
-                                   (int32_t)arg->ph;
-                if (iy < 0 || iy >= (int32_t)arg->hi) {
-                    we += arg->kw;
-                    continue;
-                }
-                for (uint32_t kw = 0; kw < arg->kw; ++kw) {
-                    const int32_t ix = (int32_t)(ox * arg->sw + kw * arg->dw) -
-                                       (int32_t)arg->pw;
-                    if (ix >= 0 && ix < (int32_t)arg->wi && we < wstaged) {
-                        acc += in_ch[(size_t)iy * arg->wi + ix] * stage[we];
-                    }
-                    ++we;
-                }
-            }
+    if (ox < arg->wo) {
+      for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t e = start + i;
+        const uint32_t ci = e / area;
+        const uint32_t kh = (e % area) / arg->kw;
+        const uint32_t kw = e % arg->kw;
+        const int64_t iy = (int64_t)oy * arg->sh + (int64_t)kh * arg->dh - arg->ph;
+        const int64_t ix = (int64_t)ox * arg->sw + (int64_t)kw * arg->dw - arg->pw;
+        if (iy >= 0 && iy < arg->hi && ix >= 0 && ix < arg->wi) {
+          acc += input[((size_t)ci * arg->hi + iy) * arg->wi + ix] * stage[i];
         }
-        out_row[ox] = acc;
+      }
     }
+    // Tail lanes still participate before the next tile overwrites shared data.
+    __syncthreads();
+    start += count;
+  }
+  if (ox < arg->wo) {
+    ((float*)(uintptr_t)arg->out)[(((size_t)n * arg->co + co) * arg->ho + oy)
+                                    * arg->wo + ox] = acc;
+  }
 }
 
 __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {

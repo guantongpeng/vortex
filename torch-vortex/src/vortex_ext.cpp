@@ -697,8 +697,6 @@ hipModule_t g_ops_module = nullptr;
 TORCH_KERNEL_TABLE(TORCH_KERNEL_DECLARE)
 #undef TORCH_KERNEL_DECLARE
 
-// Filled in by load_ops. The conv kernel stages one filter's weights in LMEM,
-// so this is the ceiling on ci*kh*kw*4.
 int64_t g_shared_mem_per_block = 0;
 
 // The DL library's device handle: the same one the HIP layer owns, handed to
@@ -2517,17 +2515,13 @@ static torch::Tensor convolution_impl(
     const int64_t ho = window_out(is[2], ekh, ph, sh, false, "conv height");
     const int64_t wo = window_out(is[3], ekw, pw, sw, false, "conv width");
 
-    // One output channel stages all of its weights in LMEM at once, and the DL
-    // kernel's ceiling for that is 16384 bytes. This is the real bound on a
-    // full-resolution ResNet stem (ci=512, 3x3, fp32 needs 18 KiB), and
-    // shrinking the input image does not reduce it. Checked before anything is
-    // allocated, so a rejected call does nothing at all.
-    const int64_t lmem_needed = ci_group * kh * kw * 4;
-    TORCH_CHECK(lmem_needed <= 16384, "torch_vortex: conv needs ", lmem_needed,
-                " bytes of local memory to stage one filter (ci=", ci_group, " kh=",
-                kh, " kw=", kw, " x 4 bytes), but the DL kernel allows 16384. ",
-                "Tile the weights across output channels; a smaller input ",
-                "image does not reduce this.");
+    TORCH_CHECK(co > 0 && co % groups == 0,
+                "torch_vortex: conv output channels must be divisible by groups");
+    TORCH_CHECK(ci_group > 0 && kh > 0 && kw > 0 &&
+                    kh <= UINT32_MAX / kw && ci_group <= UINT32_MAX / (kh * kw),
+                "torch_vortex: conv filter exceeds uint32 indexing");
+    TORCH_CHECK(g_shared_mem_per_block >= 1024,
+                "torch_vortex: conv requires 1024 bytes of local memory");
 
     auto out = torch::empty({is[0], co, ho, wo}, input.options());
     uint64_t baddr = 0;

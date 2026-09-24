@@ -74,16 +74,21 @@ def test_conv_rejects_kernel_larger_than_input(backend):
         torch.nn.functional.conv2d(x, w)
 
 
-def test_conv_reports_lmem_exhaustion(backend):
-    """A full-resolution ResNet stem needs 18 KiB against a 16 KiB limit."""
-    prop = backend._ext.device_properties()
-    limit = prop["shared_mem_per_block"]
-    # pick a ci whose filter exceeds the limit, if one exists in range
-    ci = limit // (3 * 3 * 4) + 1
-    x = torch.randn(1, ci, 8, 8).to("vortex")
-    w = torch.randn(4, ci, 3, 3).to("vortex")
-    with assert_rejected("local memory", backend):
-        torch.nn.functional.conv2d(x, w, padding=1)
+@pytest.mark.parametrize("ci,kernel,groups,width", [(1, 5, 1, 7), (3, 7, 1, 23),
+                                                      (513, 3, 1, 3), (514, 3, 2, 3)])
+def test_conv_weight_tiles(backend, ci, kernel, groups, width):
+    torch.manual_seed(71)
+    x = torch.randn(1, ci, kernel, max(kernel, width))
+    w = torch.randn(2, ci // groups, kernel, kernel) / ci**0.5
+    b = torch.randn(2)
+    dx, dw, db = (t.to("vortex") for t in (x, w, b))
+    before = backend.stats()
+    got = torch.nn.functional.conv2d(dx, dw, db, groups=groups)
+    after = backend.stats()
+    assert after["launches"] - before["launches"] == 1
+    assert after["d2h_bytes"] == before["d2h_bytes"]
+    want = torch.nn.functional.conv2d(x, w, b, groups=groups)
+    assert_matches_cpu(got, want, rtol=3e-5, atol=3e-5)
 
 
 def test_empty_inputs_launch_nothing(backend):

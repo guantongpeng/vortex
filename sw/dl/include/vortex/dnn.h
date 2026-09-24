@@ -14,10 +14,8 @@
 #ifndef VORTEX_DL_DNN_H
 #define VORTEX_DL_DNN_H
 
-// Vortex DL dnn layer (plan P3-02 second tier): direct NCHW FP32
-// convolution, windowed pooling and inference batch-norm over the
-// vortex2.h ABI. v1 constraints (enforced): groups >= 1,
-// kh*kw <= 32, ci*kh*kw*4 <= local memory (16 KiB default).
+// NCHW FP32 convolution, pooling and inference batch normalization.
+// Convolution stages fixed-size weight tiles in 1024 bytes of local memory.
 
 #include <stdint.h>
 #include <vortex2.h>

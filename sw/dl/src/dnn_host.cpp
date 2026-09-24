@@ -120,15 +120,24 @@ vx_dnn_status vx_dnn_conv2d_dilated(
     const uint64_t ekh = (uint64_t)(kh - 1) * dh + 1;
     const uint64_t ekw = (uint64_t)(kw - 1) * dw + 1;
     if (ekh > UINT32_MAX || ekw > UINT32_MAX ||
-        (uint64_t)hi + 2 * ph < ekh || (uint64_t)wi + 2 * pw < ekw) {
+        (uint64_t)hi + 2ull * ph < ekh || (uint64_t)wi + 2ull * pw < ekw) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    const uint32_t ci_group = ci / groups;
-    if (kh * kw > 32 || ci_group * kh * kw * 4 > 16384) {
-        return VX_DNN_ERR_UNSUPPORTED;  // LMEM staging bound (DNN_WMAX=32)
+    const uint64_t area = (uint64_t)kh * kw;
+    if (area > UINT32_MAX || (ci / groups) > UINT32_MAX / area) {
+        return VX_DNN_ERR_BAD_ARGS;
     }
-    const uint32_t ho = (hi + 2 * ph - (uint32_t)ekh) / sh + 1;
-    const uint32_t wo = (wi + 2 * pw - (uint32_t)ekw) / sw + 1;
+    const uint64_t ho = ((uint64_t)hi + 2ull * ph - ekh) / sh + 1;
+    const uint64_t wo = ((uint64_t)wi + 2ull * pw - ekw) / sw + 1;
+    if (ho > UINT32_MAX || wo > UINT32_MAX - 15 ||
+        ho * ((wo + 15) / 16) > UINT32_MAX) {
+        return VX_DNN_ERR_BAD_ARGS;
+    }
+    uint64_t lmem = 0;
+    if (vx_device_query(g_dnn.dev, VX_CAPS_LOCAL_MEM_SIZE, &lmem) != VX_SUCCESS ||
+        lmem < VX_DNN_CONV_TILE * sizeof(float)) {
+        return VX_DNN_ERR_UNSUPPORTED;
+    }
     vx_dnn_conv_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.weight = (vx_dl_ptr_t)weight;
@@ -152,7 +161,7 @@ vx_dnn_status vx_dnn_conv2d_dilated(
     args.has_bias = bias != 0;
     args.groups = groups;
     return launch3(q, g_dnn.conv2d, &args, sizeof(args),
-                   ho, co, n, ci * kh * kw * 4);
+                   ho * ((wo + 15) / 16), co, n, VX_DNN_CONV_TILE * sizeof(float));
 }
 
 vx_dnn_status vx_dnn_conv2d(vx_queue_h q,
@@ -183,11 +192,11 @@ static vx_dnn_status pool2d_mode_impl(vx_queue_h q, uint64_t in, uint64_t out,
     const uint64_t ekh = (uint64_t)(kh - 1) * dh + 1;
     const uint64_t ekw = (uint64_t)(kw - 1) * dw + 1;
     if (ekh > UINT32_MAX || ekw > UINT32_MAX ||
-        (uint64_t)hi + 2 * ph < ekh || (uint64_t)wi + 2 * pw < ekw) {
+        (uint64_t)hi + 2ull * ph < ekh || (uint64_t)wi + 2ull * pw < ekw) {
         return VX_DNN_ERR_BAD_ARGS;
     }
-    const uint64_t nh = (uint64_t)hi + 2 * ph - ekh;
-    const uint64_t nw = (uint64_t)wi + 2 * pw - ekw;
+    const uint64_t nh = (uint64_t)hi + 2ull * ph - ekh;
+    const uint64_t nw = (uint64_t)wi + 2ull * pw - ekw;
     const uint32_t ho = (uint32_t)((nh + (ceil_mode ? sh - 1 : 0)) / sh + 1);
     const uint32_t wo = (uint32_t)((nw + (ceil_mode ? sw - 1 : 0)) / sw + 1);
     if (ceil_mode) {
