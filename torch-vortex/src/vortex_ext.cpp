@@ -2271,12 +2271,6 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                     " integer/bool tensor with an integral scalar is unsupported");
         bb = cast_device_f32(b, name);
     }
-    if (a_scalar && a.scalar_type() == at::kDouble) {
-        output_double = true;
-    }
-    if (b_scalar && b.scalar_type() == at::kDouble) {
-        output_double = true;
-    }
     check_elementwise(aa, bb, name);
     const bool aa_scalar = is_host_scalar(aa), bb_scalar = is_host_scalar(bb);
     auto compute = (aa_scalar || bb_scalar)

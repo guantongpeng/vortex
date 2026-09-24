@@ -73,11 +73,12 @@ def test_mul(backend):
     torch.testing.assert_close(out.cpu(), a * b, rtol=1e-6, atol=1e-7)
 
 
-def test_rejects_non_f32_loudly(backend):
+def test_promotes_float64_loudly(backend):
     a = torch.ones(4, dtype=torch.float64).to("vortex")
     b = torch.ones(4, dtype=torch.float64).to("vortex")
-    with pytest.raises(RuntimeError):
-        _ = a + b
+    out = a + b
+    assert out.dtype == torch.float64
+    torch.testing.assert_close(out.cpu(), a.cpu() + b.cpu())
 
 
 if __name__ == "__main__":
