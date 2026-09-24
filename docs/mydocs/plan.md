@@ -153,11 +153,11 @@
 - [x] FP32 `group_norm` 设备 kernel，支持任意空间 rank、独立 affine 和空 batch；详见 [`p2_22_group_norm.md`](p2_22_group_norm.md)。
 - [~] pool `ceil_mode` 与 `return_indices` 已完成并在边界回归中验证；1D/2D/3D nearest、nearest-exact，以及 linear/bilinear/bicubic/trilinear `interpolate` 已接入，area 和其余 pool 形态仍待补齐。
 - [~] 二元、标量和一元 elementwise 已支持转置/切片等非连续输入；reduction 仍会规范化为连续布局。
-- [~] clone/contiguous 已补显式设备实现并验证独立 storage、stride 保留和 contiguous memory format；cast、dtype promotion、重叠 stride 与 bool/int64 计算路径仍待，详见 [`p2_24_clone_contiguous.md`](p2_24_clone_contiguous.md)。
+- [~] clone/contiguous 已补显式设备实现；FP32 与整型、FP32/FP64 的基础 promotion 已验证，完整 bool/int64 运算、half/BF16 计算与重叠 stride 仍待，详见 [`p2_24_clone_contiguous.md`](p2_24_clone_contiguous.md)。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
 - [~] broadcast add/mul/sub/div、标量 alpha、GELU/SiLU 和主要 in-place/out overload 已具备；dropout eval identity 已实现，训练随机路径待 RNG，详见 [`p2_23_dropout_eval.md`](p2_23_dropout_eval.md)。
 - [x] `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out` 已补齐，详见 [`p2_11_index_out.md`](p2_11_index_out.md)、[`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
-- [~] 已建立当前 eager schema 的 overload×dtype×layout×shape 矩阵，并记录 launch 前拒绝边界；linear/bilinear/bicubic interpolate、stride-aware reduction、完整 cast/promotion、训练和模型专用 schema 仍待，详见 [`p2_25_schema_matrix.md`](p2_25_schema_matrix.md)。
+- [~] 已建立当前 eager schema 的 overload×dtype×layout×shape 矩阵，并记录 launch 前拒绝边界；area/antialias interpolate、stride-aware reduction、完整 cast/promotion、训练和模型专用 schema 仍待，详见 [`p2_25_schema_matrix.md`](p2_25_schema_matrix.md)。
 
 ### 2.4 CNN eager 和模型分级
 
@@ -166,7 +166,7 @@
 - [x] BN inference optional affine 与 linear 前导 batch 维已支持；详见 [`p2_18_linear_batch.md`](p2_18_linear_batch.md)。
 - [~] avg_pool2d `divisor_override`、max/avg `ceil_mode`、max-pool `dilation` 和 `return_indices` 已接入统一 DNN kernel；其余 pool 形态仍待补齐，详见 [`p2_19_pool_divisor.md`](p2_19_pool_divisor.md)。
 - [x] `relu_` 已复用统一 prim unary in-place kernel，并保留 storage/version mutation 语义；剩余 pool 形态仍待补齐。
-- [ ] 完成 MiniResNet→小输入 ResNet-18→目标输入尺寸的分级测试，固定 torchvision、权重和预处理。
+- [~] MiniResNet 与 1/2/4/8 通道缩小小输入 ResNet-18 已完成 CPU/Vortex logits 对拍；torchvision 权重、目标输入尺寸和完整证据报告仍待。
 - [ ] 输出中间层、logits、fallback、传输、内存和性能证据，不能只检查最终输出。
 
 ### 2.5 Transformer、LLM、RNG 和 checkpoint

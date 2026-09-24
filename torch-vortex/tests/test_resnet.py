@@ -101,6 +101,33 @@ class MiniResNet(nn.Module):
         return self.head(self.layer2(self.layer1(self.stem(x))))
 
 
+class SmallResNet18(nn.Module):
+    def __init__(self, classes=3):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 1, 3, 1, 1, bias=False), nn.BatchNorm2d(1),
+            nn.ReLU(), nn.MaxPool2d(2))
+
+        def layer(cin, cout, stride):
+            return nn.Sequential(BasicBlock(cin, cout, stride),
+                                  BasicBlock(cout, cout, 1))
+
+        self.layer1 = layer(1, 1, 1)
+        self.layer2 = layer(1, 2, 2)
+        self.layer3 = layer(2, 4, 2)
+        self.layer4 = layer(4, 8, 2)
+        self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+                                  nn.Linear(8, classes))
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        return self.head(x)
+
+
 def build(seed, batch, ch=4, classes=2, size=8):
     """A CPU reference and a weight-identical vortex copy, plus an input."""
     torch.manual_seed(seed)
@@ -177,6 +204,20 @@ def test_training_path_is_refused(backend):
     vx = x.to("vortex").requires_grad_()
     with pytest.raises(RuntimeError):
         dev_model(vx).sum().backward()
+
+
+@pytest.mark.slow
+def test_small_resnet18_matches_cpu(backend):
+    torch.manual_seed(20260924)
+    ref = randomize_batch_norms(SmallResNet18(), 20260924).eval()
+    dev = SmallResNet18().eval()
+    dev.load_state_dict(ref.state_dict())
+    dev.to("vortex")
+    x = torch.randn(1, 3, 8, 8)
+    with torch.inference_mode():
+        want = ref(x)
+        got = dev(x.to("vortex"))
+    assert_matches_cpu(got, want, rtol=2e-3, atol=2e-3)
 
 
 if __name__ == "__main__":

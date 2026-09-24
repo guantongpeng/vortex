@@ -2216,16 +2216,78 @@ static void check_elementwise(const torch::Tensor& a, const torch::Tensor& b,
     }
 }
 
+static torch::Tensor cast_device_f32(const torch::Tensor& t, const char* name) {
+    TORCH_CHECK(t.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: ", name, " must be on the vortex device");
+    copy_dtype(t.scalar_type());
+    auto out = contiguous_empty(t.sizes(), t.options().dtype(at::kFloat));
+    copy_impl(out, t, false);
+    return out;
+}
+
 static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                                uint32_t op, const char* name) {
-    check_elementwise(a, b, name);
+    torch::Tensor aa = a, bb = b;
     const bool a_scalar = is_host_scalar(a), b_scalar = is_host_scalar(b);
-    auto out = (a_scalar || b_scalar)
-                   ? contiguous_empty((a_scalar ? b : a).sizes(),
-                                      (a_scalar ? b : a).options())
-                   : torch::empty(at::infer_size(a.sizes(), b.sizes()),
-                                  a.options());
-    launch_elementwise(a, b, out, op);
+    bool output_double = (!a_scalar && a.scalar_type() == at::kDouble) ||
+                         (!b_scalar && b.scalar_type() == at::kDouble);
+    if (!a_scalar && !b_scalar) {
+        TORCH_CHECK(a.device().type() == c10::DeviceType::PrivateUse1 &&
+                        b.device().type() == c10::DeviceType::PrivateUse1,
+                    "torch_vortex: ", name,
+                    " expects both tensors on the vortex device");
+        if ((a.scalar_type() == at::kFloat || a.scalar_type() == at::kDouble) &&
+            (b.scalar_type() == at::kFloat || b.scalar_type() == at::kDouble)) {
+            output_double = a.scalar_type() == at::kDouble ||
+                            b.scalar_type() == at::kDouble;
+            aa = a.scalar_type() == at::kFloat ? a : cast_device_f32(a, name);
+            bb = b.scalar_type() == at::kFloat ? b : cast_device_f32(b, name);
+        } else if (a.scalar_type() == at::kFloat && b.scalar_type() != at::kFloat) {
+            bb = cast_device_f32(b, name);
+        } else if (a.scalar_type() == at::kDouble) {
+            output_double = true;
+            bb = cast_device_f32(b, name);
+            aa = cast_device_f32(a, name);
+        } else if (b.scalar_type() == at::kDouble) {
+            output_double = true;
+            aa = cast_device_f32(a, name);
+            bb = cast_device_f32(b, name);
+        } else if (b.scalar_type() == at::kFloat && a.scalar_type() != at::kFloat) {
+            aa = cast_device_f32(a, name);
+        } else {
+            TORCH_CHECK(a.scalar_type() == at::kFloat &&
+                            b.scalar_type() == at::kFloat,
+                        "torch_vortex: ", name,
+                        " requires at least one float32 operand for promotion");
+        }
+    } else if (!a_scalar && a.scalar_type() != at::kFloat) {
+        TORCH_CHECK(b_scalar && at::isFloatingType(b.scalar_type()),
+                    "torch_vortex: ", name,
+                    " integer/bool tensor with an integral scalar is unsupported");
+        aa = cast_device_f32(a, name);
+    } else if (!b_scalar && b.scalar_type() != at::kFloat) {
+        TORCH_CHECK(a_scalar && at::isFloatingType(a.scalar_type()),
+                    "torch_vortex: ", name,
+                    " integer/bool tensor with an integral scalar is unsupported");
+        bb = cast_device_f32(b, name);
+    }
+    if (a_scalar && a.scalar_type() == at::kDouble) {
+        output_double = true;
+    }
+    if (b_scalar && b.scalar_type() == at::kDouble) {
+        output_double = true;
+    }
+    check_elementwise(aa, bb, name);
+    const bool aa_scalar = is_host_scalar(aa), bb_scalar = is_host_scalar(bb);
+    auto compute = (aa_scalar || bb_scalar)
+                   ? contiguous_empty((aa_scalar ? bb : aa).sizes(),
+                                      (aa_scalar ? bb : aa).options().dtype(at::kFloat))
+                   : contiguous_empty(at::infer_size(aa.sizes(), bb.sizes()),
+                                      aa.options().dtype(at::kFloat));
+    launch_elementwise(aa, bb, compute, op);
+    if (!output_double) return compute;
+    auto out = contiguous_empty(compute.sizes(), compute.options().dtype(at::kDouble));
+    copy_impl(out, compute, false);
     return out;
 }
 
@@ -2239,13 +2301,18 @@ static torch::Tensor& binary_op_(torch::Tensor& self, const torch::Tensor& other
         return self;
     }
     if (!is_host_scalar(other)) {
-        check_elementwise_f32(other, name);
+        TORCH_CHECK(other.device().type() == c10::DeviceType::PrivateUse1,
+                    "torch_vortex: ", name, " other must be on vortex");
+        auto promoted = other.scalar_type() == at::kFloat
+                            ? other : cast_device_f32(other, name);
         // broadcasting is allowed, but only if it lands exactly on self --
         // growing in place is what the out-of-place form is for
-        TORCH_CHECK(at::infer_size(self.sizes(), other.sizes()) == self.sizes(),
+        TORCH_CHECK(at::infer_size(self.sizes(), promoted.sizes()) == self.sizes(),
                     "torch_vortex: ", name, " would need to grow ", self.sizes(),
-                    " to ", at::infer_size(self.sizes(), other.sizes()),
+                    " to ", at::infer_size(self.sizes(), promoted.sizes()),
                     ", which in place cannot do");
+        launch_elementwise(self, promoted, self, op);
+        return self;
     }
     launch_elementwise(self, other, self, op);
     return self;
