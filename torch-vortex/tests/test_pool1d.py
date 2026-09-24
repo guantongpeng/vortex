@@ -20,3 +20,12 @@ def test_adaptive_avg_pool1d_global_matches_cpu(backend):
     torch.testing.assert_close(
         F.adaptive_avg_pool1d(x.to("vortex"), 1).cpu(),
         F.adaptive_avg_pool1d(x, 1), rtol=1e-6, atol=1e-6)
+
+
+def test_area_interpolate_divisible_bins(backend):
+    torch.manual_seed(84)
+    for shape, size in [((8,), (4,)), ((8, 10), (4, 5))]:
+        x = torch.randn(1, 2, *shape)
+        got = F.interpolate(x.to("vortex"), size=size, mode="area").cpu()
+        want = F.interpolate(x, size=size, mode="area")
+        torch.testing.assert_close(got, want, rtol=1e-6, atol=1e-6)

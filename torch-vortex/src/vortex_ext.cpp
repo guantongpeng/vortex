@@ -2993,18 +2993,26 @@ static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
                                               c10::SymIntArrayRef output_size) {
     check_cnn_f32(self, "pool.input", 4);
     auto os = sym_to_vec(output_size);
-    TORCH_CHECK(os.size() == 2 && os[0] == 1 && os[1] == 1,
-                "torch_vortex: adaptive_avg_pool2d only output (1,1) in v1");
+    TORCH_CHECK(os.size() == 2 && os[0] > 0 && os[1] > 0,
+                "torch_vortex: adaptive_avg_pool2d output must be positive");
     const auto& s = self.sizes();
-    return pool_impl(self, {(int64_t)s[2], (int64_t)s[3]}, {}, {}, 1, false, 0, 1, 1);
+    TORCH_CHECK(s[2] % os[0] == 0 && s[3] % os[1] == 0,
+                "torch_vortex: adaptive_avg_pool2d requires divisible input/output "
+                "sizes in the device path");
+    return pool_impl(self, {s[2] / os[0], s[3] / os[1]},
+                     {s[2] / os[0], s[3] / os[1]}, {}, 1, false, 0, 1, 1);
 }
 
 static torch::Tensor adaptive_avg_pool1d_impl(const torch::Tensor& self,
                                               at::IntArrayRef output_size) {
     check_cnn_f32(self, "pool.input", 3);
-    TORCH_CHECK(output_size.size() == 1 && output_size[0] == 1,
-                "torch_vortex: adaptive_avg_pool1d only output (1) in v1");
-    return pool1d_view(self, {self.size(2)}, {}, {}, 1, false, 0, 1);
+    TORCH_CHECK(output_size.size() == 1 && output_size[0] > 0,
+                "torch_vortex: adaptive_avg_pool1d output must be positive");
+    TORCH_CHECK(self.size(2) % output_size[0] == 0,
+                "torch_vortex: adaptive_avg_pool1d requires divisible input/output "
+                "sizes in the device path");
+    const int64_t window = self.size(2) / output_size[0];
+    return pool1d_view(self, {window}, {window}, {}, 1, false, 0, 1);
 }
 
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm_impl(
