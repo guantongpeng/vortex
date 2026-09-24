@@ -81,6 +81,7 @@ using vx_schema_string_view = c10::string_view;
 #include <vortex/blas.h>
 #include <vortex/dnn.h>
 #include <vortex/prim.h>
+#include <vortex/rng.h>
 
 #define VX_CHECK(expr)                                                        \
     do {                                                                      \
@@ -3658,6 +3659,7 @@ void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
     DL_CHECK(vx_dnn_init(g_dl_device, dl_image("dnn").c_str()));
     DL_CHECK(vx_blas_init(g_dl_device, dl_image("blas").c_str()));
     DL_CHECK(vx_prim_init(g_dl_device, dl_image("prim").c_str()));
+    DL_CHECK(vx_rng_init(g_dl_device, dl_image("rng").c_str()));
 
     VX_CHECK(hipModuleLoad(&g_ops_module, vxbin_path.c_str()));
 #define TORCH_KERNEL_RESOLVE(name, type, mbx, lmem)                            \
@@ -3712,6 +3714,7 @@ void vortex_at_exit() {
     vx_blas_finalize();
     vx_dnn_finalize();
     vx_prim_finalize();
+    vx_rng_finalize();
     hipDeviceReset();
 }
 
@@ -3726,6 +3729,28 @@ std::map<std::string, int64_t> device_properties_impl() {
     };
 }
 
+torch::Tensor rng_uniform_impl(const std::vector<int64_t>& sizes,
+                               uint64_t seed, uint64_t offset) {
+    TORCH_CHECK(!sizes.empty(), "torch_vortex: rng_uniform needs a shape");
+    int64_t n = 1;
+    for (const auto size : sizes) {
+        TORCH_CHECK(size >= 0 && size <= INT64_MAX / std::max<int64_t>(1, n),
+                    "torch_vortex: rng_uniform shape overflow");
+        n *= size;
+    }
+    TORCH_CHECK(n <= UINT32_MAX, "torch_vortex: rng_uniform is limited to 2^32 elements");
+    auto out = torch::empty(sizes, torch::TensorOptions()
+                                      .device(c10::Device(c10::DeviceType::PrivateUse1, 0))
+                                      .dtype(at::kFloat));
+    if (n != 0) {
+        DL_CHECK(vx_rng_uniform_f32(current_queue(),
+                                    (uint64_t)(uintptr_t)out.data_ptr(),
+                                    (uint32_t)n, seed, offset));
+        note_device_work();
+    }
+    return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_vortex_ops();
     m.def("load_ops", &load_ops,
@@ -3738,4 +3763,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("device_synchronize", &device_synchronize_impl,
           "block until every queued command on the device has retired");
     m.def("device_properties", &device_properties_impl, "cached device limits");
+    m.def("rng_uniform", &rng_uniform_impl,
+          "generate float32 uniform values with the device Philox stream");
 }

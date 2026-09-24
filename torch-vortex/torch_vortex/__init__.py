@@ -52,6 +52,8 @@ _DRIVER_DEFAULT = "simx"
 _REGISTERED_FLAG = "_torch_vortex_registered"
 
 _ext = None
+_rng_seed = 0
+_rng_offset = 0
 
 
 def _register_device_module():
@@ -148,13 +150,9 @@ def _device_module():
             return False
 
         def manual_seed_all(self, seed):
-            """Accepted and ignored, and that is accurate rather than lazy.
-
-            There is no device RNG in v1 (W3.5), so nothing consumes a device
-            seed; torch.manual_seed() would otherwise warn that the vortex
-            device is missing this hook. It becomes a real generator call when
-            c10::GeneratorImpl lands.
-            """
+            global _rng_seed, _rng_offset
+            _rng_seed = int(seed) & ((1 << 64) - 1)
+            _rng_offset = 0
             return None
 
         def synchronize(self, device=None):
@@ -304,6 +302,32 @@ def stats():
 def reset_stats():
     """Zero the counters returned by stats()."""
     return _require_ext().reset_stats()
+
+
+def manual_seed(seed):
+    """Reset the process-local device Philox stream."""
+    global _rng_seed, _rng_offset
+    _rng_seed = int(seed) & ((1 << 64) - 1)
+    _rng_offset = 0
+    return _rng_seed
+
+
+def rand(*sizes, device="vortex"):
+    """Generate float32 uniform values using the Vortex Philox kernel."""
+    global _rng_offset
+    if len(sizes) == 1 and isinstance(sizes[0], (tuple, list)):
+        sizes = tuple(sizes[0])
+    if device != "vortex":
+        raise RuntimeError("torch_vortex.rand only supports device='vortex'")
+    shape = tuple(int(s) for s in sizes)
+    n = 1
+    for s in shape:
+        if s < 0:
+            raise ValueError("negative dimensions are not allowed")
+        n *= s
+    out = _require_ext().rng_uniform(list(shape), int(_rng_seed), int(_rng_offset))
+    _rng_offset += (n + 3) // 4
+    return out
 
 
 def arg_sizes():

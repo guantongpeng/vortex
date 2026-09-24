@@ -171,9 +171,9 @@
 
 ### 2.5 Transformer、LLM、RNG 和 checkpoint
 
-- [ ] 将已有 Philox 接入 PyTorch Generator、seed/offset/state、`rand/randn` 和模型随机操作。
-- [ ] 实现 `torch.vortex` seed/state/fork、跨调用/跨流推进和 checkpoint 后可复现。
-- [ ] 接入 layernorm/rmsnorm、embedding、高级 gather、RoPE、GELU/SiLU/SwiGLU、attention 自定义 op 或 ATen schema。
+- [~] 已将 Philox uniform 接入 `torch_vortex.rand`，支持 process-local seed、counter 推进和可复现；PyTorch Generator/state、`randn` 和模型随机操作仍待。
+- [~] `torch_vortex.manual_seed` 与 checkpoint 前后的显式 seed 可复现路径已具备；标准 `torch.vortex` fork/state API 和跨流语义仍待。
+- [~] layernorm/rmsnorm、GELU/SiLU、gather 和基础 attention 组件已有设备路径；embedding、RoPE/SwiGLU 和完整 attention schema 仍待。
 - [ ] 验证 mask、causal、scale、head layout，再补 GQA、长序列和 paged KV。
 - [ ] 实现 KV cache append/read、prefill、逐 token decode、采样/top-k，并统计禁止的 host 往返。
 - [ ] 验证 `state_dict`、save/load、map_location、CPU↔Vortex 权重迁移和 storage 方法。

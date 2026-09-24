@@ -5,38 +5,8 @@
 // libvortex_dl - only the read-only vortex runtime.
 
 #include <stdint.h>
-#include <vortex2.h>
-
+#include <vortex/rng.h>
 #include "rng_args.h"
-
-// --- public API (integration: move to include/vortex/rng.h) ---------------
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef enum vx_rng_status {
-    VX_RNG_OK = 0,
-    VX_RNG_ERR_NOT_INITIALIZED = 1,
-    VX_RNG_ERR_BAD_ARGS = 2,
-    VX_RNG_ERR_LAUNCH = 3,
-    VX_RNG_ERR_ALREADY_INITIALIZED = 4,
-} vx_rng_status;
-
-vx_rng_status vx_rng_init(vx_device_h dev, const char* vxbin_path);
-vx_rng_status vx_rng_finalize(void);
-
-// Fill out[0..n) with uniform [0,1) f32 values from Philox4x32-10 keyed by
-// seed; the counter starts at offset (in 4-output blocks), so successive
-// calls with the same seed and increasing offsets continue one stream.
-// Async (queued on q).
-vx_rng_status vx_rng_uniform_f32(vx_queue_h q, uint64_t out, uint32_t n,
-                                 uint64_t seed, uint64_t offset);
-
-#ifdef __cplusplus
-}
-#endif
-
-// ---------------------------------------------------------------------------
 
 namespace {
 
