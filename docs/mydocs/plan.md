@@ -151,7 +151,7 @@
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。
 - [x] FP32 `nll_loss_forward` 的 none/sum/mean、weight、ignore_index 与越界校验；详见 [`p2_13_nll_loss.md`](p2_13_nll_loss.md)。
 - [x] FP32 `group_norm` 设备 kernel，支持任意空间 rank、独立 affine 和空 batch；详见 [`p2_22_group_norm.md`](p2_22_group_norm.md)。
-- [~] pool `ceil_mode` 与 `return_indices` 已完成并在边界回归中验证；nearest/nearest-exact 2D `interpolate` 已接入，linear/bilinear/bicubic 和其余 pool 形态仍待补齐。
+- [~] pool `ceil_mode` 与 `return_indices` 已完成并在边界回归中验证；1D/2D/3D nearest、nearest-exact，以及 linear/bilinear/bicubic/trilinear `interpolate` 已接入，area 和其余 pool 形态仍待补齐。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
 - [~] clone/contiguous 已补显式设备实现并验证独立 storage、stride 保留和 contiguous memory format；cast、dtype promotion、重叠 stride 与 bool/int64 计算路径仍待，详见 [`p2_24_clone_contiguous.md`](p2_24_clone_contiguous.md)。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。

@@ -17,6 +17,7 @@
 
 #include <vortex/dnn.h>
 #include <string>
+#include <cmath>
 
 #include <initializer_list>
 
@@ -81,7 +82,7 @@ vx_dnn_status vx_dnn_init(vx_device_h dev, const char* vxbin_path) {
         {"dnn_conv2d_kernel", &g_dnn.conv2d},
         {"dnn_pool2d_kernel", &g_dnn.pool2d},
         {"dnn_bn_affine_kernel", &g_dnn.bn},
-        {"dnn_resize_nearest2d_kernel", &g_dnn.resize},
+        {"dnn_resize_kernel", &g_dnn.resize},
     };
     for (auto& e : entries) {
         if (vx_module_get_kernel(g_dnn.module, e.name, e.slot) != VX_SUCCESS) {
@@ -296,16 +297,54 @@ vx_dnn_status vx_dnn_pool2d(vx_queue_h q, uint64_t in, uint64_t out,
                                  sh, sw, op, 0, 0);
 }
 
+vx_dnn_status vx_dnn_resize(
+    vx_queue_h q, uint64_t in, uint64_t out, uint32_t n, uint32_t c,
+    uint32_t ndim, const uint32_t* input_size, const uint32_t* output_size,
+    const uint32_t* strides, const float* scales, uint32_t mode,
+    uint32_t align_corners) {
+  if (!g_dnn.module) {
+    return VX_DNN_ERR_NOT_INITIALIZED;
+  }
+  if (!in || !out || !n || !c || ndim < 1 || ndim > 3 || mode > 3 ||
+      (mode == 3 && ndim != 2) || align_corners > 1 ||
+      !input_size || !output_size || !strides || !scales) {
+    return VX_DNN_ERR_BAD_ARGS;
+  }
+  vx_dnn_resize_args_t args = {};
+  args.in = (vx_dl_ptr_t)in;
+  args.out = (vx_dl_ptr_t)out;
+  args.n = n;
+  args.c = c;
+  args.ndim = ndim;
+  args.mode = mode;
+  args.align_corners = align_corners;
+  uint64_t spatial = 1;
+  for (uint32_t d = 0; d < ndim; ++d) {
+    if (!input_size[d] || !output_size[d] || !std::isfinite(scales[d]) || scales[d] < 0 ||
+        spatial > (UINT32_MAX - 15) / output_size[d]) {
+      return VX_DNN_ERR_BAD_ARGS;
+    }
+    spatial *= output_size[d];
+    args.input_size[d] = input_size[d];
+    args.output_size[d] = output_size[d];
+    args.scales[d] = scales[d];
+  }
+  for (uint32_t d = 0; d < ndim + 2; ++d) {
+    args.strides[d] = strides[d];
+  }
+  return launch3(q, g_dnn.resize, &args, sizeof(args), 1, c, n, 0);
+}
+
 vx_dnn_status vx_dnn_resize_nearest2d(
     vx_queue_h q, uint64_t in, uint64_t out, uint32_t n, uint32_t c,
     uint32_t hi, uint32_t wi, uint32_t ho, uint32_t wo, uint32_t mode) {
-    if (!g_dnn.module || !in || !out || n == 0 || c == 0 || hi == 0 || wi == 0 ||
-        ho == 0 || wo == 0 || mode > 1) return VX_DNN_ERR_BAD_ARGS;
-    vx_dnn_resize_args_t args = {};
-    args.in = (vx_dl_ptr_t)in; args.out = (vx_dl_ptr_t)out;
-    args.n = n; args.c = c; args.hi = hi; args.wi = wi;
-    args.ho = ho; args.wo = wo; args.mode = mode;
-    return launch3(q, g_dnn.resize, &args, sizeof(args), ho, c, n, 0);
+  if (!ho || !wo || mode > 1 || (uint64_t)c * hi * wi > UINT32_MAX) {
+    return VX_DNN_ERR_BAD_ARGS;
+  }
+  uint32_t input_size[] = {hi, wi}, output_size[] = {ho, wo};
+  uint32_t strides[] = {c * hi * wi, hi * wi, wi, 1};
+  float scales[] = {(float)hi / ho, (float)wi / wo};
+  return vx_dnn_resize(q, in, out, n, c, 2, input_size, output_size, strides, scales, mode, 0);
 }
 
 vx_dnn_status vx_dnn_bn_affine(vx_queue_h q, uint64_t in, uint64_t mean,

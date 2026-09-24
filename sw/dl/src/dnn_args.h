@@ -57,13 +57,11 @@ typedef struct {
     uint32_t divisor;
 } vx_dnn_pool_args_t;
 
-// Nearest-neighbor resize over NCHW FP32. mode 0 is legacy nearest and
-// mode 1 uses the exact half-pixel mapping.
 typedef struct {
-    vx_dl_ptr_t in;
-    vx_dl_ptr_t out;
-    uint32_t n, c, hi, wi, ho, wo;
-    uint32_t mode;
+  vx_dl_ptr_t in, out;
+  uint32_t n, c, ndim, mode, align_corners;
+  uint32_t input_size[3], output_size[3], strides[5];
+  float scales[3];
 } vx_dnn_resize_args_t;
 
 // Inference batch norm as a fused per-channel affine:

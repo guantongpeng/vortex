@@ -2478,47 +2478,89 @@ static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
 }
 
 
-static torch::Tensor resize_nearest2d_impl(const torch::Tensor& self,
-                                             c10::IntArrayRef output_size,
-                                             std::optional<double> scales_h,
-                                             std::optional<double> scales_w,
-                                             uint32_t mode) {
-    check_cnn_f32(self, "interpolate.input", 4);
-    TORCH_CHECK(output_size.size() == 2, "torch_vortex: interpolate size must have two values");
-    TORCH_CHECK(output_size[0] > 0 && output_size[1] > 0,
-                "torch_vortex: interpolate output size must be positive");
-    TORCH_CHECK(!scales_h.has_value() && !scales_w.has_value(),
-                "torch_vortex: explicit scale arguments with output_size are unsupported");
-    const auto& s = self.sizes();
-    const int64_t ho = output_size[0], wo = output_size[1];
-    auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
-    if (out.numel() == 0) return out;
-    DL_LAUNCH(vx_dnn_resize_nearest2d(
-        current_queue(), (uint64_t)(uintptr_t)self.data_ptr(),
-        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(s[0], "interpolate batch"),
-        u32_dim(s[1], "interpolate channels"), u32_dim(s[2], "interpolate input height"),
-        u32_dim(s[3], "interpolate input width"), u32_dim(ho, "interpolate output height"),
-        u32_dim(wo, "interpolate output width"), mode));
-    return out;
+static torch::Tensor resize_impl(
+    const torch::Tensor& self, c10::SymIntArrayRef output_size,
+    c10::ArrayRef<std::optional<double>> scale_factors,
+    uint32_t ndim, uint32_t mode, bool align_corners) {
+  TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1 &&
+                  self.scalar_type() == at::kFloat,
+              "torch_vortex: interpolate requires a vortex float32 tensor");
+  TORCH_CHECK(self.dim() == ndim + 2 && output_size.size() == ndim,
+              "torch_vortex: interpolate input/output rank mismatch");
+  uint32_t input[3] = {}, output[3] = {}, strides[5] = {};
+  float scales[3] = {};
+  std::vector<int64_t> shape = {self.size(0), self.size(1)};
+  uint64_t spatial = 1;
+  TORCH_CHECK(self.size(1) > 0, "torch_vortex: interpolate requires nonzero channels");
+  for (uint32_t d = 0; d < ndim; ++d) {
+    auto size = output_size[d].expect_int();
+    TORCH_CHECK(size > 0 && self.size(d + 2) > 0,
+                "torch_vortex: interpolate spatial sizes must be positive");
+    input[d] = u32_dim(self.size(d + 2), "interpolate input size");
+    output[d] = u32_dim(size, "interpolate output size");
+    TORCH_CHECK(spatial <= (UINT32_MAX - 15) / output[d],
+                "torch_vortex: interpolate spatial span exceeds uint32");
+    spatial *= output[d];
+    const auto scale = scale_factors[d];
+    TORCH_CHECK(!scale || (std::isfinite(*scale) && *scale > 0),
+                "torch_vortex: interpolate scale must be finite and positive");
+    scales[d] = align_corners ? (size > 1 ? (float)(input[d] - 1) / (size - 1) : 0.0f)
+                  : (scale ? (float)(1.0 / *scale) : (float)input[d] / output[d]);
+    TORCH_CHECK(std::isfinite(scales[d]), "torch_vortex: interpolate inverse scale overflow");
+    shape.push_back(size);
+  }
+  for (uint32_t d = 0; d < ndim + 2; ++d) {
+    strides[d] = u32_dim(self.stride(d), "interpolate stride");
+  }
+  const auto batch = u32_dim(self.size(0), "interpolate batch");
+  const auto channels = u32_dim(self.size(1), "interpolate channels");
+  auto out = torch::empty(shape, self.options());
+  if (batch) {
+    DL_LAUNCH(vx_dnn_resize(current_queue(), (uint64_t)(uintptr_t)self.data_ptr(),
+        (uint64_t)(uintptr_t)out.data_ptr(), batch, channels, ndim, input, output,
+        strides, scales, mode, align_corners));
+  }
+  return out;
 }
 
-static torch::Tensor upsample_nearest2d_impl(const torch::Tensor& self,
-                                             at::OptionalSymIntArrayRef output_size,
-                                             std::optional<c10::ArrayRef<double>> scale_factors) {
-    std::vector<int64_t> size;
-    if (output_size.has_value()) {
-        size = sym_to_vec(*output_size);
-    } else {
-        TORCH_CHECK(scale_factors.has_value() && scale_factors->size() == 2,
-                    "torch_vortex: interpolate needs output_size or two scale factors");
-        check_cnn_f32(self, "interpolate.input", 4);
-        const auto& s = self.sizes();
-        TORCH_CHECK((*scale_factors)[0] > 0 && (*scale_factors)[1] > 0,
-                    "torch_vortex: interpolate scale factors must be positive");
-        size = {static_cast<int64_t>(std::floor(s[2] * (*scale_factors)[0])),
-                static_cast<int64_t>(std::floor(s[3] * (*scale_factors)[1]))};
-    }
-    return resize_nearest2d_impl(self, size, std::nullopt, std::nullopt, 0);
+static torch::Tensor upsample_nearest1d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0) {
+  return resize_impl(self, size, {s0}, 1, 0, false);
+}
+
+static torch::Tensor _upsample_nearest_exact1d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0) {
+  return resize_impl(self, size, {s0}, 1, 1, false);
+}
+
+static torch::Tensor upsample_linear1d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, bool align_corners, std::optional<double> s0) {
+  return resize_impl(self, size, {s0}, 1, 2, align_corners);
+}
+
+static torch::Tensor upsample_nearest2d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0, std::optional<double> s1) {
+  return resize_impl(self, size, {s0, s1}, 2, 0, false);
+}
+
+static torch::Tensor _upsample_nearest_exact2d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0, std::optional<double> s1) {
+  return resize_impl(self, size, {s0, s1}, 2, 1, false);
+}
+
+static torch::Tensor upsample_bilinear2d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, bool align_corners, std::optional<double> s0, std::optional<double> s1) {
+  return resize_impl(self, size, {s0, s1}, 2, 2, align_corners);
+}
+
+static torch::Tensor upsample_bicubic2d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, bool align_corners, std::optional<double> s0, std::optional<double> s1) {
+  return resize_impl(self, size, {s0, s1}, 2, 3, align_corners);
+}
+
+static torch::Tensor upsample_nearest3d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0, std::optional<double> s1, std::optional<double> s2) {
+  return resize_impl(self, size, {s0, s1, s2}, 3, 0, false);
+}
+
+static torch::Tensor _upsample_nearest_exact3d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, std::optional<double> s0, std::optional<double> s1, std::optional<double> s2) {
+  return resize_impl(self, size, {s0, s1, s2}, 3, 1, false);
+}
+
+static torch::Tensor upsample_trilinear3d_impl(const torch::Tensor& self, c10::SymIntArrayRef size, bool align_corners, std::optional<double> s0, std::optional<double> s1, std::optional<double> s2) {
+  return resize_impl(self, size, {s0, s1, s2}, 3, 2, align_corners);
 }
 
 static torch::Tensor convolution_impl(
@@ -3341,35 +3383,6 @@ static std::tuple<torch::Tensor&, torch::Tensor&> sort_values_impl(
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
-static torch::Tensor upsample_nearest_exact2d_impl(
-    const torch::Tensor& self, at::OptionalSymIntArrayRef output_size,
-    std::optional<c10::ArrayRef<double>> scale_factors) {
-    std::vector<int64_t> size;
-    if (output_size.has_value()) {
-        size = sym_to_vec(*output_size);
-    } else {
-        TORCH_CHECK(scale_factors.has_value() && scale_factors->size() == 2,
-                    "torch_vortex: interpolate needs output_size or two scale factors");
-        check_cnn_f32(self, "interpolate.input", 4);
-        const auto& s = self.sizes();
-        size = {static_cast<int64_t>(std::floor(s[2] * (*scale_factors)[0])),
-                static_cast<int64_t>(std::floor(s[3] * (*scale_factors)[1]))};
-    }
-    return resize_nearest2d_impl(self, size, std::nullopt, std::nullopt, 1);
-}
-
-static torch::Tensor upsample_nearest2d_direct_impl(
-    const torch::Tensor& self, c10::IntArrayRef output_size,
-    std::optional<double> scales_h, std::optional<double> scales_w) {
-    return resize_nearest2d_impl(self, output_size, scales_h, scales_w, 0);
-}
-
-static torch::Tensor upsample_nearest_exact2d_direct_impl(
-    const torch::Tensor& self, c10::IntArrayRef output_size,
-    std::optional<double> scales_h, std::optional<double> scales_w) {
-    return resize_nearest2d_impl(self, output_size, scales_h, scales_w, 1);
-}
-
 void register_vortex_ops() {
     auto* m = new torch::Library(torch::Library::IMPL, "aten",
                                  c10::DispatchKey::PrivateUse1, __FILE__, __LINE__);
@@ -3470,13 +3483,17 @@ void register_vortex_ops() {
     VX_IMPL("logsumexp", &logsumexp_impl);
     VX_IMPL("argmax", &argmax_impl);
     VX_IMPL("max.dim", &max_dim_impl);
+    VX_IMPL("upsample_nearest1d", &upsample_nearest1d_impl);
+    VX_IMPL("_upsample_nearest_exact1d", &_upsample_nearest_exact1d_impl);
+    VX_IMPL("upsample_linear1d", &upsample_linear1d_impl);
+    VX_IMPL("upsample_nearest2d", &upsample_nearest2d_impl);
+    VX_IMPL("_upsample_nearest_exact2d", &_upsample_nearest_exact2d_impl);
+    VX_IMPL("upsample_bilinear2d", &upsample_bilinear2d_impl);
+    VX_IMPL("upsample_bicubic2d", &upsample_bicubic2d_impl);
+    VX_IMPL("upsample_nearest3d", &upsample_nearest3d_impl);
+    VX_IMPL("_upsample_nearest_exact3d", &_upsample_nearest_exact3d_impl);
+    VX_IMPL("upsample_trilinear3d", &upsample_trilinear3d_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
-    VX_IMPL("upsample_nearest2d", &upsample_nearest2d_direct_impl);
-    VX_IMPL("upsample_nearest2d.vec",
-            &upsample_nearest2d_impl);
-    VX_IMPL("_upsample_nearest_exact2d", &upsample_nearest_exact2d_direct_impl);
-    VX_IMPL("_upsample_nearest_exact2d.vec",
-            &upsample_nearest_exact2d_impl);
     VX_IMPL("max_pool2d_with_indices", &max_pool2d_with_indices_impl);
     VX_IMPL("avg_pool2d", &avg_pool2d_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API

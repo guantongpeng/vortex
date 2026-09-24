@@ -275,3 +275,35 @@ def test_interpolate_nearest_modes_match_cpu(backend):
                                               mode=mode).cpu()
         want = torch.nn.functional.interpolate(x, scale_factor=(1.7, 1.5), mode=mode)
         torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
+def test_interpolate_linear_bilinear_bicubic_trilinear_match_cpu(backend):
+    x1 = torch.arange(3, dtype=torch.float32).reshape(1, 1, 3)
+    for align_corners in (False, True):
+        got = torch.nn.functional.interpolate(
+            x1.to("vortex"), size=7, mode="linear",
+            align_corners=align_corners).cpu()
+        want = torch.nn.functional.interpolate(
+            x1, size=7, mode="linear", align_corners=align_corners)
+        torch.testing.assert_close(got, want, rtol=1e-6, atol=1e-6)
+
+    x2 = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4)
+    for mode in ("bilinear", "bicubic"):
+        for align_corners in (False, True):
+            got = torch.nn.functional.interpolate(
+                x2.to("vortex"), size=(5, 6), mode=mode,
+                align_corners=align_corners).cpu()
+            want = torch.nn.functional.interpolate(
+                x2, size=(5, 6), mode=mode,
+                align_corners=align_corners)
+            torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+    x3 = torch.arange(24, dtype=torch.float32).reshape(1, 1, 2, 3, 4)
+    for align_corners in (False, True):
+        got = torch.nn.functional.interpolate(
+            x3.to("vortex"), size=(3, 4, 5), mode="trilinear",
+            align_corners=align_corners).cpu()
+        want = torch.nn.functional.interpolate(
+            x3, size=(3, 4, 5), mode="trilinear",
+            align_corners=align_corners)
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)

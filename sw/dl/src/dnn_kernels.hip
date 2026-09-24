@@ -78,7 +78,15 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         // NaN (F10 in docs/mydocs/pytorch_plan.md).
         float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
-        int64_t max_index = -1;
+        int64_t first_y = (int64_t)oy * arg->sh - arg->ph;
+        int64_t first_x = (int64_t)ox * arg->sw - arg->pw;
+        if (first_y < 0) {
+            first_y += ((-first_y + arg->dh - 1) / arg->dh) * arg->dh;
+        }
+        if (first_x < 0) {
+            first_x += ((-first_x + arg->dw - 1) / arg->dw) * arg->dw;
+        }
+        int64_t max_index = first_y * arg->wi + first_x;
         uint32_t include_count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
             const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) -
@@ -101,9 +109,8 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
                 if (ix < 0 || ix >= (int32_t)arg->wi) continue;
                 float v = in_ch[(size_t)iy * arg->wi + ix];
                 if (arg->op == 0) {
-                    // Keep the first maximal element, including the first NaN.
-                    // PyTorch exposes this input-plane offset when indices are requested.
-                    if ((!isnan(acc) && (isnan(v) || v > acc))) {
+                    // Finite ties keep the first index; each NaN replaces it.
+                    if (v > acc || isnan(v)) {
                         acc = v;
                         max_index = (int64_t)iy * arg->wi + ix;
                     }
@@ -131,23 +138,89 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
     }
 }
 
-__global__ void dnn_resize_nearest2d_kernel(vx_dnn_resize_args_t* arg) {
-    const uint32_t n = blockIdx.z;
-    const uint32_t c = blockIdx.y;
-    const uint32_t oy = blockIdx.x;
-    const uint32_t iy = arg->mode == 0
-                            ? ((uint64_t)oy * arg->hi) / arg->ho
-                            : (((uint64_t)(2 * oy + 1) * arg->hi) / (2 * arg->ho));
-    const float* src = (const float*)(uintptr_t)arg->in +
-                       ((size_t)n * arg->c + c) * arg->hi * arg->wi;
-    float* dst = (float*)(uintptr_t)arg->out +
-                 ((size_t)n * arg->c + c) * arg->ho * arg->wo;
-    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
-        const uint32_t ix = arg->mode == 0
-                                ? ((uint64_t)ox * arg->wi) / arg->wo
-                                : (((uint64_t)(2 * ox + 1) * arg->wi) / (2 * arg->wo));
-        dst[(size_t)oy * arg->wo + ox] = src[(size_t)iy * arg->wi + ix];
+static __device__ uint32_t resize_bound(int64_t i, uint32_t size) {
+  return i < 0 ? 0 : (i >= size ? size - 1 : (uint32_t)i);
+}
+
+static __device__ float resize_cubic_weight(float x) {
+  x = fabsf(x);
+  if (x <= 1.0f) {
+    return (1.25f * x - 2.25f) * x * x + 1.0f;
+  }
+  return ((-0.75f * x + 3.75f) * x - 6.0f) * x + 3.0f;
+}
+
+__global__ void dnn_resize_kernel(vx_dnn_resize_args_t* arg) {
+  uint32_t spatial = 1;
+  for (uint32_t d = 0; d < arg->ndim; ++d) {
+    spatial *= arg->output_size[d];
+  }
+  const float* src = (const float*)(uintptr_t)arg->in +
+                    (size_t)blockIdx.z * arg->strides[0] +
+                    (size_t)blockIdx.y * arg->strides[1];
+  float* dst = (float*)(uintptr_t)arg->out +
+              ((size_t)blockIdx.z * arg->c + blockIdx.y) * spatial;
+  for (uint32_t i = blockIdx.x; i < spatial; i += gridDim.x) {
+    uint32_t coord[3] = {}, rem = i;
+    for (uint32_t d = arg->ndim; d-- > 0;) {
+      coord[d] = rem % arg->output_size[d];
+      rem /= arg->output_size[d];
     }
+    if (arg->mode < 2) {
+      size_t offset = 0;
+      for (uint32_t d = 0; d < arg->ndim; ++d) {
+        int64_t index;
+        if (arg->mode == 0 && arg->input_size[d] == arg->output_size[d]) {
+          index = coord[d];
+        } else if (arg->mode == 0 && (uint64_t)arg->input_size[d] * 2 == arg->output_size[d]) {
+          index = coord[d] / 2;
+        } else {
+          index = (int64_t)floorf((coord[d] + (arg->mode == 1 ? 0.5f : 0.0f)) * arg->scales[d]);
+        }
+        offset += (size_t)resize_bound(index, arg->input_size[d]) * arg->strides[d + 2];
+      }
+      dst[i] = src[offset];
+    } else {
+      int64_t base[3] = {};
+      float fraction[3] = {};
+      for (uint32_t d = 0; d < arg->ndim; ++d) {
+        float position = arg->align_corners ? coord[d] * arg->scales[d]
+                          : (coord[d] + 0.5f) * arg->scales[d] - 0.5f;
+        if (arg->mode == 2) {
+          if (arg->input_size[d] == arg->output_size[d]) {
+            position = coord[d];
+          }
+          position = fmaxf(position, 0.0f);
+        }
+        base[d] = (int64_t)floorf(position);
+        fraction[d] = position - (float)base[d];
+      }
+      float result = 0.0f;
+      if (arg->mode == 3) {
+        for (uint32_t y = 0; y < 4; ++y) {
+          float row = 0.0f;
+          for (uint32_t x = 0; x < 4; ++x) {
+            const size_t offset = (size_t)resize_bound(base[0] + y - 1, arg->input_size[0]) * arg->strides[2]
+                                 + (size_t)resize_bound(base[1] + x - 1, arg->input_size[1]) * arg->strides[3];
+            row += src[offset] * resize_cubic_weight((float)x - 1.0f - fraction[1]);
+          }
+          result += row * resize_cubic_weight((float)y - 1.0f - fraction[0]);
+        }
+      } else {
+        for (uint32_t corner = 0; corner < (1u << arg->ndim); ++corner) {
+          float weight = 1.0f;
+          size_t offset = 0;
+          for (uint32_t d = 0; d < arg->ndim; ++d) {
+            const uint32_t upper = (corner >> d) & 1;
+            weight *= upper ? fraction[d] : 1.0f - fraction[d];
+            offset += (size_t)resize_bound(base[d] + upper, arg->input_size[d]) * arg->strides[d + 2];
+          }
+          result += weight * src[offset];
+        }
+      }
+      dst[i] = result;
+  }
+  }
 }
 
 __global__ void dnn_bn_affine_kernel(vx_dnn_bn_args_t* arg) {

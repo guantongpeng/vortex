@@ -161,11 +161,11 @@ D_POOL_SIZE := 76
 D_BN_SIZE := 44
 endif
 ifeq ($(XLEN),64)
-D_RESIZE_SIZE := 48
+D_RESIZE_SIZE := 96
 else
-D_RESIZE_SIZE := 36
+D_RESIZE_SIZE := 84
 endif
-DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_resize_nearest2d_kernel", "args_size": $(D_RESIZE_SIZE), "max_block": [16, 1, 1]}]
+DNN_META := [{"name": "dnn_conv2d_kernel", "args_size": $(D_CONV_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_pool2d_kernel", "args_size": $(D_POOL_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_bn_affine_kernel", "args_size": $(D_BN_SIZE), "max_block": [16, 1, 1]}, {"name": "dnn_resize_kernel", "args_size": $(D_RESIZE_SIZE), "max_block": [16, 1, 1]}]
 
 dnn.vxbin: $(SRC_DIR)/dnn_kernels.hip $(SRC_DIR)/dnn_args.h \
            $(VORTEX_HOME)/ci/hipcc_vortex.py
