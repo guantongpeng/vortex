@@ -157,7 +157,7 @@
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
 - [~] broadcast add/mul/sub/div、标量 alpha、GELU/SiLU 和主要 in-place/out overload 已具备；dropout eval identity 已实现，训练随机路径待 RNG，详见 [`p2_23_dropout_eval.md`](p2_23_dropout_eval.md)。
 - [x] `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out` 已补齐，详见 [`p2_11_index_out.md`](p2_11_index_out.md)、[`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
-- [ ] 对每个 schema 建立 overload×dtype×layout×shape 支持矩阵，unsupported 必须在 launch 前明确报错。
+- [~] 已建立当前 eager schema 的 overload×dtype×layout×shape 矩阵，并记录 launch 前拒绝边界；interpolate、stride-aware reduction、完整 cast/promotion、训练和模型专用 schema 仍待，详见 [`p2_25_schema_matrix.md`](p2_25_schema_matrix.md)。
 
 ### 2.4 CNN eager 和模型分级
 
