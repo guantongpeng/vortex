@@ -151,18 +151,18 @@
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。
 - [x] FP32 `nll_loss_forward` 的 none/sum/mean、weight、ignore_index 与越界校验；详见 [`p2_13_nll_loss.md`](p2_13_nll_loss.md)。
 - [x] FP32 `group_norm` 设备 kernel，支持任意空间 rank、独立 affine 和空 batch；详见 [`p2_22_group_norm.md`](p2_22_group_norm.md)。
-- [~] pool `ceil_mode` 已完成并在边界回归中验证；`interpolate`、return_indices 和其余 pool 形态仍待补齐。
+- [~] pool `ceil_mode` 与 `return_indices` 已完成并在边界回归中验证；nearest/nearest-exact 2D `interpolate` 已接入，linear/bilinear/bicubic 和其余 pool 形态仍待补齐。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
 - [~] clone/contiguous 已补显式设备实现并验证独立 storage、stride 保留和 contiguous memory format；cast、dtype promotion、重叠 stride 与 bool/int64 计算路径仍待，详见 [`p2_24_clone_contiguous.md`](p2_24_clone_contiguous.md)。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。
 - [~] broadcast add/mul/sub/div、标量 alpha、GELU/SiLU 和主要 in-place/out overload 已具备；dropout eval identity 已实现，训练随机路径待 RNG，详见 [`p2_23_dropout_eval.md`](p2_23_dropout_eval.md)。
 - [x] `gather.out`、`scatter_`、reduce/scalar overload、`index_add_`/`index_add.out`、`cat.out`/`stack.out` 已补齐，详见 [`p2_11_index_out.md`](p2_11_index_out.md)、[`p2_12_out_inplace_overloads.md`](p2_12_out_inplace_overloads.md)。
-- [~] 已建立当前 eager schema 的 overload×dtype×layout×shape 矩阵，并记录 launch 前拒绝边界；interpolate、stride-aware reduction、完整 cast/promotion、训练和模型专用 schema 仍待，详见 [`p2_25_schema_matrix.md`](p2_25_schema_matrix.md)。
+- [~] 已建立当前 eager schema 的 overload×dtype×layout×shape 矩阵，并记录 launch 前拒绝边界；linear/bilinear/bicubic interpolate、stride-aware reduction、完整 cast/promotion、训练和模型专用 schema 仍待，详见 [`p2_25_schema_matrix.md`](p2_25_schema_matrix.md)。
 
 ### 2.4 CNN eager 和模型分级
 
 - [x] conv 支持 groups/depthwise、dilation，并按每组输入通道计算权重 staging 与 LMEM；大 kernel 和完整模型分级仍待，详见 [`p2_14_grouped_conv.md`](p2_14_grouped_conv.md)、[`p2_16_conv_dilation.md`](p2_16_conv_dilation.md)。
-- [ ] conv 支持大通道和大 kernel 的权重 tiling，并检查 LMEM/资源上限。
+- [x] conv 支持大通道和大 kernel 的权重 tiling，并检查 LMEM/资源上限。
 - [x] BN inference optional affine 与 linear 前导 batch 维已支持；详见 [`p2_18_linear_batch.md`](p2_18_linear_batch.md)。
 - [~] avg_pool2d `divisor_override`、max/avg `ceil_mode` 与 max-pool `dilation` 已接入统一 DNN kernel；return_indices 和其余 pool 形态仍待，详见 [`p2_19_pool_divisor.md`](p2_19_pool_divisor.md)。
 - [x] `relu_` 已复用统一 prim unary in-place kernel，并保留 storage/version mutation 语义；剩余 pool 形态仍待补齐。

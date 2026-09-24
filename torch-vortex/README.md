@@ -85,6 +85,7 @@ the message. None of it falls back to the CPU.
 | `argmax` (any dim, or the whole tensor) and `max(dim=)` with its indices | |
 | `conv2d`, batch norm (inference), pooling, `mm`/`bmm`/`linear`/`addmm` | |
 | `avg_pool2d` with `count_include_pad` true/false | |
+| max-pool `return_indices`; nearest and nearest-exact 2D interpolate | |
 | `layer_norm` (affine optional, with `mean`/`rstd`), `rms_norm` | |
 | `softmax`/`log_softmax` over any one dim, `logsumexp`, `nn.Softmax`/`nn.LogSoftmax` | |
 | `cat` and `stack` for contiguous FP32 tensors | |
@@ -103,7 +104,7 @@ the message. None of it falls back to the CPU.
 | dtype conversion in `copy_` | W3.2 |
 | elementwise ops on strided inputs (`x.t() + 1`): the kernels index linearly | W3.2 |
 | `torch.randn(device="vortex")`, `torch.manual_seed` on the device | W3.5 |
-| grouped/dilated/transposed conv, `ceil_mode`, avg-pool divisor override | W3.3 |
+| transposed conv, linear/bilinear/bicubic interpolate, adaptive pool beyond (1,1) | W3.3 |
 | training: batch-norm training mode, autograd | W8.1 |
 | `non_blocking` actually overlapping (the runtime has one in-order ring) | W2.2 |
 | `Stream.query()`/`Event.query()` (no non-blocking query in the runtime) | W2.2 |

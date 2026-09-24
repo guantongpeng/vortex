@@ -2478,6 +2478,49 @@ static int64_t window_out(int64_t in, int64_t k, int64_t pad, int64_t stride,
 }
 
 
+static torch::Tensor resize_nearest2d_impl(const torch::Tensor& self,
+                                             c10::IntArrayRef output_size,
+                                             std::optional<double> scales_h,
+                                             std::optional<double> scales_w,
+                                             uint32_t mode) {
+    check_cnn_f32(self, "interpolate.input", 4);
+    TORCH_CHECK(output_size.size() == 2, "torch_vortex: interpolate size must have two values");
+    TORCH_CHECK(output_size[0] > 0 && output_size[1] > 0,
+                "torch_vortex: interpolate output size must be positive");
+    TORCH_CHECK(!scales_h.has_value() && !scales_w.has_value(),
+                "torch_vortex: explicit scale arguments with output_size are unsupported");
+    const auto& s = self.sizes();
+    const int64_t ho = output_size[0], wo = output_size[1];
+    auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
+    if (out.numel() == 0) return out;
+    DL_LAUNCH(vx_dnn_resize_nearest2d(
+        current_queue(), (uint64_t)(uintptr_t)self.data_ptr(),
+        (uint64_t)(uintptr_t)out.data_ptr(), u32_dim(s[0], "interpolate batch"),
+        u32_dim(s[1], "interpolate channels"), u32_dim(s[2], "interpolate input height"),
+        u32_dim(s[3], "interpolate input width"), u32_dim(ho, "interpolate output height"),
+        u32_dim(wo, "interpolate output width"), mode));
+    return out;
+}
+
+static torch::Tensor upsample_nearest2d_impl(const torch::Tensor& self,
+                                             at::OptionalSymIntArrayRef output_size,
+                                             std::optional<c10::ArrayRef<double>> scale_factors) {
+    std::vector<int64_t> size;
+    if (output_size.has_value()) {
+        size = sym_to_vec(*output_size);
+    } else {
+        TORCH_CHECK(scale_factors.has_value() && scale_factors->size() == 2,
+                    "torch_vortex: interpolate needs output_size or two scale factors");
+        check_cnn_f32(self, "interpolate.input", 4);
+        const auto& s = self.sizes();
+        TORCH_CHECK((*scale_factors)[0] > 0 && (*scale_factors)[1] > 0,
+                    "torch_vortex: interpolate scale factors must be positive");
+        size = {static_cast<int64_t>(std::floor(s[2] * (*scale_factors)[0])),
+                static_cast<int64_t>(std::floor(s[3] * (*scale_factors)[1]))};
+    }
+    return resize_nearest2d_impl(self, size, std::nullopt, std::nullopt, 0);
+}
+
 static torch::Tensor convolution_impl(
     const torch::Tensor& input, const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias, c10::IntArrayRef stride,
@@ -2565,7 +2608,8 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
                                c10::IntArrayRef stride,
                                c10::IntArrayRef padding, uint32_t op,
                                bool ceil_mode, uint32_t divisor,
-                               uint32_t dh, uint32_t dw) {
+                               uint32_t dh, uint32_t dw,
+                               torch::Tensor* indices_out = nullptr) {
     check_cnn_f32(self, "pool.input", 4);
     const int64_t kh = kernel_size[0], kw = kernel_size[1];
     const int64_t sh = stride.size() > 0 ? stride[0] : kh;
@@ -2578,6 +2622,12 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     const int64_t ho = window_out(s[2], ekh, ph, sh, ceil_mode, "pool height");
     const int64_t wo = window_out(s[3], ekw, pw, sw, ceil_mode, "pool width");
     auto out = torch::empty({s[0], s[1], ho, wo}, self.options());
+    torch::Tensor indices;
+    if (indices_out != nullptr) {
+        indices = torch::empty({s[0], s[1], ho, wo},
+                               self.options().dtype(torch::kLong));
+        *indices_out = indices;
+    }
     // An all-empty result is not a launch: the DL kernel refuses n == 0 or a
     // zero-sized dimension, and there is nothing to compute anyway.
     if (out.numel() == 0) {
@@ -2587,7 +2637,24 @@ static torch::Tensor pool_impl(const torch::Tensor& self,
     // the argument it rejects, while the DL's is plain unsigned arithmetic.
     // ATen validates, the DL computes.
     const uint32_t wire_op = (op == 2 && ceil_mode) ? 3u : op;
-    if (dh == 1 && dw == 1) {
+    if (indices_out != nullptr) {
+        TORCH_CHECK(op == 0, "torch_vortex: pool indices are only defined for max_pool2d");
+        DL_LAUNCH(vx_dnn_pool2d_with_indices(
+                                current_queue(),
+                                (uint64_t)(uintptr_t)self.data_ptr(),
+                                (uint64_t)(uintptr_t)out.data_ptr(),
+                                (uint64_t)(uintptr_t)indices.data_ptr(),
+                                u32_dim(s[0], "pool batch"), u32_dim(s[1], "pool channels"),
+                                u32_dim(s[2], "pool input height"),
+                                u32_dim(s[3], "pool input width"),
+                                u32_dim(kh, "pool kernel height"),
+                                u32_dim(kw, "pool kernel width"),
+                                u32_dim(ph, "pool padding height"),
+                                u32_dim(pw, "pool padding width"),
+                                u32_dim(sh, "pool stride height"),
+                                u32_dim(sw, "pool stride width"), ceil_mode ? 1u : 0u,
+                                dh, dw));
+    } else if (dh == 1 && dw == 1) {
         DL_LAUNCH(vx_dnn_pool2d_ex_mode(current_queue(),
                                 (uint64_t)(uintptr_t)self.data_ptr(),
                                 (uint64_t)(uintptr_t)out.data_ptr(),
@@ -2633,6 +2700,22 @@ static torch::Tensor max_pool2d_impl(const torch::Tensor& self,
     return pool_impl(self, kernel, stride, padding, 0, ceil_mode, 0,
                      u32_dim(dh, "pool dilation height"),
                      u32_dim(dw, "pool dilation width"));
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> max_pool2d_with_indices_impl(
+    const torch::Tensor& self, c10::IntArrayRef kernel,
+    c10::IntArrayRef stride, c10::IntArrayRef padding,
+    c10::IntArrayRef dilation, bool ceil_mode) {
+    TORCH_CHECK(dilation.size() == 1 || dilation.size() == 2,
+                "torch_vortex: pool dilation must have one or two values");
+    const int64_t dh = dilation.size() > 0 ? dilation[0] : 1;
+    const int64_t dw = dilation.size() > 1 ? dilation[1] : dh;
+    TORCH_CHECK(dh > 0 && dw > 0, "torch_vortex: pool dilation must be positive");
+    torch::Tensor indices;
+    auto out = pool_impl(self, kernel, stride, padding, 0, ceil_mode, 0,
+                         u32_dim(dh, "pool dilation height"),
+                         u32_dim(dw, "pool dilation width"), &indices);
+    return std::make_tuple(out, indices);
 }
 
 static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
@@ -3258,6 +3341,35 @@ static std::tuple<torch::Tensor&, torch::Tensor&> sort_values_impl(
 // Defined with the fallbacks, below.
 static void vortex_no_fallback(const c10::OperatorHandle& op, c10::Stack* stack);
 
+static torch::Tensor upsample_nearest_exact2d_impl(
+    const torch::Tensor& self, at::OptionalSymIntArrayRef output_size,
+    std::optional<c10::ArrayRef<double>> scale_factors) {
+    std::vector<int64_t> size;
+    if (output_size.has_value()) {
+        size = sym_to_vec(*output_size);
+    } else {
+        TORCH_CHECK(scale_factors.has_value() && scale_factors->size() == 2,
+                    "torch_vortex: interpolate needs output_size or two scale factors");
+        check_cnn_f32(self, "interpolate.input", 4);
+        const auto& s = self.sizes();
+        size = {static_cast<int64_t>(std::floor(s[2] * (*scale_factors)[0])),
+                static_cast<int64_t>(std::floor(s[3] * (*scale_factors)[1]))};
+    }
+    return resize_nearest2d_impl(self, size, std::nullopt, std::nullopt, 1);
+}
+
+static torch::Tensor upsample_nearest2d_direct_impl(
+    const torch::Tensor& self, c10::IntArrayRef output_size,
+    std::optional<double> scales_h, std::optional<double> scales_w) {
+    return resize_nearest2d_impl(self, output_size, scales_h, scales_w, 0);
+}
+
+static torch::Tensor upsample_nearest_exact2d_direct_impl(
+    const torch::Tensor& self, c10::IntArrayRef output_size,
+    std::optional<double> scales_h, std::optional<double> scales_w) {
+    return resize_nearest2d_impl(self, output_size, scales_h, scales_w, 1);
+}
+
 void register_vortex_ops() {
     auto* m = new torch::Library(torch::Library::IMPL, "aten",
                                  c10::DispatchKey::PrivateUse1, __FILE__, __LINE__);
@@ -3359,6 +3471,13 @@ void register_vortex_ops() {
     VX_IMPL("argmax", &argmax_impl);
     VX_IMPL("max.dim", &max_dim_impl);
     VX_IMPL("max_pool2d", &max_pool2d_impl);
+    VX_IMPL("upsample_nearest2d", &upsample_nearest2d_direct_impl);
+    VX_IMPL("upsample_nearest2d.vec",
+            &upsample_nearest2d_impl);
+    VX_IMPL("_upsample_nearest_exact2d", &upsample_nearest_exact2d_direct_impl);
+    VX_IMPL("_upsample_nearest_exact2d.vec",
+            &upsample_nearest_exact2d_impl);
+    VX_IMPL("max_pool2d_with_indices", &max_pool2d_with_indices_impl);
     VX_IMPL("avg_pool2d", &avg_pool2d_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);

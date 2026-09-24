@@ -86,6 +86,13 @@ vx_dnn_status vx_dnn_pool2d_ex_mode(vx_queue_h q, uint64_t in, uint64_t out,
                                     uint32_t op, uint32_t divisor,
                                     uint32_t ceil_mode);
 
+// Max pooling with an int64 input-plane offset for every output element.
+vx_dnn_status vx_dnn_pool2d_with_indices(
+    vx_queue_h q, uint64_t in, uint64_t out, uint64_t indices,
+    uint32_t n, uint32_t c, uint32_t hi, uint32_t wi,
+    uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw,
+    uint32_t sh, uint32_t sw, uint32_t ceil_mode, uint32_t dh, uint32_t dw);
+
 vx_dnn_status vx_dnn_pool2d_dilated(vx_queue_h q, uint64_t in, uint64_t out,
                                     uint32_t n, uint32_t c,
                                     uint32_t hi, uint32_t wi,
@@ -93,6 +100,12 @@ vx_dnn_status vx_dnn_pool2d_dilated(vx_queue_h q, uint64_t in, uint64_t out,
                                     uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw,
                                     uint32_t op, uint32_t divisor,
                                     uint32_t ceil_mode, uint32_t dh, uint32_t dw);
+
+// 2D nearest-neighbor resize over contiguous NCHW FP32 (mode 0=nearest,
+// mode 1=nearest-exact).
+vx_dnn_status vx_dnn_resize_nearest2d(
+    vx_queue_h q, uint64_t in, uint64_t out, uint32_t n, uint32_t c,
+    uint32_t hi, uint32_t wi, uint32_t ho, uint32_t wo, uint32_t mode);
 
 // Inference batch norm, fused affine. The kernel computes
 // rstd = 1/sqrt(var + eps) itself, so the caller passes the running variance

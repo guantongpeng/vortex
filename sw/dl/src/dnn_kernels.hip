@@ -78,6 +78,7 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         // NaN (F10 in docs/mydocs/pytorch_plan.md).
         float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
+        int64_t max_index = -1;
         uint32_t include_count = 0;
         for (uint32_t kh = 0; kh < arg->kh; ++kh) {
             const int32_t iy = (int32_t)(oy * arg->sh + kh * arg->dh) -
@@ -100,9 +101,12 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
                 if (ix < 0 || ix >= (int32_t)arg->wi) continue;
                 float v = in_ch[(size_t)iy * arg->wi + ix];
                 if (arg->op == 0) {
-                    // NaN must win: plain `v > acc` (and fmaxf, which ignores
-                    // NaN) would leave the accumulator at the sentinel.
-                    if (v > acc || isnan(v)) acc = v;
+                    // Keep the first maximal element, including the first NaN.
+                    // PyTorch exposes this input-plane offset when indices are requested.
+                    if ((!isnan(acc) && (isnan(v) || v > acc))) {
+                        acc = v;
+                        max_index = (int64_t)iy * arg->wi + ix;
+                    }
                 } else {
                     acc += v;
                 }
@@ -111,6 +115,10 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
         }
         if (arg->op == 0) {
             out_row[ox] = acc;
+            if (arg->indices) {
+                ((int64_t*)(uintptr_t)arg->indices)[
+                    (((size_t)n * arg->c + c) * arg->ho + oy) * arg->wo + ox] = max_index;
+            }
         } else if (arg->op == 1 || arg->op == 2 || arg->op == 3) {
             const uint32_t divisor = arg->divisor
                                          ? arg->divisor
@@ -120,6 +128,25 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
                                                                 : arg->kh * arg->kw));
             out_row[ox] = divisor ? acc / (float)divisor : 0.0f;
         }
+    }
+}
+
+__global__ void dnn_resize_nearest2d_kernel(vx_dnn_resize_args_t* arg) {
+    const uint32_t n = blockIdx.z;
+    const uint32_t c = blockIdx.y;
+    const uint32_t oy = blockIdx.x;
+    const uint32_t iy = arg->mode == 0
+                            ? ((uint64_t)oy * arg->hi) / arg->ho
+                            : (((uint64_t)(2 * oy + 1) * arg->hi) / (2 * arg->ho));
+    const float* src = (const float*)(uintptr_t)arg->in +
+                       ((size_t)n * arg->c + c) * arg->hi * arg->wi;
+    float* dst = (float*)(uintptr_t)arg->out +
+                 ((size_t)n * arg->c + c) * arg->ho * arg->wo;
+    for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
+        const uint32_t ix = arg->mode == 0
+                                ? ((uint64_t)ox * arg->wi) / arg->wo
+                                : (((uint64_t)(2 * ox + 1) * arg->wi) / (2 * arg->wo));
+        dst[(size_t)oy * arg->wo + ox] = src[(size_t)iy * arg->wi + ix];
     }
 }
 

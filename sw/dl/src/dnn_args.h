@@ -50,11 +50,21 @@ typedef struct {
 typedef struct {
     vx_dl_ptr_t in;
     vx_dl_ptr_t out;
+    vx_dl_ptr_t indices; // optional int64 max-pool indices
     uint32_t n, c, hi, wi, ho, wo;
     uint32_t kh, kw, ph, pw, sh, sw, dh, dw;
     uint32_t op;
     uint32_t divisor;
 } vx_dnn_pool_args_t;
+
+// Nearest-neighbor resize over NCHW FP32. mode 0 is legacy nearest and
+// mode 1 uses the exact half-pixel mapping.
+typedef struct {
+    vx_dl_ptr_t in;
+    vx_dl_ptr_t out;
+    uint32_t n, c, hi, wi, ho, wo;
+    uint32_t mode;
+} vx_dnn_resize_args_t;
 
 // Inference batch norm as a fused per-channel affine:
 //   y = (x - mean[c]) * (1/sqrt(var[c] + eps)) * weight[c] + bias[c]

@@ -248,3 +248,30 @@ def test_device_rng_is_refused_by_name(backend):
         torch.randn(4, device="vortex")
     with pytest.raises(RuntimeError, match="no vortex implementation"):
         torch.ones(4).to("vortex").normal_()
+
+
+def test_max_pool_return_indices_matches_cpu(backend):
+    x = torch.tensor([[[[1.0, 5.0, 5.0],
+                        [9.0, 2.0, 3.0],
+                        [4.0, 8.0, 7.0]]]])
+    got, got_idx = torch.nn.functional.max_pool2d(
+        x.to("vortex"), 2, stride=1, return_indices=True)
+    want, want_idx = torch.nn.functional.max_pool2d(
+        x, 2, stride=1, return_indices=True)
+    assert_matches_cpu(got, want, rtol=0, atol=0)
+    assert_matches_cpu(got_idx, want_idx, rtol=0, atol=0)
+
+
+def test_interpolate_nearest_modes_match_cpu(backend):
+    x = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+    for mode in ("nearest", "nearest-exact"):
+        for size in ((5, 7), (2, 3)):
+            got = torch.nn.functional.interpolate(x.to("vortex"), size=size,
+                                                   mode=mode).cpu()
+            want = torch.nn.functional.interpolate(x, size=size, mode=mode)
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
+        got = torch.nn.functional.interpolate(x.to("vortex"),
+                                              scale_factor=(1.7, 1.5),
+                                              mode=mode).cpu()
+        want = torch.nn.functional.interpolate(x, scale_factor=(1.7, 1.5), mode=mode)
+        torch.testing.assert_close(got, want, rtol=0, atol=0)

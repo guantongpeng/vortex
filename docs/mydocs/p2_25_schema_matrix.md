@@ -18,12 +18,12 @@
 | `nll_loss_forward` | none/sum/mean | input/weight FP32，target=int64 | 1–2D target，ignore_index | 支持；训练/autograd 不在范围 |
 | `group_norm` | optional weight/bias 独立省略 | FP32 | NCHW 及更多连续空间 rank，空 batch | 支持；非连续和其他 dtype 拒绝 |
 | convolution | groups/depthwise/dilation | FP32 | NCHW、权重 staging ≤16 KiB | 支持；大通道/大 kernel tiling 仍待 |
-| pool | max/avg、divisor_override、ceil_mode、max dilation | FP32 | NCHW 2D window | 支持；return_indices 和更高维 adaptive 仍待 |
+| pool | max/avg、divisor_override、ceil_mode、max dilation、return_indices | FP32 | NCHW 2D window | 支持；更高维 adaptive 仍待 |
 | dropout | `dropout`, `native_dropout` inference | FP32 | `train=False` identity | 支持；`train=True` 在 RNG 接入前明确拒绝 |
 
 ## 明确未纳入矩阵的 schema
 
-`interpolate`、stride-aware reduction、完整 cast/dtype promotion、训练随机
+linear/bilinear/bicubic `interpolate`、stride-aware reduction、完整 cast/dtype promotion、训练随机
 算子、autograd、checkpoint、Transformer/LLM 专用 op 和 Inductor codegen
 仍由总计划单独跟踪。它们没有通过设备 kernel 验收前，不在支持声明中。
 
