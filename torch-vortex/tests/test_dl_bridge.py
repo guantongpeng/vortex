@@ -695,21 +695,30 @@ def _measure_dl_structs(repo, xlen, mapping, tmp_path):
     compiler measures both, and the result is a real measurement rather than
     an arithmetic guess.
     """
-    names = [k for k in sorted(mapping) if not k.startswith("mxfp8")]
+    names = sorted(mapping)
     probe = tmp_path / ("dl_sizes_%d.cpp" % xlen)
-    probe.write_text(
+    includes = "".join(
+        '#include "%s"\n' % os.path.basename(h)
+        for h in sorted(glob.glob(os.path.join(repo, "sw", "dl", "src", "*_args.h")))
+    )
+    body = (
         "#include <stdio.h>\n"
-        + "".join('#include "%s"\n' % os.path.basename(h) for h in sorted(
-            glob.glob(os.path.join(repo, "sw", "dl", "src", "*_args.h")))
-            if os.path.basename(h) != "mxfp8_args.h")
+        "#include <vortex2.h>\n"
+        + includes
         + "int main(void){\n"
-        + "".join('  printf("%s %%zu\\n", sizeof(%s));\n' % (n, mapping[n]) for n in names)
-        + "  return 0;\n}\n")
+        + "".join(
+            '  printf("%s %%zu\\n", sizeof(%s));\n' % (n, mapping[n])
+            for n in names
+        )
+        + "  return 0;\n}\n"
+    )
+    probe.write_text(body)
     exe = tmp_path / ("dl_sizes_%d" % xlen)
     cc = os.environ.get("CXX", "c++")
     build = subprocess.run(
         [cc, "-std=c++17", "-I", os.path.join(repo, "sw", "dl", "src"),
          "-I", os.path.join(repo, "sw", "dl", "include"),
+         "-I", os.path.join(repo, "sw", "runtime", "include"),
          "-DVX_CFG_XLEN=%d" % xlen, str(probe), "-o", str(exe)],
         capture_output=True, text=True, timeout=300)
     assert build.returncode == 0, build.stderr[-2000:]
@@ -722,9 +731,9 @@ def _measure_dl_structs(repo, xlen, mapping, tmp_path):
 def test_dl_metadata_matches_measured_sizes(tmp_path):
     """sw/dl's args_size is hand-typed, and it had drifted -- the F07 class.
 
-    Measured against the image metadata for every image whose argument headers
-    compile outside the device context (all but mxfp8, whose header declares
-    device-side helpers). Thirteen numbers were wrong when this was first run:
+    Measured against the image metadata for every image. The mxfp8 header is
+    included after vortex2.h so its public ABI structs are checked as well.
+    Thirteen numbers were wrong when this was first run:
     conv declared 96 for 88, pool 88 for 72, bn 56 for 72, quant's w8a8 gemm 48
     for 56, and the two llm entries 24 for 32. bn was the dangerous direction --
     a declared size *smaller* than the struct -- and it appeared because adding

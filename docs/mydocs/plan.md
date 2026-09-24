@@ -138,8 +138,8 @@
 - [ ] 为 DL library 使用调用方 device/context/queue，消除新的全局 singleton。
 - [x] BLAS GEMM 增加 `transb`，linear 直接读取 `[N,K]` 权重，消除 `w.t().contiguous()` 临时拷贝；详见 [`p2_02_gemm_transb.md`](p2_02_gemm_transb.md)。
 - [x] `bmm` 已改为单次 grid-z batch-stride/tiled GEMM，按真实 Tensor batch stride 传参；addmm/linear epilogue 保持独立，详见 [`p2_03_batched_gemm.md`](p2_03_batched_gemm.md)。
-- [x] 二元 elementwise 操作码改用 `vortex/prim.h` 公共定义，并由 host/device static_assert 校验；mxfp8 ABI 漂移仍待，详见 [`p2_10_binary_enum_abi.md`](p2_10_binary_enum_abi.md)。
-- [ ] 将重复状态枚举统一为可检查的公共定义，并把 `mxfp8_args.h` 纳入 ABI 漂移测试。
+- [x] 二元 elementwise 操作码改用 `vortex/prim.h` 公共定义，并由 host/device static_assert 校验；详见 [`p2_10_binary_enum_abi.md`](p2_10_binary_enum_abi.md)。
+- [~] `mxfp8_args.h` 已纳入 rv64/rv32 ABI 漂移测试并覆盖 pack/dequant/gemm；各模块状态码仍保留独立命名空间，公共状态枚举统一仍待。
 
 ### 2.3 通用 Tensor 和基础算子
 
