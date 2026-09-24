@@ -48,6 +48,13 @@ vx_mamba_status vx_mamba_selective_scan(vx_queue_h q, uint64_t a,
                                         uint32_t batch, uint32_t channels,
                                         uint32_t seqlen, uint32_t dstate);
 
+// Same recurrence and layouts, with an optional [batch, channels, dstate]
+// initial state and a required final state. State size is not register-limited.
+vx_mamba_status vx_mamba_selective_scan_state(
+    vx_queue_h q, uint64_t a, uint64_t dt, uint64_t b, uint64_t c,
+    uint64_t x, uint64_t y, uint64_t initial_state, uint64_t final_state,
+    uint32_t batch, uint32_t channels, uint32_t seqlen, uint32_t dstate);
+
 #ifdef __cplusplus
 }
 #endif

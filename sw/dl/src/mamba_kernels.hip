@@ -78,3 +78,35 @@ __global__ void mamba_scan_kernel(vx_mamba_scan_args_t* arg) {
         __syncthreads();  // red[] reused next timestep: avoid WAR hazard
     }
 }
+
+__global__ void mamba_state_kernel(vx_mamba_state_args_t* arg) {
+    const uint32_t bc = blockIdx.x;
+    const uint32_t tid = threadIdx.x;
+    float* state = (float*)(uintptr_t)arg->final_state + (size_t)bc * arg->dstate;
+    float* partials = (float*)__local_mem();
+    for (uint32_t n = tid; n < arg->dstate; n += 16) {
+        state[n] = arg->initial_state
+            ? ((const float*)(uintptr_t)arg->initial_state)[(size_t)bc * arg->dstate + n]
+            : 0.0f;
+    }
+    for (uint32_t t = 0; t < arg->seqlen; ++t) {
+        const float decay = expf(((const float*)(uintptr_t)arg->a)[bc] *
+            ((const float*)(uintptr_t)arg->dt)[(size_t)bc * arg->seqlen + t]);
+        const float xv = ((const float*)(uintptr_t)arg->x)[(size_t)bc * arg->seqlen + t];
+        float partial = 0.0f;
+        for (uint32_t n = tid; n < arg->dstate; n += 16) {
+            const float next = decay * state[n] +
+                ((const float*)(uintptr_t)arg->b)[(size_t)t * arg->dstate + n] * xv;
+            state[n] = next;
+            partial += ((const float*)(uintptr_t)arg->c)[(size_t)t * arg->dstate + n] * next;
+        }
+        partials[tid] = partial;
+        __syncthreads();
+        if (tid == 0) {
+            float total = 0.0f;
+            for (uint32_t i = 0; i < 16; ++i) total += partials[i];
+            ((float*)(uintptr_t)arg->y)[(size_t)bc * arg->seqlen + t] = total;
+        }
+        __syncthreads();
+    }
+}

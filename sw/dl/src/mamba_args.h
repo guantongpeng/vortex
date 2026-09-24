@@ -59,4 +59,10 @@ typedef struct {
     uint32_t dstate;       // N (1..8; kernel is register-unrolled for N<=8)
 } vx_mamba_scan_args_t;
 
+typedef struct {
+    vx_dl_ptr_t a, dt, b, c, x, y;
+    vx_dl_ptr_t initial_state, final_state;
+    uint32_t batch, channels, seqlen, dstate;
+} vx_mamba_state_args_t;
+
 #endif // VORTEX_DL_MAMBA_ARGS_H

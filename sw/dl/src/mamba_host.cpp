@@ -28,6 +28,7 @@ struct MambaState {
     vx_device_h dev = nullptr;
     vx_module_h module = nullptr;
     vx_kernel_h scan = nullptr;
+    vx_kernel_h state = nullptr;
     std::string path;   // what init was called with
 };
 
@@ -76,6 +77,10 @@ vx_mamba_status vx_mamba_init(vx_device_h dev, const char* vxbin_path) {
         vx_mamba_finalize();
         return VX_MAMBA_ERR_BAD_ARGS;
     }
+    if (vx_module_get_kernel(g_m.module, "mamba_state_kernel", &g_m.state) != VX_SUCCESS) {
+        vx_mamba_finalize();
+        return VX_MAMBA_ERR_BAD_ARGS;
+    }
     g_m.dev = dev;
     g_m.path = vxbin_path;
     return VX_MAMBA_OK;
@@ -84,6 +89,7 @@ vx_mamba_status vx_mamba_init(vx_device_h dev, const char* vxbin_path) {
 vx_mamba_status vx_mamba_finalize(void) {
     if (!g_m.module) return VX_MAMBA_OK;
     if (g_m.scan) vx_kernel_release(g_m.scan);
+    if (g_m.state) vx_kernel_release(g_m.state);
     vx_module_release(g_m.module);
     g_m = MambaState{};
     return VX_MAMBA_OK;
@@ -112,9 +118,34 @@ vx_mamba_status vx_mamba_selective_scan(vx_queue_h q, uint64_t a, uint64_t dt,
     args.channels = channels;
     args.seqlen = seqlen;
     args.dstate = dstate;
-    // 16-thread CTAs = 4 warps = 4 (b, c) channels per CTA; the kernel's
-    // reduction buffer is 16 f32 = 64 B of LMEM.
     const uint32_t bc_total = batch * channels;
-    return launch(q, g_m.scan, &args, sizeof(args), (bc_total + 3) / 4, 16,
-                  64);
+    return launch(q, g_m.scan, &args, sizeof(args), (bc_total + 3) / 4, 16, 64);
+}
+
+vx_mamba_status vx_mamba_selective_scan_state(
+    vx_queue_h q, uint64_t a, uint64_t dt, uint64_t b, uint64_t c,
+    uint64_t x, uint64_t y, uint64_t initial_state, uint64_t final_state,
+    uint32_t batch, uint32_t channels, uint32_t seqlen, uint32_t dstate) {
+    if (!g_m.module) return VX_MAMBA_ERR_NOT_INITIALIZED;
+    if (!a || !dt || !b || !c || !x || !y || !final_state || !batch || !channels ||
+        !seqlen || !dstate || batch > UINT32_MAX / channels ||
+        (uint64_t)batch * channels * seqlen > UINT32_MAX ||
+        (uint64_t)batch * channels * dstate > UINT32_MAX ||
+        (uint64_t)seqlen * dstate > UINT32_MAX) {
+        return VX_MAMBA_ERR_BAD_ARGS;
+    }
+    vx_mamba_state_args_t args = {};
+    args.a = (vx_dl_ptr_t)a;
+    args.dt = (vx_dl_ptr_t)dt;
+    args.b = (vx_dl_ptr_t)b;
+    args.c = (vx_dl_ptr_t)c;
+    args.x = (vx_dl_ptr_t)x;
+    args.y = (vx_dl_ptr_t)y;
+    args.initial_state = (vx_dl_ptr_t)initial_state;
+    args.final_state = (vx_dl_ptr_t)final_state;
+    args.batch = batch;
+    args.channels = channels;
+    args.seqlen = seqlen;
+    args.dstate = dstate;
+    return launch(q, g_m.state, &args, sizeof(args), batch * channels, 16, 64);
 }

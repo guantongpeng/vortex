@@ -82,6 +82,8 @@ using vx_schema_string_view = c10::string_view;
 #include <vortex/dnn.h>
 #include <vortex/prim.h>
 #include <vortex/rng.h>
+#include <vortex/llm.h>
+#include <vortex/mamba.h>
 
 #define VX_CHECK(expr)                                                        \
     do {                                                                      \
@@ -3691,6 +3693,8 @@ void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
     DL_CHECK(vx_blas_init(g_dl_device, dl_image("blas").c_str()));
     DL_CHECK(vx_prim_init(g_dl_device, dl_image("prim").c_str()));
     DL_CHECK(vx_rng_init(g_dl_device, dl_image("rng").c_str()));
+    DL_CHECK(vx_llm_init(g_dl_device, dl_image("llm").c_str()));
+    DL_CHECK(vx_mamba_init(g_dl_device, dl_image("mamba").c_str()));
 
     VX_CHECK(hipModuleLoad(&g_ops_module, vxbin_path.c_str()));
 #define TORCH_KERNEL_RESOLVE(name, type, mbx, lmem)                            \
@@ -3746,6 +3750,8 @@ void vortex_at_exit() {
     vx_dnn_finalize();
     vx_prim_finalize();
     vx_rng_finalize();
+    vx_llm_finalize();
+    vx_mamba_finalize();
     hipDeviceReset();
 }
 
@@ -3782,8 +3788,111 @@ torch::Tensor rng_uniform_impl(const std::vector<int64_t>& sizes,
     return out;
 }
 
+torch::Tensor llm_rope_impl(const torch::Tensor& input) {
+    auto x = input.clone();
+    check_vortex_f32(x, "llm_rope input");
+    TORCH_CHECK(x.dim() == 2 && x.size(1) >= 2,
+                "torch_vortex: llm_rope expects [seq, dim]");
+    if (x.numel() == 0) return x;
+    u32_numel(x, "rope");
+    DL_CHECK(vx_llm_rope(current_queue(), (uint64_t)(uintptr_t)x.data_ptr(),
+                         u32_dim(x.size(0), "llm_rope sequence"),
+                         u32_dim(x.size(1), "llm_rope dimension")));
+    note_device_work();
+    return x;
+}
+
+torch::Tensor llm_swiglu_impl(const torch::Tensor& a, const torch::Tensor& b) {
+    check_vortex_f32(a, "swiglu input");
+    check_vortex_f32(b, "swiglu gate");
+    TORCH_CHECK(a.sizes() == b.sizes(), "torch_vortex: swiglu shapes differ");
+    auto out = contiguous_empty(a.sizes(), a.options());
+    if (a.numel() == 0) return out;
+    DL_CHECK(vx_llm_swiglu(current_queue(), (uint64_t)(uintptr_t)a.data_ptr(),
+                           (uint64_t)(uintptr_t)b.data_ptr(),
+                           (uint64_t)(uintptr_t)out.data_ptr(),
+                           u32_numel(a, "swiglu")));
+    note_device_work();
+    return out;
+}
+
+torch::Tensor llm_kv_append_impl(torch::Tensor cache, const torch::Tensor& new_k,
+                                 int64_t base) {
+    check_vortex_f32(cache, "kv cache");
+    check_vortex_f32(new_k, "kv append");
+    TORCH_CHECK(cache.dim() == 2 && new_k.dim() == 2 &&
+                    cache.size(1) == new_k.size(1),
+                "torch_vortex: kv cache tensors must be [tokens, dim]");
+    TORCH_CHECK(!cache.requires_grad() && !new_k.requires_grad(),
+                "torch_vortex: kv cache update is inference-only");
+    TORCH_CHECK(base >= 0 && base <= cache.size(0) &&
+                    new_k.size(0) <= cache.size(0) - base,
+                "torch_vortex: kv cache append exceeds capacity");
+    TORCH_CHECK(!cache.is_alias_of(new_k), "torch_vortex: kv append source aliases cache");
+    u32_numel(cache, "kv cache");
+    if (new_k.numel() == 0) return cache;
+    DL_CHECK(vx_llm_kv_append(
+        current_queue(), (uint64_t)(uintptr_t)cache.data_ptr(),
+        (uint64_t)(uintptr_t)new_k.data_ptr(), u32_dim(cache.size(0), "kv capacity"),
+        u32_dim(base, "kv base"), u32_dim(new_k.size(0), "kv tokens"),
+        u32_dim(cache.size(1), "kv dimension")));
+    note_device_work();
+    cache.unsafeGetTensorImpl()->bump_version();
+    return cache;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> mamba_scan_impl(const torch::Tensor& a, const torch::Tensor& dt,
+                              const torch::Tensor& b, const torch::Tensor& c,
+                              const torch::Tensor& x,
+                              const std::optional<torch::Tensor>& initial) {
+    for (const auto* t : {&a, &dt, &b, &c, &x}) check_vortex_f32(*t, "mamba input");
+    TORCH_CHECK(a.dim() == 1 && dt.dim() == 3 && b.dim() == 2 &&
+                    c.sizes() == b.sizes() && x.sizes() == dt.sizes(),
+                "torch_vortex: mamba inputs have incompatible shapes");
+    const auto batch = u32_dim(dt.size(0), "mamba batch");
+    const auto channels = u32_dim(dt.size(1), "mamba channels");
+    const auto seqlen = u32_dim(dt.size(2), "mamba sequence");
+    const int64_t dstate = b.size(1);
+    TORCH_CHECK(a.numel() == (int64_t)batch * channels &&
+                    b.size(0) == seqlen && b.size(1) == dstate &&
+                    dstate > 0,
+                "torch_vortex: mamba A/projection shapes are inconsistent");
+    auto out = contiguous_empty(x.sizes(), x.options());
+    auto state = contiguous_empty({batch, channels, dstate}, x.options());
+    uint64_t initial_ptr = 0;
+    if (initial) {
+        check_vortex_f32(*initial, "mamba initial state");
+        TORCH_CHECK(initial->sizes() == state.sizes(),
+                    "torch_vortex: mamba initial state shape is wrong");
+        initial_ptr = (uint64_t)(uintptr_t)initial->data_ptr();
+    }
+    for (const auto* t : {&a, &dt, &b, &c, &x}) u32_numel(*t, "mamba input");
+    u32_numel(state, "mamba state");
+    DL_CHECK(vx_mamba_selective_scan_state(
+        current_queue(), (uint64_t)(uintptr_t)a.data_ptr(),
+        (uint64_t)(uintptr_t)dt.data_ptr(), (uint64_t)(uintptr_t)b.data_ptr(),
+        (uint64_t)(uintptr_t)c.data_ptr(), (uint64_t)(uintptr_t)x.data_ptr(),
+        (uint64_t)(uintptr_t)out.data_ptr(), initial_ptr,
+        (uint64_t)(uintptr_t)state.data_ptr(), batch, channels, seqlen,
+        u32_dim(dstate, "mamba dstate")));
+    note_device_work();
+    return std::make_tuple(out, state);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_vortex_ops();
+    auto* defs = new torch::Library(torch::Library::DEF, "vortex", std::nullopt,
+                                    __FILE__, __LINE__);
+    defs->def("rope(Tensor input) -> Tensor");
+    defs->def("swiglu(Tensor gate, Tensor up) -> Tensor");
+    defs->def("kv_append_(Tensor(a!) cache, Tensor values, int base) -> Tensor(a!)");
+    defs->def("selective_scan(Tensor a, Tensor dt, Tensor b, Tensor c, Tensor x, Tensor? initial=None) -> (Tensor, Tensor)");
+    auto* ops = new torch::Library(torch::Library::IMPL, "vortex",
+                                   c10::DispatchKey::PrivateUse1, __FILE__, __LINE__);
+    ops->impl("rope", &llm_rope_impl);
+    ops->impl("swiglu", &llm_swiglu_impl);
+    ops->impl("kv_append_", &llm_kv_append_impl);
+    ops->impl("selective_scan", &mamba_scan_impl);
     m.def("load_ops", &load_ops,
           "initialize the vortex backend (allocator + kernel image)");
     m.def("stats", &stats_snapshot,

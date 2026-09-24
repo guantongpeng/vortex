@@ -199,6 +199,7 @@ LLM_SWI := 32
 LLM_EMB := 32
 LLM_KV := 32
 MAMBA_SZ := 64
+MAMBA_STATE_SZ := 80
 RNG_SZ := 32
 else
 MX_PACK := 24
@@ -213,6 +214,7 @@ LLM_SWI := 16
 LLM_EMB := 20
 LLM_KV := 20
 MAMBA_SZ := 40
+MAMBA_STATE_SZ := 48
 RNG_SZ := 28
 endif
 VXBIN_RULE = echo '$(2)' > $(1)_meta.json && \
@@ -223,7 +225,7 @@ NVFP4_META := [{"name": "nvfp4_scales_kernel", "args_size": $(N4_PACK)}, {"name"
 SPARSE24_META := [{"name": "sparse24_prune_kernel", "args_size": $(SP_PRUNE)}, {"name": "sparse24_gemm_kernel", "args_size": $(SP_GEMM), "static_lmem_bytes": 1024, "max_block": [16, 1, 1]}]
 ATTN_META := [{"name": "attn_forward_kernel", "args_size": $(ATTN_SZ)}]
 LLM_META := [{"name": "llm_rope_kernel", "args_size": $(LLM_ROPE)}, {"name": "llm_swiglu_kernel", "args_size": $(LLM_SWI)}, {"name": "llm_embedding_kernel", "args_size": $(LLM_EMB)}, {"name": "llm_kv_append_kernel", "args_size": $(LLM_KV)}]
-MAMBA_META := [{"name": "mamba_scan_kernel", "args_size": $(MAMBA_SZ)}]
+MAMBA_META := [{"name": "mamba_scan_kernel", "args_size": $(MAMBA_SZ), "static_lmem_bytes": 64, "max_block": [16, 1, 1]}, {"name": "mamba_state_kernel", "args_size": $(MAMBA_STATE_SZ), "static_lmem_bytes": 64, "max_block": [16, 1, 1]}]
 RNG_META := [{"name": "rng_philox4x32_uniform_kernel", "args_size": $(RNG_SZ)}]
 
 mxfp8.vxbin: $(SRC_DIR)/mxfp8_kernels.hip $(SRC_DIR)/mxfp8_args.h $(SRC_DIR)/quant_fp8.h $(VORTEX_HOME)/ci/hipcc_vortex.py
