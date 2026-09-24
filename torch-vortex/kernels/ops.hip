@@ -124,6 +124,46 @@ __global__ void sort_kernel(sort_args_t* arg) {
     }
 }
 
+__global__ void group_norm_kernel(group_norm_args_t* arg) {
+    const uint32_t group_id = blockIdx.x;
+    const uint32_t total_groups = arg->n * arg->groups;
+    if (group_id >= total_groups || threadIdx.x != 0) {
+        return;
+    }
+    const uint32_t batch = group_id / arg->groups;
+    const uint32_t group = group_id % arg->groups;
+    const uint32_t channels = arg->c / arg->groups;
+    const uint32_t channel0 = group * channels;
+    const uint32_t span = channels * arg->h * arg->w;
+    const size_t base = ((size_t)batch * arg->c + channel0) * arg->h * arg->w;
+    const float* src = (const float*)(uintptr_t)arg->src + base;
+    float* dst = (float*)(uintptr_t)arg->dst + base;
+    float sum = 0.0f;
+    for (uint32_t i = 0; i < span; ++i) {
+        sum += src[i];
+    }
+    const float mean = sum / (float)span;
+    float sq = 0.0f;
+    for (uint32_t i = 0; i < span; ++i) {
+        const float d = src[i] - mean;
+        sq += d * d;
+    }
+    const float inv = 1.0f / sqrtf(sq / (float)span + arg->eps);
+    for (uint32_t ch = 0; ch < channels; ++ch) {
+        const uint32_t c = channel0 + ch;
+        const float scale = arg->weight
+                                ? ((const float*)(uintptr_t)arg->weight)[c]
+                                : 1.0f;
+        const float shift = arg->bias
+                                ? ((const float*)(uintptr_t)arg->bias)[c]
+                                : 0.0f;
+        for (uint32_t i = 0; i < arg->h * arg->w; ++i) {
+            const uint32_t offset = ch * arg->h * arg->w + i;
+            dst[offset] = (src[offset] - mean) * inv * scale + shift;
+        }
+    }
+}
+
 // The index representation ATen wants, from the one the DL reduce produces.
 // Pure conversion: one thread per index, grid-stride like everything here.
 __global__ void widen_u32_i64_kernel(widen_args_t* arg) {

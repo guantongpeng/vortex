@@ -150,7 +150,8 @@
 - [x] FP32 `amin` 与 `amin.out`，采用独立静态 MIN reduction kernel；详见 [`p2_05_amin.md`](p2_05_amin.md)。
 - [x] FP32 `min`、`min.dim`、`argmin` 及 value/index 配对；详见 [`p2_06_min_argmin.md`](p2_06_min_argmin.md)。
 - [x] FP32 `nll_loss_forward` 的 none/sum/mean、weight、ignore_index 与越界校验；详见 [`p2_13_nll_loss.md`](p2_13_nll_loss.md)。
-- [ ] `interpolate`、`ceil_mode`、`divisor_override`、`group_norm`。
+- [x] FP32 `group_norm` 设备 kernel，支持任意空间 rank、独立 affine 和空 batch；详见 [`p2_22_group_norm.md`](p2_22_group_norm.md)。
+- [ ] `interpolate`、pool `ceil_mode`/其余形态仍待补齐。
 - [ ] stride-aware elementwise/reduction，避免转置和非连续输入先拷贝成连续布局。
 - [ ] cast、clone/contiguous、transpose/permute/slice/select/expand、dtype promotion 和 bool/int64 数据路径。
 - [x] `arange` 的 int64/int32/float32 设备端生成、正负步长和空范围边界；double、half/bfloat16、bool、复数与 `out=` 仍明确拒绝，详见 [`p2_15_arange.md`](p2_15_arange.md)。

@@ -2671,6 +2671,49 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
     return std::make_tuple(out, empty_aux, empty_aux);
 }
 
+static torch::Tensor group_norm_impl(
+    const torch::Tensor& input, int64_t num_groups,
+    const std::optional<torch::Tensor>& weight,
+    const std::optional<torch::Tensor>& bias, double eps, bool cudnn_enabled) {
+    (void)cudnn_enabled;
+    check_vortex_f32(input, "group_norm.input");
+    TORCH_CHECK(input.dim() >= 2,
+                "torch_vortex: group_norm needs at least two dimensions");
+    const int64_t c = input.size(1);
+    TORCH_CHECK(num_groups > 0 && c > 0 && c % num_groups == 0,
+                "torch_vortex: group_norm groups must divide positive channels");
+    auto affine_addr = [&](const std::optional<torch::Tensor>& t,
+                           const char* what) -> uint64_t {
+        if (!t.has_value() || !t->defined()) {
+            return 0;
+        }
+        check_cnn_f32(*t, what, 1);
+        TORCH_CHECK(t->numel() == c, "torch_vortex: group_norm ", what,
+                    " must have one value per channel");
+        return (uint64_t)(uintptr_t)t->data_ptr();
+    };
+    group_norm_args_t args = {};
+    args.weight = affine_addr(weight, "weight");
+    args.bias = affine_addr(bias, "bias");
+    args.n = u32_dim(input.size(0), "group_norm batch");
+    args.c = u32_dim(c, "group_norm channels");
+    args.h = checked_product(input.sizes(), 2, input.dim(), "group_norm spatial span");
+    args.w = 1;
+    args.groups = u32_dim(num_groups, "group_norm groups");
+    args.eps = (float)eps;
+    u32_numel(input, "group_norm input");
+    const uint32_t grid = u32_dim(input.size(0) * num_groups, "group_norm grid");
+    auto out = torch::empty_like(input);
+    if (input.numel() == 0) {
+        ++g_stats.skipped_launches;
+        return out;
+    }
+    args.dst = (uint64_t)(uintptr_t)out.data_ptr();
+    args.src = (uint64_t)(uintptr_t)input.data_ptr();
+    launch(h_group_norm_kernel, args, grid, 1, 1, 1);
+    return out;
+}
+
 // ---- layer norm / rms norm ------------------------------------------------
 //
 // Both normalise over the trailing dims, which is exactly the (rows, cols)
@@ -3238,6 +3281,7 @@ void register_vortex_ops() {
 #undef VX_REGISTER_UNARY
     VX_IMPL("convolution", &convolution_impl);
     VX_IMPL("native_batch_norm", &native_batch_norm_impl);
+    VX_IMPL("group_norm", &group_norm_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API
     VX_IMPL("native_layer_norm", &native_layer_norm_impl);
     VX_IMPL("rms_norm", &rms_norm_impl);
