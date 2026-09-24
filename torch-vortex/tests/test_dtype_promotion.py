@@ -14,3 +14,12 @@ def test_float64_promotion_keeps_output_dtype(backend):
     got = f32 + f64
     assert got.dtype == torch.float64
     torch.testing.assert_close(got.cpu(), torch.tensor([4.0, 6.0], dtype=torch.float64))
+
+
+def test_integer_binary_promotion(backend):
+    a = torch.tensor([1, 2, 7], dtype=torch.int32)
+    b = torch.tensor([3, 5, 2], dtype=torch.int64)
+    got = a.to("vortex") + b.to("vortex")
+    want = a + b
+    assert got.dtype == want.dtype
+    torch.testing.assert_close(got.cpu(), want)
