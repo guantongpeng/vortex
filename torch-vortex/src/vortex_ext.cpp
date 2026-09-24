@@ -746,6 +746,15 @@ void check_vortex_f32(const torch::Tensor& t, const char* what) {
                 "torch_vortex: ", what, " must be contiguous in v1");
 }
 
+void check_elementwise_f32(const torch::Tensor& t, const char* what) {
+    TORCH_CHECK(t.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: ", what, " is on ", t.device(),
+                " rather than the vortex device");
+    TORCH_CHECK(t.scalar_type() == at::kFloat,
+                "torch_vortex: ", what, " must be float32 in v1, got ",
+                t.scalar_type());
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -2081,6 +2090,17 @@ static bool is_host_scalar(const torch::Tensor& t) {
     return t.device().type() == c10::DeviceType::CPU && t.dim() == 0;
 }
 
+static torch::Tensor contiguous_empty(c10::IntArrayRef sizes,
+                                      const torch::TensorOptions& options) {
+    std::vector<int64_t> strides(sizes.size());
+    int64_t stride = 1;
+    for (size_t i = sizes.size(); i-- > 0;) {
+        strides[i] = stride;
+        stride *= sizes[i];
+    }
+    return torch::empty_strided(sizes, strides, options);
+}
+
 // Right-aligned broadcasting, the rule ATen uses. Returns false when the
 // shapes do not broadcast; the caller has already produced a better message
 // via at::infer_size, so this only has to agree with it. A broadcast
@@ -2134,16 +2154,17 @@ static void launch_elementwise(const torch::Tensor& a, const torch::Tensor& b,
     const uint64_t dst = (uint64_t)(uintptr_t)out.data_ptr();
     const uint32_t n = u32_numel(out, "elementwise output");
     if (is_host_scalar(b)) {
-        launch_scalar_op(dst, (uint64_t)(uintptr_t)a.data_ptr(),
+        auto src = a.is_contiguous() ? a : a.contiguous();
+        launch_scalar_op(dst, (uint64_t)(uintptr_t)src.data_ptr(),
                          b.item<float>(), n, op, 0);
     } else if (is_host_scalar(a)) {
-        launch_scalar_op(dst, (uint64_t)(uintptr_t)b.data_ptr(),
+        auto src = b.is_contiguous() ? b : b.contiguous();
+        launch_scalar_op(dst, (uint64_t)(uintptr_t)src.data_ptr(),
                          a.item<float>(), n, op, 1);
-    } else if (a.sizes() == b.sizes()) {
-        // the common case, and the kernel shape that is known-good
-        launch_binary_op(dst, (uint64_t)(uintptr_t)a.data_ptr(),
-                         (uint64_t)(uintptr_t)b.data_ptr(), n, op);
     } else {
+        // The broadcast kernel accepts byte strides, including the equal-shape
+        // case. Keeping one path here is what makes transpose/slice operands
+        // behave like their contiguous counterparts.
         launch_broadcast_op(a, b, out, op);
     }
 }
@@ -2154,12 +2175,12 @@ static void check_elementwise(const torch::Tensor& a, const torch::Tensor& b,
     const bool b_scalar = is_host_scalar(b);
     TORCH_CHECK(!(a_scalar && b_scalar), "torch_vortex: ", name,
                 " with two host scalars should have been folded by torch");
-    check_vortex_f32(a_scalar ? b : a, name);
+    check_elementwise_f32(a_scalar ? b : a, name);
     if (!a_scalar && !b_scalar) {
         // at::infer_size is ATen's own broadcasting rule, so a shape it
         // rejects is rejected with ATen's message rather than ours.
         at::infer_size(a.sizes(), b.sizes());
-        check_vortex_f32(b, name);
+        check_elementwise_f32(b, name);
     }
 }
 
@@ -2168,7 +2189,8 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
     check_elementwise(a, b, name);
     const bool a_scalar = is_host_scalar(a), b_scalar = is_host_scalar(b);
     auto out = (a_scalar || b_scalar)
-                   ? torch::empty_like(a_scalar ? b : a)
+                   ? contiguous_empty((a_scalar ? b : a).sizes(),
+                                      (a_scalar ? b : a).options())
                    : torch::empty(at::infer_size(a.sizes(), b.sizes()),
                                   a.options());
     launch_elementwise(a, b, out, op);
@@ -2177,9 +2199,15 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
 
 static torch::Tensor& binary_op_(torch::Tensor& self, const torch::Tensor& other,
                                  uint32_t op, const char* name) {
-    check_vortex_f32(self, name);
+    check_elementwise_f32(self, name);
+    if (!self.is_contiguous()) {
+        auto tmp = contiguous_empty(self.sizes(), self.options());
+        launch_elementwise(self, other, tmp, op);
+        self.copy_(tmp);
+        return self;
+    }
     if (!is_host_scalar(other)) {
-        check_vortex_f32(other, name);
+        check_elementwise_f32(other, name);
         // broadcasting is allowed, but only if it lands exactly on self --
         // growing in place is what the out-of-place form is for
         TORCH_CHECK(at::infer_size(self.sizes(), other.sizes()) == self.sizes(),
@@ -2193,9 +2221,10 @@ static torch::Tensor& binary_op_(torch::Tensor& self, const torch::Tensor& other
 
 // Scale a tensor by a host constant, one kernel, used only for alpha != 1.
 static torch::Tensor scaled_by(const torch::Tensor& t, double k) {
-    auto out = torch::empty_like(t);
+    auto src = t.is_contiguous() ? t : t.contiguous();
+    auto out = contiguous_empty(t.sizes(), t.options());
     launch_scalar_op((uint64_t)(uintptr_t)out.data_ptr(),
-                     (uint64_t)(uintptr_t)t.data_ptr(), (float)k,
+                     (uint64_t)(uintptr_t)src.data_ptr(), (float)k,
                      u32_numel(out, "scaled"), VX_PRIM_BINARY_MUL, 0);
     return out;
 }
@@ -2251,12 +2280,17 @@ static torch::Tensor& alpha_scaled_op_(torch::Tensor& self, const torch::Tensor&
                                 uint32_t op, const c10::Scalar& alpha,
                                 const char* name) {
     check_alpha(alpha);
+    if (!self.is_contiguous()) {
+        auto tmp = alpha_scaled_op(self, other, op, alpha, name);
+        self.copy_(tmp);
+        return self;
+    }
     const double k = alpha.to<double>();
     if (k == 1.0) {
         return binary_op_(self, other, op, name);
     }
     if (is_host_scalar(other)) {
-        check_vortex_f32(self, name);
+        check_elementwise_f32(self, name);
         launch_scalar_op((uint64_t)(uintptr_t)self.data_ptr(),
                          (uint64_t)(uintptr_t)self.data_ptr(),
                          (float)(other.item<double>() * k),
@@ -2368,10 +2402,11 @@ static std::tuple<torch::Tensor, torch::Tensor> native_dropout_impl(
 
 static torch::Tensor unary_op(const torch::Tensor& self, uint32_t op,
                               const char* name) {
-    check_vortex_f32(self, name);
-    auto out = torch::empty_like(self);
+    check_elementwise_f32(self, name);
+    auto src = self.is_contiguous() ? self : self.contiguous();
+    auto out = contiguous_empty(self.sizes(), self.options());
     launch_unary_op((uint64_t)(uintptr_t)out.data_ptr(),
-                    (uint64_t)(uintptr_t)self.data_ptr(),
+                    (uint64_t)(uintptr_t)src.data_ptr(),
                     u32_numel(out, name), op);
     return out;
 }
@@ -2380,7 +2415,16 @@ static torch::Tensor unary_op(const torch::Tensor& self, uint32_t op,
 // because each thread reads and writes the same index.
 static torch::Tensor& unary_op_(torch::Tensor& self, uint32_t op,
                                 const char* name) {
-    check_vortex_f32(self, name);
+    check_elementwise_f32(self, name);
+    if (!self.is_contiguous()) {
+        auto src = self.contiguous();
+        auto tmp = contiguous_empty(self.sizes(), self.options());
+        launch_unary_op((uint64_t)(uintptr_t)tmp.data_ptr(),
+                        (uint64_t)(uintptr_t)src.data_ptr(),
+                        u32_numel(tmp, name), op);
+        self.copy_(tmp);
+        return self;
+    }
     launch_unary_op((uint64_t)(uintptr_t)self.data_ptr(),
                     (uint64_t)(uintptr_t)self.data_ptr(),
                     u32_numel(self, name), op);

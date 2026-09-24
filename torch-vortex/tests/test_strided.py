@@ -24,7 +24,6 @@ read pattern; a strided *destination* is a write pattern, and it is what
 refusing it (as v1 did) made that expression fail.
 """
 
-import pytest
 import torch
 
 from helpers import assert_matches_cpu
@@ -119,13 +118,12 @@ def test_strided_copy_round_trip_is_exact(backend):
     assert torch.equal(back, X.transpose(1, 2))
 
 
-def test_ops_still_require_contiguity(backend):
-    """The elementwise kernels index linearly, so a strided input is refused.
-
-    Supporting strided elementwise means stride-aware indexing in every
-    kernel; until then the boundary has to stay loud rather than being
-    papered over with an implicit copy.
-    """
-    vx = v(torch.randn(4, 6))
-    with pytest.raises(RuntimeError):
-        vx.t() + vx.t()
+def test_elementwise_ops_preserve_strided_semantics(backend):
+    x = torch.randn(4, 6)
+    vx = v(x).t()
+    torch.testing.assert_close((vx + vx).cpu(), x.t() + x.t())
+    torch.testing.assert_close((vx + 1.5).cpu(), x.t() + 1.5)
+    torch.testing.assert_close(torch.relu(vx).cpu(), torch.relu(x.t()))
+    got = vx.clone()
+    got.add_(2.0)
+    torch.testing.assert_close(got.cpu(), x.t() + 2.0)
