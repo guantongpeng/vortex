@@ -2,7 +2,7 @@
 
 ## 实现
 
-`aten::clone` 现在在 Vortex PrivateUse1 后端有显式实现。实现通过
+`aten::clone` 和 `aten::contiguous` 现在在 Vortex PrivateUse1 后端有显式实现。实现通过
 `empty_like` 分配目标 storage，再复用设备端 `copy_` 路径完成复制，因此
 不会把数据拉回 CPU，也不会让结果与输入共享 storage。默认的
 `MemoryFormat::Preserve` 保留非连续、无重叠 view 的 stride；调用方显式传入
@@ -15,6 +15,7 @@
 - clone 的独立 storage 和写入隔离；
 - 转置 view 的默认 stride 保留；
 - 显式 contiguous memory format。
+- contiguous 对已有连续 tensor 返回原 alias，对转置 view 生成独立连续 storage。
 
 在 RV64、SimX、PyTorch 2.14、Python 3.10 的 `build_dl64` 中，3 项测试通过。
 

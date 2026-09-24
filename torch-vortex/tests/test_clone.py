@@ -35,3 +35,13 @@ def test_clone_can_request_contiguous_memory_format(backend):
     y = x.clone(memory_format=torch.contiguous_format)
     assert y.is_contiguous()
     assert torch.equal(y.cpu(), x.cpu())
+
+
+def test_contiguous_returns_alias_only_when_already_contiguous(backend):
+    x = v(torch.arange(12, dtype=torch.float32).reshape(3, 4))
+    assert x.contiguous().data_ptr() == x.data_ptr()
+    t = x.t()
+    y = t.contiguous()
+    assert y.data_ptr() != t.data_ptr()
+    assert y.is_contiguous()
+    assert torch.equal(y.cpu(), t.cpu())

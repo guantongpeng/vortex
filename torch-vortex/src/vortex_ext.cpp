@@ -1072,6 +1072,16 @@ static torch::Tensor clone_impl(
     return out;
 }
 
+static torch::Tensor contiguous_impl(const torch::Tensor& self,
+                                     at::MemoryFormat memory_format) {
+    TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
+                "torch_vortex: contiguous on non-vortex tensor");
+    if (self.is_contiguous(memory_format)) {
+        return self;
+    }
+    return clone_impl(self, memory_format);
+}
+
 static torch::Tensor& fill__impl(torch::Tensor& self, const c10::Scalar& value) {
     check_vortex_f32(self, "fill_");
     fill_args_t args = {(uint64_t)(uintptr_t)self.data_ptr(),
@@ -3242,6 +3252,7 @@ void register_vortex_ops() {
     VX_IMPL("copy_", &copy_impl);
     VX_IMPL("_copy_from", &copy_from_impl);
     VX_IMPL("clone", &clone_impl);
+    VX_IMPL("contiguous", &contiguous_impl);
     VX_IMPL("fill_.Scalar", &fill__impl);
     VX_IMPL("zero_", &zero__impl);
     VX_IMPL("view", &view_impl);
