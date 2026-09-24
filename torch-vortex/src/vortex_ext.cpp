@@ -2229,6 +2229,7 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                                uint32_t op, const char* name) {
     torch::Tensor aa = a, bb = b;
     const bool a_scalar = is_host_scalar(a), b_scalar = is_host_scalar(b);
+    std::optional<c10::ScalarType> output_cast;
     bool output_double = (!a_scalar && a.scalar_type() == at::kDouble) ||
                          (!b_scalar && b.scalar_type() == at::kDouble);
     if (!a_scalar && !b_scalar) {
@@ -2236,7 +2237,15 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                         b.device().type() == c10::DeviceType::PrivateUse1,
                     "torch_vortex: ", name,
                     " expects both tensors on the vortex device");
-        if ((a.scalar_type() == at::kFloat || a.scalar_type() == at::kDouble) &&
+        const bool a_integral = at::isIntegralType(a.scalar_type(), true);
+        const bool b_integral = at::isIntegralType(b.scalar_type(), true);
+        TORCH_CHECK(!(a_integral && b_integral && op == VX_PRIM_BINARY_DIV),
+                    "torch_vortex: integer division requires a floating result");
+        if (a_integral && b_integral) {
+            output_cast = at::promote_types(a.scalar_type(), b.scalar_type());
+            aa = cast_device_f32(a, name);
+            bb = cast_device_f32(b, name);
+        } else if ((a.scalar_type() == at::kFloat || a.scalar_type() == at::kDouble) &&
             (b.scalar_type() == at::kFloat || b.scalar_type() == at::kDouble)) {
             output_double = a.scalar_type() == at::kDouble ||
                             b.scalar_type() == at::kDouble;
@@ -2261,14 +2270,24 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                         " requires at least one float32 operand for promotion");
         }
     } else if (!a_scalar && a.scalar_type() != at::kFloat) {
-        TORCH_CHECK(b_scalar && at::isFloatingType(b.scalar_type()),
-                    "torch_vortex: ", name,
-                    " integer/bool tensor with an integral scalar is unsupported");
+        TORCH_CHECK(b_scalar && (at::isFloatingType(b.scalar_type()) ||
+                                 at::isIntegralType(b.scalar_type(), true)),
+                    "torch_vortex: ", name, " unsupported scalar type");
+        TORCH_CHECK(!(at::isIntegralType(a.scalar_type(), true) &&
+                      at::isIntegralType(b.scalar_type(), true) &&
+                      op == VX_PRIM_BINARY_DIV),
+                    "torch_vortex: integer division requires a floating result");
+        if (at::isIntegralType(b.scalar_type(), true)) output_cast = a.scalar_type();
         aa = cast_device_f32(a, name);
     } else if (!b_scalar && b.scalar_type() != at::kFloat) {
-        TORCH_CHECK(a_scalar && at::isFloatingType(a.scalar_type()),
-                    "torch_vortex: ", name,
-                    " integer/bool tensor with an integral scalar is unsupported");
+        TORCH_CHECK(a_scalar && (at::isFloatingType(a.scalar_type()) ||
+                                 at::isIntegralType(a.scalar_type(), true)),
+                    "torch_vortex: ", name, " unsupported scalar type");
+        TORCH_CHECK(!(at::isIntegralType(a.scalar_type(), true) &&
+                      at::isIntegralType(b.scalar_type(), true) &&
+                      op == VX_PRIM_BINARY_DIV),
+                    "torch_vortex: integer division requires a floating result");
+        if (at::isIntegralType(a.scalar_type(), true)) output_cast = b.scalar_type();
         bb = cast_device_f32(b, name);
     }
     check_elementwise(aa, bb, name);
@@ -2279,8 +2298,9 @@ static torch::Tensor binary_op(const torch::Tensor& a, const torch::Tensor& b,
                    : contiguous_empty(at::infer_size(aa.sizes(), bb.sizes()),
                                       aa.options().dtype(at::kFloat));
     launch_elementwise(aa, bb, compute, op);
-    if (!output_double) return compute;
-    auto out = contiguous_empty(compute.sizes(), compute.options().dtype(at::kDouble));
+    if (!output_double && !output_cast.has_value()) return compute;
+    auto out_dtype = output_cast.value_or(at::kDouble);
+    auto out = contiguous_empty(compute.sizes(), compute.options().dtype(out_dtype));
     copy_impl(out, compute, false);
     return out;
 }
