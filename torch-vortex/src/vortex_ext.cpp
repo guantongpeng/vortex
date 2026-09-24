@@ -2936,6 +2936,59 @@ static torch::Tensor avg_pool2d_impl(const torch::Tensor& self,
 }
 
 
+static torch::Tensor pool1d_view(const torch::Tensor& self,
+                                 c10::IntArrayRef kernel,
+                                 c10::IntArrayRef stride,
+                                 c10::IntArrayRef padding, uint32_t op,
+                                 bool ceil_mode, uint32_t divisor,
+                                 uint32_t dilation,
+                                 torch::Tensor* indices_out = nullptr) {
+    check_cnn_f32(self, "pool.input", 3);
+    TORCH_CHECK(kernel.size() == 1 && padding.size() <= 1 && stride.size() <= 1,
+                "torch_vortex: pool1d expects one-dimensional parameters");
+    auto shaped = self.reshape({self.size(0), self.size(1), 1, self.size(2)});
+    std::vector<int64_t> k = {1, kernel[0]};
+    std::vector<int64_t> st = stride.size() ? std::vector<int64_t>{1, stride[0]} : std::vector<int64_t>{};
+    std::vector<int64_t> pad = padding.size() ? std::vector<int64_t>{0, padding[0]} : std::vector<int64_t>{};
+    torch::Tensor indices;
+    auto out4 = pool_impl(shaped, k, st, pad, op, ceil_mode, divisor, 1, dilation,
+                          indices_out ? &indices : nullptr);
+    if (indices_out) *indices_out = indices.reshape({out4.size(0), out4.size(1), out4.size(3)});
+    return out4.reshape({out4.size(0), out4.size(1), out4.size(3)});
+}
+
+static torch::Tensor max_pool1d_impl(const torch::Tensor& self,
+                                     c10::IntArrayRef kernel,
+                                     c10::IntArrayRef stride,
+                                     c10::IntArrayRef padding,
+                                     c10::IntArrayRef dilation,
+                                     bool ceil_mode) {
+    TORCH_CHECK(dilation.size() <= 1 && (!dilation.size() || dilation[0] > 0),
+                "torch_vortex: pool1d dilation must be positive");
+    return pool1d_view(self, kernel, stride, padding, 0, ceil_mode, 0,
+                       dilation.size() ? u32_dim(dilation[0], "pool dilation") : 1);
+}
+
+static std::tuple<torch::Tensor, torch::Tensor> max_pool1d_with_indices_impl(
+    const torch::Tensor& self, c10::IntArrayRef kernel,
+    c10::IntArrayRef stride, c10::IntArrayRef padding,
+    c10::IntArrayRef dilation, bool ceil_mode) {
+    torch::Tensor indices;
+    auto out = pool1d_view(self, kernel, stride, padding, 0, ceil_mode, 0,
+                           dilation.size() ? u32_dim(dilation[0], "pool dilation") : 1,
+                           &indices);
+    return std::make_tuple(out, indices);
+}
+
+static torch::Tensor avg_pool1d_impl(const torch::Tensor& self,
+                                     c10::IntArrayRef kernel,
+                                     c10::IntArrayRef stride,
+                                     c10::IntArrayRef padding,
+                                     bool ceil_mode, bool count_include_pad) {
+    return pool1d_view(self, kernel, stride, padding,
+                       count_include_pad ? 2u : 1u, ceil_mode, 0, 1);
+}
+
 static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
                                               c10::SymIntArrayRef output_size) {
     check_cnn_f32(self, "pool.input", 4);
@@ -2944,6 +2997,14 @@ static torch::Tensor adaptive_avg_pool2d_impl(const torch::Tensor& self,
                 "torch_vortex: adaptive_avg_pool2d only output (1,1) in v1");
     const auto& s = self.sizes();
     return pool_impl(self, {(int64_t)s[2], (int64_t)s[3]}, {}, {}, 1, false, 0, 1, 1);
+}
+
+static torch::Tensor adaptive_avg_pool1d_impl(const torch::Tensor& self,
+                                              at::IntArrayRef output_size) {
+    check_cnn_f32(self, "pool.input", 3);
+    TORCH_CHECK(output_size.size() == 1 && output_size[0] == 1,
+                "torch_vortex: adaptive_avg_pool1d only output (1) in v1");
+    return pool1d_view(self, {self.size(2)}, {}, {}, 1, false, 0, 1);
 }
 
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm_impl(
@@ -3659,7 +3720,11 @@ void register_vortex_ops() {
     VX_IMPL("max_pool2d", &max_pool2d_impl);
     VX_IMPL("max_pool2d_with_indices", &max_pool2d_with_indices_impl);
     VX_IMPL("avg_pool2d", &avg_pool2d_impl);
+    VX_IMPL("max_pool1d", &max_pool1d_impl);
+    VX_IMPL("max_pool1d_with_indices", &max_pool1d_with_indices_impl);
+    VX_IMPL("avg_pool1d", &avg_pool1d_impl);
 #if VX_HAS_ACCELERATOR_GUARD_API
+    VX_IMPL("adaptive_avg_pool1d", &adaptive_avg_pool1d_impl);
     VX_IMPL("adaptive_avg_pool2d", &adaptive_avg_pool2d_impl);
 #endif
     VX_IMPL("mm", &mm_impl_wrap);
