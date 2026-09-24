@@ -2578,6 +2578,8 @@ VX_UNARY_OP(sigmoid, VX_PRIM_OP_SIGMOID, "sigmoid")
 VX_UNARY_OP(tanh, VX_PRIM_OP_TANH, "tanh")
 VX_UNARY_OP(reciprocal, VX_PRIM_OP_RECIPROCAL, "reciprocal")
 VX_UNARY_OP(silu, VX_PRIM_OP_SILU, "silu")
+VX_UNARY_OP(cos, VX_PRIM_OP_COS, "cos")
+VX_UNARY_OP(sin, VX_PRIM_OP_SIN, "sin")
 #undef VX_UNARY_OP
 
 // ---------------------------------------------------------------------------
@@ -3610,6 +3612,8 @@ void register_vortex_ops() {
     VX_REGISTER_UNARY(tanh);
     VX_REGISTER_UNARY(reciprocal);
     VX_REGISTER_UNARY(silu);
+    VX_REGISTER_UNARY(cos);
+    VX_REGISTER_UNARY(sin);
     VX_IMPL("gelu", &gelu_impl);
     VX_IMPL("gelu_", &gelu__impl);
 #undef VX_REGISTER_UNARY

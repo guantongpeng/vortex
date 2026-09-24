@@ -46,6 +46,8 @@ PRIM_UNARY_OP_IS(SIGMOID);
 PRIM_UNARY_OP_IS(TANH);
 PRIM_UNARY_OP_IS(RECIPROCAL);
 PRIM_UNARY_OP_IS(GELU_ERF);
+PRIM_UNARY_OP_IS(COS);
+PRIM_UNARY_OP_IS(SIN);
 #undef PRIM_UNARY_OP_IS
 
 #define PRIM_BINARY_OP_IS(name)                                               \
@@ -178,7 +180,8 @@ vx_prim_status vx_prim_unary(vx_queue_h q, vx_prim_op op,
     if (!g_prim.module) return VX_PRIM_ERR_NOT_INITIALIZED;
     if (!in || !out || n == 0) return VX_PRIM_ERR_BAD_ARGS;
     // The unary half of vx_prim_op, which ends where the reductions start.
-    if (op > VX_PRIM_OP_GELU_ERF) return VX_PRIM_ERR_BAD_ARGS;
+    if (op != VX_PRIM_OP_COS && op != VX_PRIM_OP_SIN &&
+        op > VX_PRIM_OP_GELU_ERF) return VX_PRIM_ERR_BAD_ARGS;
     vx_prim_unary_args_t args = {};
     args.in = (vx_dl_ptr_t)in;
     args.out = (vx_dl_ptr_t)out;

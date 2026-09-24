@@ -61,6 +61,8 @@ typedef enum vx_prim_op {
     VX_PRIM_OP_MEAN = 16,
     VX_PRIM_OP_MIN = 17,
     VX_PRIM_OP_ARGMIN = 18,     // index out; see vx_prim_index_reduce
+    VX_PRIM_OP_COS = 19,
+    VX_PRIM_OP_SIN = 20,
 } vx_prim_op;
 
 typedef enum vx_prim_binary_op {

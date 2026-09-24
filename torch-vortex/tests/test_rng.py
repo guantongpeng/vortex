@@ -27,3 +27,13 @@ def test_philox_state_round_trip(backend):
     expected = torch_vortex.rand(4).cpu()
     torch_vortex.set_rng_state(state)
     assert torch.equal(expected, torch_vortex.rand(4).cpu())
+
+
+def test_randn_reproducible_and_device_computed(backend):
+    torch_vortex.manual_seed(19)
+    first = torch_vortex.randn(32)
+    torch_vortex.manual_seed(19)
+    second = torch_vortex.randn((32,))
+    torch.testing.assert_close(first.cpu(), second.cpu(), rtol=0, atol=0)
+    assert first.device.type == "vortex"
+    assert backend.stats()["host_numeric_ops"] == 0

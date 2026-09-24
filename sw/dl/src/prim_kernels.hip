@@ -65,6 +65,8 @@ __global__ void prim_unary_kernel(vx_prim_unary_args_t* arg) {
         case VX_PRIM_SIGMOID:    y = 1.0f / (1.0f + expf(-x)); break;
         case VX_PRIM_TANH:       y = tanhf(x);              break;
         case VX_PRIM_RECIPROCAL: y = 1.0f / x;              break;
+        case VX_PRIM_COS:        y = cosf(x);               break;
+        case VX_PRIM_SIN:        y = sinf(x);               break;
         case VX_PRIM_SILU:
             y = x / (1.0f + expf(-x));
             break;

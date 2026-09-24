@@ -355,6 +355,23 @@ def rand(*sizes, device="vortex"):
     return out
 
 
+def randn(*sizes, device="vortex"):
+    """Generate standard-normal float32 values on the Vortex device."""
+    if len(sizes) == 1 and isinstance(sizes[0], (tuple, list)):
+        sizes = tuple(sizes[0])
+    if device != "vortex":
+        raise RuntimeError("torch_vortex.randn only supports device='vortex'")
+    # Box-Muller stays in the device dispatcher: the two unary passes and
+    # elementwise arithmetic are Vortex kernels, so no host numeric fallback
+    # is hidden in this convenience factory.
+    one = torch.tensor(1.0e-7, dtype=torch.float32).to(device)
+    two = torch.tensor(2.0, dtype=torch.float32).to(device)
+    pi = torch.tensor(3.141592653589793, dtype=torch.float32).to(device)
+    u1 = rand(*sizes, device=device) + one
+    u2 = rand(*sizes, device=device)
+    return torch.sqrt(-(two * torch.log(u1))) * torch.cos(two * pi * u2)
+
+
 def arg_sizes():
     """Kernel argument-block sizes this extension was compiled against."""
     return _require_ext().arg_sizes()

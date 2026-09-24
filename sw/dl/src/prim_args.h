@@ -49,6 +49,8 @@ typedef enum {
     VX_PRIM_TANH = 10,
     VX_PRIM_RECIPROCAL = 11,
     VX_PRIM_GELU_ERF = 12,   // torch's default gelu
+    VX_PRIM_COS = 19,
+    VX_PRIM_SIN = 20,
 } vx_prim_op_e;
 
 // Elementwise unary over n FP32 values.
