@@ -44,7 +44,7 @@ __global__ void prim_unary_kernel(vx_prim_unary_args_t* arg) {
         case VX_PRIM_RELU:
             // max(x, 0) with PyTorch's semantics: NaN propagates and -0.0
             // keeps its sign. `x > 0.0f ? x : 0.0f` turns NaN into 0 and
-            // -0.0 into +0.0 (F01 in docs/mydocs/pytorch_plan.md).
+            // -0.0 into +0.0 (F01 in docs/mydocs/05_pytorch/torch_plan.md).
             y = x < 0.0f ? 0.0f : x;
             break;
         case VX_PRIM_GELU_TANH:

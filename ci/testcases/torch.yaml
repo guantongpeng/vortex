@@ -1,4 +1,4 @@
-# torch-vortex PyTorch backend tests (docs/mydocs/pytorch_plan.md, M0+W1).
+# torch-vortex PyTorch backend tests (docs/mydocs/05_pytorch/torch_plan.md, M0+W1).
 #
 # Run from a configured build tree: configure now copies torch-vortex/ into it,
 # so the cases need no source-tree paths beyond VORTEX_HOME. The interpreter is

@@ -76,7 +76,7 @@ using vx_schema_string_view = c10::string_view;
 
 // The device DL library (sw/dl). Ops that have an equivalent there call into
 // it rather than keeping a second copy of the same algorithm -- see W3.1 of
-// docs/mydocs/pytorch_plan.md. Its entry points speak vortex2.h and take this
+// docs/mydocs/05_pytorch/torch_plan.md. Its entry points speak vortex2.h and take this
 // process's device and queue, which is why sw/hip exposes the two accessors.
 #include <vortex/blas.h>
 #include <vortex/dnn.h>
@@ -126,7 +126,7 @@ using vx_schema_string_view = c10::string_view;
 // every launch, transfer, allocation and blocking sync is counted here and
 // exposed as torch_vortex.stats(). Process-global and deliberately not
 // thread-safe: these are diagnostics for single-threaded tests, not a
-// profiler (W7.1 of docs/mydocs/pytorch_plan.md owns that).
+// profiler (W7.1 of docs/mydocs/05_pytorch/torch_plan.md owns that).
 
 namespace {
 
@@ -634,7 +634,7 @@ struct VortexGuardImpl final : public c10::impl::DeviceGuardImplInterface {
     // barrier, so polling with it would grow the queue), and this increment
     // may not change sw/runtime. The base class raises
     // "Backend doesn't support querying streams." rather than answering
-    // wrongly. W2.2 of docs/mydocs/pytorch_plan.md records the gap.
+    // wrongly. W2.2 of docs/mydocs/05_pytorch/torch_plan.md records the gap.
 
     // ---- events ------------------------------------------------------------
     void record(void** event, const c10::Stream& s, const c10::DeviceIndex,
@@ -741,7 +741,7 @@ void check_vortex_f32(const torch::Tensor& t, const char* what) {
                 "torch_vortex: ", what, " is on ", t.device(), " rather than ",
                 "the vortex device; scalar operands (which PyTorch wraps as ",
                 "0-dim CPU tensors) and cross-device operands are unsupported ",
-                "in v1 -- see W3.2 in docs/mydocs/pytorch_plan.md");
+                "in v1 -- see W3.2 in docs/mydocs/05_pytorch/torch_plan.md");
     TORCH_CHECK(t.scalar_type() == at::kFloat,
                 "torch_vortex: ", what, " must be float32 in v1, got ",
                 t.scalar_type());
@@ -1716,7 +1716,7 @@ static void check_reduce_dims(const torch::Tensor& self,
     }
     TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
                 "dimensions at once is unsupported in v1; reduce one at a "
-                "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+                "time (W3.2 in docs/mydocs/05_pytorch/torch_plan.md)");
     if (nd == 0) {
         TORCH_CHECK((*dim)[0] == 0 || (*dim)[0] == -1,
                     "torch_vortex: ", name, " dim ", (*dim)[0],
@@ -1744,7 +1744,7 @@ static torch::Tensor reduce_layout(const torch::Tensor& self,
     }
     TORCH_CHECK(dim->size() == 1, "torch_vortex: ", name, " over several "
                 "dimensions at once is unsupported in v1; reduce one at a "
-                "time (W3.2 in docs/mydocs/pytorch_plan.md)");
+                "time (W3.2 in docs/mydocs/05_pytorch/torch_plan.md)");
     if (nd == 0) {
         const int64_t d = (*dim)[0];
         TORCH_CHECK(d == 0 || d == -1, "torch_vortex: ", name, " dim ", d,
@@ -3111,7 +3111,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_batch_norm
     const std::optional<torch::Tensor>& running_var, bool training,
     double momentum, double eps) {
     TORCH_CHECK(!training, "torch_vortex: batch_norm training is unsupported "
-                "(inference only); training is W8.1 in docs/mydocs/pytorch_plan.md");
+                "(inference only); training is W8.1 in docs/mydocs/05_pytorch/torch_plan.md");
     check_cnn_f32(input, "bn.input", 4);
     auto is_def = [](const std::optional<torch::Tensor>& t) {
         return t.has_value() && t->defined();
@@ -3877,7 +3877,7 @@ static void vortex_no_fallback(const c10::OperatorHandle& op,
 // Autograd pass-through for every registered op. Inference only: a gradient
 // taken through a vortex tensor is discarded rather than computed, which
 // torch cannot distinguish from a correct zero gradient. Training is W8.1 of
-// docs/mydocs/pytorch_plan.md; until then this is the honest boundary.
+// docs/mydocs/05_pytorch/torch_plan.md; until then this is the honest boundary.
 // Namespace-wide fallbacks must use the catch-all TORCH_LIBRARY_IMPL(_, ...).
 
 
@@ -3902,7 +3902,7 @@ void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
     // fails with "address range overlaps with existing allocation" -- the
     // process-global registration had already happened, so the correct answer
     // is to do nothing. Loading a *different* image into the same process is
-    // the multi-module problem (W2.4 of docs/mydocs/pytorch_plan.md): the
+    // the multi-module problem (W2.4 of docs/mydocs/05_pytorch/torch_plan.md): the
     // kernels were resolved from the first image, so pretending to switch
     // would silently run the wrong code.
     static std::string loaded_path;
@@ -3911,7 +3911,7 @@ void load_ops(const std::string& vxbin_path, const std::string& dl_dir) {
                     "torch_vortex: this process already loaded the kernel "
                     "image ", loaded_path, ", so it cannot also load ",
                     vxbin_path, ". Two images in one process is W2.4 of "
-                    "docs/mydocs/pytorch_plan.md; until then load one.");
+                    "docs/mydocs/05_pytorch/torch_plan.md; until then load one.");
         return;
     }
 

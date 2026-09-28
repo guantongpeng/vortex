@@ -17,7 +17,7 @@
 
 Exit codes: 0 supported, 1 unsupported, 2 untested (unless --allow-untested).
 Turns "these are environment observations" into a machine-checked statement,
-which is what W0.1 of docs/mydocs/pytorch_plan.md asks for. Deliberately has
+which is what W0.1 of docs/mydocs/05_pytorch/torch_plan.md asks for. Deliberately has
 no third-party dependency so it can run before torch is even importable.
 """
 

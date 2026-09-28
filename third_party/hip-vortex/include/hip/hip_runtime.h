@@ -22,7 +22,7 @@
 // "hostless" execution model: main() runs on the device itself, and the
 // HIP host-side APIs below are device-local shims, not a host runtime.
 //
-// Mapping (see docs/mydocs/p2_1c_hip_vortex_headers.md):
+// Mapping (see docs/mydocs/02_hip/hip_p2_03_hip_headers.md):
 //   __global__/threadIdx/blockIdx/blockDim/gridDim -> vx_spawn.h
 //   __syncthreads                                -> vx_spawn.h barrier
 //   __shfl_*/__ballot/__all/__any                -> vx_vote_*/vx_shfl_*

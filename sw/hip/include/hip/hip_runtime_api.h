@@ -22,7 +22,7 @@
 // asynchronous failures surface at the next synchronization point, never
 // silently.
 //
-// Scope of this first cut (see docs/mydocs/p2_02_libhip_vortex.md):
+// Scope of this first cut (see docs/mydocs/02_hip/hip_p2_04_libhip_vortex.md):
 //   supported     device/context, memory, stream, event, memcpy/memset,
 //                 module + hipModuleLaunchKernel
 //   not supported peer access, graphs, texture/surface, hiprtc,

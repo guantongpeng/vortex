@@ -75,7 +75,7 @@ __global__ void dnn_pool2d_kernel(vx_dnn_pool_args_t* arg) {
     for (uint32_t ox = threadIdx.x; ox < arg->wo; ox += 16) {
         // -INFINITY, not a finite sentinel: -3.4e38f dropped -inf inputs and
         // turned an all-NaN window into that sentinel instead of propagating
-        // NaN (F10 in docs/mydocs/pytorch_plan.md).
+        // NaN (F10 in docs/mydocs/05_pytorch/torch_plan.md).
         float acc = (arg->op == 0) ? -INFINITY : 0.0f;
         uint32_t count = 0;
         int64_t first_y = (int64_t)oy * arg->sh - arg->ph;

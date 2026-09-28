@@ -81,7 +81,7 @@ typedef struct {
 // `hw` is the spatial span H*W and is passed explicitly rather than derived.
 // Deriving it as total/c gives N*H*W, which is the right per-channel span only
 // when N == 1 -- the bug torch-vortex's copy of this kernel had and fixed
-// (F03 in docs/mydocs/pytorch_plan.md).
+// (F03 in docs/mydocs/05_pytorch/torch_plan.md).
 //
 // `var` is the running variance and eps is applied here, so the caller does
 // not have to make a host round-trip to take a square root per channel.

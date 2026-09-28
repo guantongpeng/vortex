@@ -7,7 +7,7 @@
     "",
     "torch-vortex was originally built against torch 2.4.1 on the system Python",
     "3.8. Nothing between 2.4 and 2.14 was ever tested; the 2.4 pitfall notes in",
-    "docs/mydocs/p5_01_torch_vortex.md are archaeology, not documentation.",
+    "docs/mydocs/05_pytorch/torch_p5_01_privateuse1_backend.md are archaeology, not documentation.",
     "xlen 32 is unsupported rather than untested: the host extension is always",
     "LP64, and its arg blocks are host-compiled, so an rv32 image cannot work."
   ],

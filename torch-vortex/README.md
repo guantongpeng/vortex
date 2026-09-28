@@ -57,7 +57,7 @@ r = torch_vortex.rand(4)
 
 ## Running the tests
 
-From a configured build tree (see docs/mydocs/pytorch_plan.md §7):
+From a configured build tree (see docs/mydocs/05_pytorch/torch_plan.md §7):
 
 ```bash
 cd build_torch64

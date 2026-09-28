@@ -119,7 +119,7 @@ typedef enum {
     // No MIN/ARGMIN yet. The kernel body for them is written, but seeding an
     // accumulator from arg->op makes VOLT drop the LMEM store and every
     // reduction in the image returns its seed -- measured, and reproduced by
-    // adding nothing but that seed. See docs/mydocs/p5_10_argmax.md.
+    // adding nothing but that seed. See docs/mydocs/05_pytorch/torch_p5_10_argmax.md.
 } vx_prim_reduce_op_e;
 
 // Row-wise reduce over rows x cols FP32 (row-major, one CTA per row); out[r]

@@ -15,7 +15,7 @@
 
 Every pytest session writes one of these (see tests/conftest.py) so that a
 pass or a failure can always be traced back to an interpreter, a torch build,
-a build tree and a kernel image. W0.1 of docs/mydocs/pytorch_plan.md.
+a build tree and a kernel image. W0.1 of docs/mydocs/05_pytorch/torch_plan.md.
 
 Deliberately does not import torch at module level: `collect()` needs it, but
 this module is also used to describe an environment in which torch is missing
